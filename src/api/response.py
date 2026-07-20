@@ -1,0 +1,168 @@
+"""统一响应封装
+
+所有 API 返回统一格式:
+    成功: {"status": "success", "request_id": "...", "timestamp": "...", "data": {...}}
+    失败: {"status": "error", "request_id": "...", "timestamp": "...",
+           "error_code": "...", "message": "...", "suggestion": "...", "details": {...}}
+"""
+import uuid
+from datetime import datetime
+from typing import Any, Optional
+
+from flask import jsonify
+
+
+# 错误码定义
+class ErrorCode:
+    # 客户端错误 (4xx)
+    AUTH_REQUIRED = "AUTH_REQUIRED"                 # 未提供认证 token
+    AUTH_FAILED = "AUTH_FAILED"                     # 认证 token 无效
+    VALIDATION_ERROR = "VALIDATION_ERROR"           # 参数校验失败
+    DUPLICATE_ORDER = "DUPLICATE_ORDER"             # 60秒内重复下单
+
+    # 服务端错误 (5xx)
+    WINDOW_NOT_FOUND = "WINDOW_NOT_FOUND"           # 交易窗口未找到
+    CONTROL_NOT_FOUND = "CONTROL_NOT_FOUND"         # 控件未找到
+    MODE_SWITCH_FAILED = "MODE_SWITCH_FAILED"       # 限价/市价切换失败
+    OCR_FAILED = "OCR_FAILED"                       # 验证码识别失败
+    INTERNAL_ERROR = "INTERNAL_ERROR"               # 未知异常
+
+    # 队列相关 (503)
+    QUEUE_TIMEOUT = "QUEUE_TIMEOUT"                 # 任务排队超时
+    QUEUE_FULL = "QUEUE_FULL"                       # 队列已满
+
+    # 超时 (504)
+    TASK_TIMEOUT = "TASK_TIMEOUT"                              # 任务超时，恢复成功
+    TASK_TIMEOUT_RECOVERY_FAILED = "TASK_TIMEOUT_RECOVERY_FAILED"  # 任务超时，恢复也失败
+
+
+# HTTP 状态码映射
+HTTP_STATUS = {
+    ErrorCode.AUTH_REQUIRED: 401,
+    ErrorCode.AUTH_FAILED: 401,
+    ErrorCode.VALIDATION_ERROR: 400,
+    ErrorCode.DUPLICATE_ORDER: 409,
+    ErrorCode.WINDOW_NOT_FOUND: 503,
+    ErrorCode.CONTROL_NOT_FOUND: 500,
+    ErrorCode.MODE_SWITCH_FAILED: 500,
+    ErrorCode.OCR_FAILED: 500,
+    ErrorCode.INTERNAL_ERROR: 500,
+    ErrorCode.QUEUE_TIMEOUT: 503,
+    ErrorCode.QUEUE_FULL: 503,
+    ErrorCode.TASK_TIMEOUT: 504,
+    ErrorCode.TASK_TIMEOUT_RECOVERY_FAILED: 504,
+}
+
+
+class ApiError(Exception):
+    """API 业务异常"""
+
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        suggestion: Optional[str] = None,
+        details: Optional[dict] = None,
+        screenshot: Optional[str] = None
+    ):
+        self.error_code = error_code
+        self.message = message
+        self.suggestion = suggestion
+        self.details = details or {}
+        self.screenshot = screenshot
+        super().__init__(message)
+
+
+class TaskTimeoutError(ApiError):
+    """任务超时异常（看门狗触发）"""
+
+    def __init__(self, task_name: str, params: dict, elapsed: float,
+                 screenshot: Optional[str] = None, recovery_error: Optional[str] = None):
+        if recovery_error is None:
+            error_code = ErrorCode.TASK_TIMEOUT
+            message = "任务执行超时，已截图存档并重置下单程序为初始状态"
+            suggestion = (
+                "请立即采取以下检查操作："
+                "1) 调用 GET /today_trades 查询订单是否已提交；"
+                "2) 调用 GET /position 查看持仓变化；"
+                "3) 必要时登录同花顺客户端手动确认"
+            )
+        else:
+            error_code = ErrorCode.TASK_TIMEOUT_RECOVERY_FAILED
+            message = f"任务执行超时，且恢复流程失败: {recovery_error}"
+            suggestion = "请立即人工登录同花顺客户端检查订单状态和持仓，并手动恢复下单程序"
+
+        details = {
+            "task": task_name,
+            "params": params,
+            "elapsed_seconds": elapsed,
+        }
+        super().__init__(error_code, message, suggestion, details, screenshot)
+
+
+def generate_request_id() -> str:
+    """生成唯一请求 ID"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    short_uuid = uuid.uuid4().hex[:8]
+    return f"req_{timestamp}_{short_uuid}"
+
+
+def success_response(data: Any, request_id: Optional[str] = None) -> tuple:
+    """构建成功响应
+
+    Returns:
+        (flask Response, http_status)
+    """
+    return jsonify({
+        "status": "success",
+        "request_id": request_id or generate_request_id(),
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "data": data
+    }), 200
+
+
+def error_response(
+    error_code: str,
+    message: str,
+    request_id: Optional[str] = None,
+    suggestion: Optional[str] = None,
+    details: Optional[dict] = None,
+    screenshot: Optional[str] = None
+) -> tuple:
+    """构建错误响应
+
+    Returns:
+        (flask Response, http_status)
+    """
+    response = {
+        "status": "error",
+        "request_id": request_id or generate_request_id(),
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "error_code": error_code,
+        "message": message,
+    }
+    if suggestion:
+        response["suggestion"] = suggestion
+    if details:
+        response["details"] = details
+    if screenshot:
+        response["screenshot"] = screenshot
+
+    http_status = HTTP_STATUS.get(error_code, 500)
+    return jsonify(response), http_status
+
+
+def error_response_from_exception(e: Exception, request_id: Optional[str] = None) -> tuple:
+    """从异常构建错误响应"""
+    if isinstance(e, ApiError):
+        return error_response(
+            e.error_code, e.message, request_id,
+            e.suggestion, e.details, e.screenshot
+        )
+
+    # 未知异常
+    return error_response(
+        ErrorCode.INTERNAL_ERROR,
+        f"内部错误: {str(e)}",
+        request_id
+    )

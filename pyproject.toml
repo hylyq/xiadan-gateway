@@ -1,0 +1,27 @@
+[project]
+name = "xiadan-gateway"
+version = "1.0.0"
+description = "同花顺 xiadan.exe 交易网关 - 通过 HTTP API 控制同花顺下单程序进行股票交易"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Marvin" }
+]
+dependencies = [
+    "flask>=3.0.0",
+    "flask-cors>=4.0.0",
+    "pywinauto>=0.6.8",
+    "pywin32>=306",
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+    "ddddocr>=1.5.6",
+    "pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "hupper>=1.12",
+]
+
+[tool.uv]
+package = false

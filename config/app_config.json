@@ -1,0 +1,25 @@
+{
+  "trading_app_path": "C:\\Users\\Marvin\\Documents\\同花顺安装目录\\同花顺远航版\\transaction\\xiadan.exe",
+  "window_monitor": {
+    "enabled": true,
+    "check_interval": 5
+  },
+  "task_queue": {
+    "max_size": 50,
+    "watchdog_timeout_seconds": 30,
+    "query_timeout_seconds": 15,
+    "confirm_timeout_seconds": 10
+  },
+  "idempotency": {
+    "order_dedup_window_seconds": 60
+  },
+  "ocr": {
+    "warmup_on_start": true,
+    "max_retry": 3
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "logs/app.log",
+    "screenshot_dir": "logs/screenshots"
+  }
+}

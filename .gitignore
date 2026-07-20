@@ -1,0 +1,36 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 日志
+logs/*.log
+logs/screenshots/*.png
+
+# 配置覆盖
+config/app_config.local.json
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# uv
+.uv-cache/
