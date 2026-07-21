@@ -348,7 +348,7 @@ class WindowService:
     # 按键发送
     # ------------------------------------------------------------
 
-    def send_key(self, keys: str, hwnd: Optional[int] = None) -> None:
+    def send_key(self, keys: str, hwnd: Optional[int] = None, background: bool = False) -> None:
         """发送按键（支持组合键）
 
         Args:
@@ -356,18 +356,27 @@ class WindowService:
             hwnd: 目标窗口句柄。提供时用 PostMessage 后台发送，不抢焦点；
                   不提供时自动查找交易窗口句柄（优先 PostMessage），
                   找不到则 fallback 到 keybd_event（原有行为）
+            background: 为 True 时跳过窗口激活，直接用 keybd_event 前台发送。
+                       用于调用方已自行激活窗口的场景，避免冗余激活。
 
         注意:
             功能键（F1-F12）始终走 keybd_event 前台发送，因为这类键触发界面切换，
             PostMessage 可能无法正确触发窗口的加速键/快捷键处理。
-            发送功能键前会自动激活交易窗口到前台，避免 F1 泄漏到桌面触发 Windows 帮助。
+            默认（background=False）发送功能键前会自动激活交易窗口到前台，
+            避免 F1 泄漏到桌面触发 Windows 帮助。
 
         用法:
-            send_key('F1')              # 单键
-            send_key('Y')               # 字母键
-            send_key('{CTRL+C}')        # 组合键（花括号内，+连接）
-            send_key('CTRL C')          # 组合键（空格分隔，按下后释放）
+            send_key('F1')                    # 单键（自动激活）
+            send_key('F1', background=True)   # 单键（跳过激活）
+            send_key('Y')                     # 字母键
+            send_key('{CTRL+C}')              # 组合键（花括号内，+连接）
+            send_key('CTRL C')                # 组合键（空格分隔，按下后释放）
         """
+        # background=True 时跳过激活，直接用 keybd_event 前台发送
+        if background:
+            self._send_key_foreground(keys)
+            return
+
         # 功能键（F1-F12）必须前台发送，PostMessage 无法可靠触发窗口快捷键
         # 但必须先将交易窗口带到前台，否则 keybd_event 会发到错误窗口（如桌面、浏览器）
         if self._contains_function_key(keys):

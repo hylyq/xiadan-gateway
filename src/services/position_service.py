@@ -28,57 +28,37 @@ class PositionService:
         self.logger = Logger.get_instance()
         self._cached_window = None  # 用于窗口引用刷新
 
-    # ------------------------------------------------------------
-    # 查询面板准备（所有查询的公共前置步骤）
-    # ------------------------------------------------------------
-
-    def _prepare_query_panel(self):
-        """聚焦窗口 → F4 打开查询面板
-
-        ESC×3 → F1 初始状态由 TaskQueue._reset_trading_window 保证。
-        此处只需聚焦窗口（确保 Ctrl+C 能发到前台）并按 F4 打开查询面板。
-        """
-        window = self.window_service.get_trading_window()
-        if window is None:
-            raise Exception("未找到交易窗口 '网上股票交易系统5.0'")
-        window.click_input()
-        time.sleep(0.3)
-
-        self.window_service.send_key("F4")
-        time.sleep(0.5)
-
     def _send_ctrl_c(self):
-        """前台发送 Ctrl+C（keybd_event）
+        """click_input 激活 → 前台发送 Ctrl+C（keybd_event）
 
-        关键：keybd_event 把按键发到当前前台窗口。必须确保 xiadan.exe 在前台，
-        否则 Ctrl+C 会发到错误窗口（IDE/浏览器），既不复制券商数据也不触发验证码弹窗。
+        keybd_event 把按键发到当前前台窗口。必须确保交易窗口在后台前，
+        否则 Ctrl+C 会发到错误窗口（IDE/浏览器），既不复制数据也不触发验证码弹窗。
 
-        激活策略：click_input() 点击窗口中心强制获取焦点（比 SetForegroundWindow 更可靠，
-        后者在窗口被遮挡/系统拒绝时静默失败）。点击后二次校验 is_foreground，失败则抛异常。
+        click_input 是激活窗口最可靠的方式，配合句柄级校验确保目标正确。
+        SetForegroundWindow 因 Windows UIPI 限制可能静默失败，不使用。
         """
         import win32api
         import win32con
+        import win32gui
 
-        trading_path = self.config.get_trading_app_path()
+        self._refresh_window_ref()
+        window = self._cached_window
+        if window is None:
+            raise Exception("交易窗口未找到，无法发送 Ctrl+C")
 
-        # 焦点防御：Ctrl+C 前确保 xiadan.exe 在前台
-        if trading_path and not self.window_service.is_foreground(trading_path):
-            self.logger.warning("Ctrl+C 前前台窗口不是 xiadan.exe，尝试 click_input 激活")
-            try:
-                self._refresh_window_ref()
-                window = self._cached_window
-                if window is not None:
-                    window.click_input()
-                    time.sleep(0.3)
-                else:
-                    self.window_service.activate_window(trading_path, foreground=True)
-                    time.sleep(0.3)
-            except Exception as e:
-                self.logger.error(f"激活 xiadan.exe 失败: {e}")
+        target_handle = window.handle
+        for _ in range(2):
+            window.click_input()
+            time.sleep(0.3)
+            if win32gui.GetForegroundWindow() == target_handle:
+                break
+            self.logger.warning(f"激活后前台句柄 {win32gui.GetForegroundWindow():#x} ≠ 目标 {target_handle:#x}，重试")
 
-            # 二次校验
-            if trading_path and not self.window_service.is_foreground(trading_path):
-                raise Exception("Ctrl+C 前 xiadan.exe 仍不在前台，放弃发送避免按键泄漏")
+        if win32gui.GetForegroundWindow() != target_handle:
+            self.logger.error(
+                f"无法将交易窗口带到前台，前台={win32gui.GetForegroundWindow():#x} 目标={target_handle:#x}"
+            )
+            raise Exception("无法将交易窗口带到前台，放弃发送 Ctrl+C 避免按键泄漏")
 
         VK_CONTROL = 0x11
         VK_C = 0x43
@@ -115,8 +95,6 @@ class PositionService:
         Ctrl+C 必然触发验证码弹窗。验证码弹窗的出现 = Ctrl+C 已正确发送到
         目标窗口的确认信号。无验证码弹窗 = Ctrl+C 未到达目标窗口，Ctrl+C 失败。
         """
-        self._refresh_window_ref()
-
         for attempt in range(3):
             self.logger.info(f"第 {attempt + 1}/3 次尝试 Ctrl+C 读取表格数据")
 
@@ -238,12 +216,16 @@ class PositionService:
     # ------------------------------------------------------------
 
     def _prepare_query_panel(self):
-        """激活窗口 → 聚焦 → ESC×3 重置到 F1 → F4 打开查询面板
+        """激活窗口 → ESC×3 → F4 打开查询面板
 
-        所有查询方法共享此流程，确保 F4 永远是「打开」动作（不会 toggle 关闭）。
+        标准查询流程：确保从 F1 买入界面切换到查询面板，F4 永远是「打开」动作。
+        每个 keybd_event 都带 click_input 激活，确保窗口稳态在前台。
         """
-        self._activate_trading_window()
-        self._get_focused_window()
+        window = self.window_service.get_trading_window()
+        if window is None:
+            raise Exception("未找到交易窗口 '网上股票交易系统5.0'")
+        window.click_input()
+        time.sleep(0.3)
 
         for _ in range(3):
             self.window_service.send_key("ESC")
