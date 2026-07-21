@@ -649,3 +649,45 @@ class WindowService:
 
         self.logger.error(f"获取剪切板数据失败（已重试 {retries} 次）")
         return None
+
+    def clear_clipboard(self) -> None:
+        """清空剪贴板
+
+        Ctrl+C 前清空，避免焦点丢失时读到陈旧内容伪装成"复制成功"。
+        """
+        import win32clipboard
+        try:
+            win32clipboard.OpenClipboard(0)
+            try:
+                win32clipboard.EmptyClipboard()
+            finally:
+                win32clipboard.CloseClipboard()
+        except Exception as e:
+            self.logger.warning(f"清空剪贴板失败: {e}")
+
+    def get_foreground_window_exe(self) -> Optional[str]:
+        """获取当前前台窗口所属进程的 exe 完整路径
+
+        用于 Ctrl+C 前验证焦点是否在目标程序上，避免 keybd_event
+        把按键发到错误窗口（如 IDE、浏览器），导致复制失败且无验证码弹窗。
+
+        Returns:
+            前台窗口进程的 exe 路径，获取失败返回 None
+        """
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            if not hwnd:
+                return None
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            proc = psutil.Process(pid)
+            return proc.exe()
+        except Exception as e:
+            self.logger.warning(f"获取前台窗口进程路径失败: {e}")
+            return None
+
+    def is_foreground(self, app_path: str) -> bool:
+        """检查当前前台窗口是否属于指定程序"""
+        fg_exe = self.get_foreground_window_exe()
+        if fg_exe is None or not app_path:
+            return False
+        return fg_exe.lower() == app_path.lower()

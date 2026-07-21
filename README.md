@@ -170,8 +170,6 @@ curl -X POST http://localhost:5000/orders \
 **说明：**
 - 价格 `price` 传入时自动修正为 2 位小数（如 `1.20100` → `1.20`），并记录警告日志
 - API 层也会校验，超 2 位小数的价格直接返回 400 错误，不进任务队列
-- 输入价格前先通过 `WM_SETTEXT` 完全清空控件（解决券商自动填充价格的干扰），再通过 `{HOME}+{END}{BACKSPACE}` 双重清空兜底
-- 输入股票代码后等 0.5 秒让自动填充完成，再清空价格框填入新价格
 - `confirm=false` 时：弹委托确认窗后点击「否(N)」取消，可用于预览委托详情
 
 ### POST /orders/sell-all 一键清仓
@@ -188,22 +186,9 @@ curl -X POST http://localhost:5000/orders \
 curl -X POST http://localhost:5000/orders/sell-all \
   -H "Content-Type: application/json" \
   -d '{"code": "002366"}'
-
-# 只填单不确认
-curl -X POST http://localhost:5000/orders/sell-all \
-  -H "Content-Type: application/json" \
-  -d '{"code": "002366", "confirm": "false"}'
 ```
 
-**流程：**
-1. 查询当前持仓
-2. 按 `code` 匹配到对应股票
-3. 提取可用余额（兼容 `可用余额` / `可用数量` / `可卖数量` / `卖出数量` 等字段名）
-4. 市价提交卖出委托
-
-**错误场景：**
-- 股票 `code` 不在持仓中 → 返回 `VALIDATION_ERROR`
-- 可用余额 = 0 → 返回 `VALIDATION_ERROR`（提示无需卖出）
+**流程：** 查询持仓 → 按 `code` 匹配 → 提取可用余额（兼容多种字段名）→ 市价卖出。股票不在持仓或可用余额为 0 时返回 `VALIDATION_ERROR`。
 
 ### GET /orders/pending 当日委托
 
@@ -224,11 +209,7 @@ curl -X POST http://localhost:5000/orders/cancel-all
 curl -X POST http://localhost:5000/orders/cancel-all -H "Content-Type: application/json" -d '{"type": "X"}'
 ```
 
-**说明：**
-- 进入撤单界面后自动读取「撤单不需要确认」复选框状态，未勾选才点击勾选（避免误反选）
-- 勾选后自动处理二次确认弹窗（"您取消了撤单前确认提示功能"）
-- 点击撤单按钮后**始终检测**确认弹窗，不依赖复选框状态
-- 弹窗文字完整读取并记录到日志，通过关键词「委托」区分撤单确认弹窗和其他弹窗
+**说明：** 进入撤单界面后自动检测并关闭阻塞型提示弹窗（如 "Begin failed!"），点击撤单按钮后自动检测确认弹窗并点击「是(Y)」确认。
 
 ### POST /orders/confirm
 
@@ -262,7 +243,7 @@ curl -X POST http://localhost:5000/actions/click -H "Content-Type: application/j
 
 ### POST /actions/close-dialog 安全关闭子面板
 
-关闭买入/卖出等嵌入子面板（通过 F4 切换视图实现，绝不关闭整个程序）。
+关闭买入/卖出等嵌入子面板（通过 F4 切换视图实现，绝不关闭整个程序）。同花顺的买入/卖出窗口是嵌入主窗口的子视图（不是独立对话框），ESC/WM_CLOSE 均无效，本接口发送 F4 切换到查询视图来实现关闭。
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
@@ -272,8 +253,6 @@ curl -X POST http://localhost:5000/actions/click -H "Content-Type: application/j
 curl -X POST http://localhost:5000/actions/close-dialog -H "Content-Type: application/json" -d '{"title": "买入"}'
 ```
 
-**说明：** 同花顺的买入/卖出窗口是嵌入主窗口的子视图（不是独立对话框），ESC/WM_CLOSE 均无效。本接口发送 F4 切换到查询视图来实现关闭。
-
 ### GET /diagnostic/snapshot 诊断快照
 
 当前窗口的截图路径 + UI 控件文本 + OCR 全文识别。不入队，立即返回。
@@ -282,22 +261,9 @@ curl -X POST http://localhost:5000/actions/close-dialog -H "Content-Type: applic
 curl http://localhost:5000/diagnostic/snapshot
 ```
 
-响应示例：
-```json
-{
-  "status": "success",
-  "data": {
-    "screenshot": "logs/screenshots/api_diagnostic_20260721_120000.png",
-    "ui_text": "[窗口标题] 网上股票交易系统5.0\n可用金额\n148444.77\n...",
-    "ocr_text": "",
-    "ocr_failed": true
-  }
-}
-```
-
 ### GET /diagnostic/history 诊断历史
 
-返回最近 N 个任务执行后的界面状态快照。让我（AI 助手）可以查看每一步操作后的窗口状态，从而自信地编写和调试代码。
+返回最近 N 个任务执行后的界面状态快照（UI 文本 + 截图路径）。每个任务执行后自动记录，无需手动调用。
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
@@ -305,26 +271,6 @@ curl http://localhost:5000/diagnostic/snapshot
 
 ```bash
 curl "http://localhost:5000/diagnostic/history?n=3"
-```
-
-响应示例：
-```json
-{
-  "status": "success",
-  "data": {
-    "total_returned": 3,
-    "max_available": 20,
-    "entries": [
-      {
-        "task_name": "get_position",
-        "elapsed_seconds": 14.22,
-        "success": true,
-        "timestamp": "17:01:13",
-        "ui_text": "[窗口标题] 网上股票交易系统5.0\n可用金额\n148444.77\n..."
-      }
-    ]
-  }
-}
 ```
 
 ## 调用方 timeout 配置
@@ -430,138 +376,78 @@ uv run python main.py --dev
 ## 关键设计要点
 
 - **单 worker 线程任务队列**：所有写操作（下单/撤单/查询）通过 `TaskQueue` 顺序执行，避免 `xiadan.exe` 并发冲突。`/health`、`/queue/status`、`/admin/reload-config` 不入队。
-- **看门狗恢复**：任务超时后必须完成所有恢复步骤（截图 + ESC + 激活 + F4）才返回错误，确保 HTTP 调用方收到 `TASK_TIMEOUT` 时 `xiadan.exe` 已重置为初始状态。
-- **任务前状态重置**：每个任务开始前执行 ESC×2 + 激活 + F4，确保从查询面板（安全起点）开始。
-- **幂等检查**：60 秒窗口内相同 `code+status+amount+price+price_type` 的下单请求会被拒绝（HTTP 409）。
-- **控件树缓存**：`pywinauto` 的 `descendants()` 会缓存控件树，界面变化后必须重新 `get_trading_window()`。
-- **后台按键（PostMessage）**：字母键（Y/N）、ESC、ENTER、组合键（Ctrl+C 等）通过 `PostMessage` 直接发送到 `xiadan.exe` 的消息队列，**不改变前台窗口、不抢焦点**。
-  - `send_key()` 自动检测交易窗口句柄，有则走 PostMessage 后台发送，无则 fallback 到 `keybd_event`（前台发送）。
-  - **功能键（F1-F12）始终走前台 `keybd_event`**，因为这些键触发界面切换（买入/卖出/撤单/查询），PostMessage 无法可靠触发窗口的加速键处理。
-  - **局限性**：鼠标点击（`click_input()`）和文本输入（`type_keys()`）仍需窗口在前台。下单（`place_order`）和撤单（`cancel_all_orders`）因此仍会激活窗口。
-- **A 股价格自动修正**：限价模式下，传入的价格自动修正为 2 位小数（如 `1.20100` → `1.20`）。API 层也会校验，超 2 位小数的价格返回 400 错误。
-  - 输入价格前先通过 `WM_SETTEXT` 完全清空控件，再通过 `{HOME}+{END}{BACKSPACE}` 双重清空兜底，解决券商自动填充价格的干扰。
-  - 输入股票代码后等 0.5 秒让自动填充完成，再清空价格框填入新价格。
-- **弹窗感知与处理**：下单和撤单过程中自动检测弹窗类型：
-  - **委托确认弹窗**：检测 `cid=1365` 标题且含"委托确认"文字 → 读取委托详情（`cid=1040`）→ 点击「是(Y)」或「否(N)」，**仅此情况设置 `confirmed=true`**
-  - **警告弹窗**（标题为"提示信息"等，如价格超限提醒）：点击「是(Y)」关闭警告，**不设置 confirmed**，继续等待后续委托确认弹窗
-  - **纯错误弹窗**（无 Y/N 按钮）：ENTER 关闭后报错退出
-  - **撤单确认弹窗**：读取完整弹窗文字，解析可撤委托数量，点击「是(Y)」确认
-  - **通用提示弹窗**（如 "Begin failed!"）：查询流程中自动检测并关闭（点击确定/ENTER）
-- **撤单调复选框**：进入撤单界面后读取「撤单不需要确认」复选框的实际勾选状态（`get_toggle_state()`），未勾选才点击勾选（避免误反选）。点击撤单按钮后始终检测确认弹窗，不依赖复选框状态。
-- **幂等回滚**：下单失败时清除幂等记录，允许客户端重试。超时不清除（防止重复提交），客户端应通过 `/orders/pending` 确认状态。
+- **看门狗恢复**：任务超时后必须完成所有恢复步骤（截图 + 激活 + ESC×3）才返回错误，确保 HTTP 调用方收到 `TASK_TIMEOUT` 时 `xiadan.exe` 已重置为初始状态。
+- **任务前状态重置**：TaskQueue 的 `_reset_trading_window` 在每个任务开始前执行 激活 + ESC×3，将界面统一重置到 F1 买入界面。这是**唯一的初始状态保证点**，下单/撤单/查询方法依赖此保证各自发送 F1/F3/F4 切换到目标视图。
+- **查询方法标准化**：所有查询方法通过 `_prepare_query_panel`（聚焦窗口 + F4）进入查询面板，不重复 ESC×3。导航即触发服务器查询，无需 F5 刷新。
+- **幂等检查**：60 秒窗口内相同 `code+status+amount+price+price_type` 的下单请求会被拒绝（HTTP 409）。下单失败时清除幂等记录允许重试，超时不清除（防止重复提交）。
+- **A 股价格自动修正**：限价模式下，传入的价格自动修正为 2 位小数。输入价格前先通过 `WM_SETTEXT` 完全清空控件，再通过 `{HOME}+{END}{BACKSPACE}` 双重清空兜底，解决券商自动填充价格的干扰。
+- **弹窗感知与处理**：下单和撤单过程中自动检测弹窗类型（委托确认弹窗、警告弹窗、纯错误弹窗、撤单确认弹窗、通用提示弹窗如 "Begin failed!"），分别处理。
 - **`sell-all` 流程**：先查持仓定位股票代码 → 自动提取可用余额（兼容多种字段名）→ 市价卖出全部可用数量 → 失败时清除幂等记录。
-- **F4 切换键状态检测**：F4 是查询面板的切换键（按一次开、再按一次关），不能盲按两次。通过检测窗口中是否存在查询面板树形菜单项（"资金股票"、"当日委托"等）判断面板状态，仅在未打开时按 F4。
-- **当日委托"全部"视图**：同花顺"当日委托"页面默认"分组"视图将表格分为上下两区（等待中/已撤单），Ctrl+C 仅复制下半区。查询前自动通过 `cid=2410` 下拉框切换为"全部"视图，查询后恢复"分组"。
 
-## 已知问题与注意事项
+## 已知陷阱与防御
 
 以下是在开发测试过程中发现的关键陷阱与防御措施。
 
 ### 按键安全：前台 keybd_event 泄漏
 
-`send_key()` 对功能键（F1-F12）使用 `keybd_event` 前台发送，这些按键会发到**当前前台窗口**。如果交易窗口不在前台，F1 会触发 Windows 帮助（打开 Edge）。
+`send_key()` 对功能键（F1-F12）和 Ctrl+C 使用 `keybd_event` 前台发送，这些按键会发到**当前前台窗口**。如果交易窗口不在前台，F1 会触发 Windows 帮助（打开 Edge）。
 
 **防御**：发送前台按键前必须调用 `click_input()` 将交易窗口带到前台。窗口未找到或激活失败时**必须抛出异常**，绝不静默发送按键。
 
-```python
-# window_service.py :: _activate_window_before_keybd()
-window = self.get_trading_window()
-if window is None:
-    raise Exception("交易窗口未找到，禁止发送按键")  # 不发送！
-window.click_input()  # 确保在前台
-self._send_key_foreground(keys)
-```
-
 同花顺买入/卖出窗口关闭方式：
-- **不要使用 ALT+F4**：会关闭整个 `xiadan.exe` 窗口（最小化到系统托盘），导致后续按键全部泄漏到桌面/IDE，可能造成 IDE 关闭等连锁反应
+- **不要使用 ALT+F4**：会关闭整个 `xiadan.exe` 窗口（最小化到系统托盘），导致后续按键全部泄漏到桌面/IDE
 - **不要使用 ESC**：买入/卖出子面板不是独立对话框，ESC 无效
 - **正确方式**：发送 F4 切换到查询/持仓视图即可关闭买入/卖出子面板
 
-### F4 切换键状态管理
+### F4 查询面板：盲按安全
 
-在 `xiadan.exe` 中，F4 是查询面板的**切换键**：
-- 按一次 F4：打开查询面板
-- 再按一次 F4：关闭查询面板
+任务前 ESC×3 统一重置到 F1 买入界面，查询面板**必然关闭**。F4 从 F1 切换到查询面板，永远是「打开」动作，盲按 F4 安全，无需状态检测。
 
-如果上一个任务（如 `get_balance()`）已经按了 F4 打开了查询面板，下一个任务（如 `get_position()`）再按 F4 会**关闭**查询面板，导致 Ctrl+C 复制的是交易主面板数据（空数据）。
-
-**防御**：每个查询方法开头先按一次 F4（确保关闭可能已打开的面板），再按 F5 刷新，最后再按 F4 打开查询面板：
-
-```python
-self.send_key("F4")  # 关闭可能已打开的查询面板
-time.sleep(0.3)
-self.send_key("F5")  # 刷新
-time.sleep(0.3)
-self.send_key("F4")  # 打开查询面板（默认进入持仓视图）
-```
-
-### Custom Logger 不支持 %s 格式化
-
-项目自定义的 Logger（`src/utils/logger.py`）只接受单个 `message` 参数，**不支持**标准 Python logger 的 `%s` 格式占位符：
-
-```python
-# 正确 - 使用 f-string
-self.logger.warning(f"错误信息: {e}")
-self.logger.info(f"状态: {status}")
-
-# 错误 - 不支持 %s 语法（会抛出 TypeError）
-self.logger.warning("错误信息: %s", e)  # TypeError!
-```
-
-### 诊断截图 + OCR 的局限性
-
-诊断工具 `DiagnosticUtil` 提供两种方式确认界面状态：
-
-| 方式 | 可靠性 | 说明 |
-|------|--------|------|
-| **UI 控件文本提取**（pywinauto） | 高 | 直接枚举窗口控件文本，精确可靠 |
-| **全文本 OCR**（ddddocr） | 低 | 对整屏截图中文识别极差，仅验证码场景（小图数字）可用 |
-
-开发测试时应优先使用 UI 控件文本提取来判断界面状态（如检测 `证券代码` 字段判断买入窗口是否打开）。
-
-### 验证码弹窗触发机制（重要）
-
-同花顺的验证码弹窗**不是随机出现的**，而是由 **Ctrl+C 剪贴板复制操作确定性触发**的安全机制：
-
-> 弹窗文本："检测到文本复制，为了数据安全，请输入验证码"
-
-**触发链路**：脚本执行 Ctrl+C 复制表格数据 → 同花顺检测到剪贴板复制行为 → 弹出验证码窗口（`cid=2405` 图片 + `cid=2404` 输入框）
-
-**影响范围**：所有通过 Ctrl+C 读取数据的查询操作（持仓、资金、成交、委托）都会触发，OCR 验证码处理是查询流程的**必要环节**而非可选兜底。
-
-**当前处理流程**（`_copy_table_via_clipboard`）：
-1. Ctrl+C 复制表格数据
-2. 检测验证码弹窗（`cid=2405` 控件 + 文本关键词双重检测）
-3. 截图验证码图片 → ddddocr OCR 识别（最多重试 `max_retry` 次）
-4. 输入验证码 + 点击确定
-5. 验证成功后重新 Ctrl+C 读取数据
-
-**性能影响**：每次验证码处理增加约 3-5 秒（截图 + OCR + 输入 + 验证），这是查询操作耗时 20-30 秒的主要原因之一。
-
-**后续优化方向**：探索非 Ctrl+C 的数据读取方式（如 UIA 控件树直接读取、内存读取等），从根本上避免触发验证码。
-
-### 自动诊断历史
-
-每个任务执行后（无论成功失败），系统自动调用 `DiagnosticUtil` 记录界面状态（UI 文本 + 截图路径），保存到 20 条循环历史队列。可以通过 `GET /diagnostic/history` 随时查看最近 N 步操作后的窗口状态，无需手动调用诊断。
-
-开发测试流程：
-1. 执行 API 操作（如下单、查询）
-2. 调用 `GET /diagnostic/history?n=1` 查看操作后的界面状态
-3. 通过 UI 文本确认窗口是否正确切换、数据是否正确显示
-4. 若发现问题，UI 文本会明确显示当前窗口上的所有控件文字，帮助快速定位
-
-```bash
-# 执行操作后自动记录诊断，随时查看历史
-curl "http://localhost:5000/diagnostic/history?n=3"
-```
-
-### keybd_event 窗口焦点依赖
-
-`keybd_event` 系列函数（Ctrl+C、功能键等）必须确保目标窗口在前台。`PostMessage` 系列函数（普通字母键）可后台发送，不依赖焦点。
+### 后台按键 vs 前台按键
 
 | 发送方式 | 依赖前台 | 适用场景 |
 |---------|---------|---------|
 | `keybd_event` | 是 | 功能键 F1-F12、Ctrl+C 等组合键 |
 | `PostMessage` | 否 | 字母键 Y/N、方向键、ENTER、ESC（非子面板） |
 
-在任务 worker 线程中调用 `click_input()` 可以正常将窗口带到前台（与主线程不同，`SetForegroundWindow` 在 worker 线程无效）。
+功能键（F1-F12）始终走前台 `keybd_event`，因为这些键触发界面切换（买入/卖出/撤单/查询），PostMessage 无法可靠触发窗口的加速键处理。鼠标点击（`click_input()`）和文本输入（`type_keys()`）仍需窗口在前台。
+
+### 控件树缓存
+
+`pywinauto` 的 `descendants()` 会缓存控件树，界面变化后必须重新 `get_trading_window()` 获取新引用。
+
+### 验证码弹窗机制
+
+同花顺的 Ctrl+C 复制操作**必然触发验证码弹窗**（弹窗文本："检测到文本复制，为了数据安全，请输入验证码"）。验证码弹窗的出现 = Ctrl+C 已正确发送到目标窗口的**确认信号**。无验证码弹窗 = Ctrl+C 未到达目标窗口（焦点丢失），本次尝试失败。
+
+处理流程：Ctrl+C → 等待验证码弹窗 → OCR 识别 → 输入验证码 + 确定 → 读剪贴板 → 校验 `\t` 制表符。验证码处理失败时重试，最多 3 次。
+
+### "Begin failed!" 弹窗
+
+券商服务器查询/更新数据失败时弹出的提示弹窗。**所有标签页切换都会触发服务器数据交换，因此都可能出现"Begin failed!"弹窗**——包括 F4 查询面板下点击任意标签页、F3 撤单页面切换、F5 刷新、切换下拉菜单分组等。防御原则：所有标签页切换/服务器交互点后都调用 `_dismiss_popup_if_present` 检测并关闭弹窗，`_is_valid_table_data`（校验 `\t` 制表符）作为内容层面的兜底校验。
+
+### Ctrl+C 复制表单全部数据的适用范围
+
+**适用页面**：F4 查询面板下所有标签页面（当日委托、当日成交、资金股票、历史成交等）、F3 撤单页面。这些页面点击对应标签/切换到对应视图后，直接 Ctrl+C 即可复制表单内的全部股票信息。导航动作本身触发券商服务器查询，无需额外 F5 刷新。
+
+**不适用页面**：F1 买入页面、F2 卖出页面（这两个是下单输入面板，不是表格查询页）。
+
+### Custom Logger 不支持 %s 格式化
+
+项目自定义的 Logger（`src/utils/logger.py`）只接受单个 `message` 参数，**不支持**标准 Python logger 的 `%s` 格式占位符。必须使用 f-string：
+
+```python
+# 正确
+self.logger.warning(f"错误信息: {e}")
+# 错误 - 会抛出 TypeError
+self.logger.warning("错误信息: %s", e)
+```
+
+### 诊断方式选择
+
+| 方式 | 可靠性 | 说明 |
+|------|--------|------|
+| **UI 控件文本提取**（pywinauto） | 高 | 直接枚举窗口控件文本，精确可靠 |
+| **全文本 OCR**（ddddocr） | 低 | 对整屏截图中文识别极差，仅验证码场景（小图数字）可用 |
+
+开发测试时应优先使用 UI 控件文本提取判断界面状态。每个任务执行后自动记录诊断到 20 条循环历史队列，通过 `GET /diagnostic/history` 查看。

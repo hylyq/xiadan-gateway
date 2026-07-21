@@ -2,8 +2,8 @@
 
 核心特性:
 - 单 worker 线程: 所有操作顺序执行，避免 xiadan.exe 并发冲突
-- 看门狗机制: 任务超时触发截图+ESC+激活+F1 恢复，完成后才返回 HTTP 错误
-- 状态重置: 每个任务开始前 ESC×2 + 激活 + F1
+- 看门狗机制: 任务超时触发截图+激活+ESC×3 恢复，完成后才返回 HTTP 错误
+- 状态重置: 每个任务开始前 激活 + ESC×3（重置到 F1 买入界面）
 - 僵尸检测: 超过阈值的任务被标记
 - 队列限制: 最大 50 个待处理任务
 
@@ -183,21 +183,13 @@ class TaskQueue(Singleton):
         """重置 xiadan.exe 到初始状态
 
         每个任务开始前执行:
-        1. ESC×2 关闭可能存在的弹窗
-        2. 重新激活窗口
-        3. F4 打开查询面板（查询/持仓视图，所有操作的安全起点）
+        1. 激活窗口（恢复可能最小化的窗口，确保 ESC 能发到目标窗口）
+        2. 快速 ESC×3 重置到 F1 买入界面（同花顺默认界面）
 
-        注意：下单操作（place_order）会自动发送 F1 切换到买入面板，
-        因此重置终点设为查询面板（F4）可同时满足查询和下单的起始需求。
+        ESC×3 是实测行为：连续三次 ESC 会将界面从任意状态回退到
+        F1 买入界面（默认起点）。下单/撤单/查询方法会各自发送
+        F1/F3/F4 切换到目标视图，因此 F1 作为统一重置起点可满足所有场景。
         """
-        try:
-            self.window_service.send_key("ESC")
-            time.sleep(0.2)
-            self.window_service.send_key("ESC")
-            time.sleep(0.2)
-        except Exception as e:
-            self.logger.warning(f"重置时 ESC 失败: {str(e)}")
-
         try:
             trading_path = self.config.get_trading_app_path()
             if trading_path:
@@ -208,11 +200,11 @@ class TaskQueue(Singleton):
             self.logger.warning(f"重置时激活窗口失败: {str(e)}")
 
         try:
-            # F4 打开查询面板（比 F1 买入面板更适合作为所有操作的安全起点）
-            self.window_service.send_key("F4")
-            time.sleep(0.2)
+            for i in range(3):
+                self.window_service.send_key("ESC")
+                time.sleep(0.1)
         except Exception as e:
-            self.logger.warning(f"重置时 F4 失败: {str(e)}")
+            self.logger.warning(f"重置时 ESC 失败: {str(e)}")
 
     def _handle_timeout(self, task: Task) -> None:
         """看门狗：任务超时后的恢复流程
@@ -223,10 +215,9 @@ class TaskQueue(Singleton):
 
         恢复步骤:
         1. 截图存档
-        2. ESC×2 关闭弹窗
-        3. 重新激活窗口
-        4. F1 切回默认界面
-        5. 设置错误并释放等待（最后执行）
+        2. 重新激活窗口
+        3. ESC×3 重置到 F1 买入界面（默认起点）
+        4. 设置错误并释放等待（最后执行）
         """
         screenshot_path = None
         recovery_error = None
@@ -248,16 +239,7 @@ class TaskQueue(Singleton):
         # 诊断：OCR 识别截图内容，帮助定位超时原因
         DiagnosticUtil().snapshot(f"timeout_{task.name}")
 
-        # 步骤 2: 发送 ESC 关闭可能存在的弹窗
-        try:
-            self.window_service.send_key("ESC")
-            time.sleep(0.3)
-            self.window_service.send_key("ESC")
-            time.sleep(0.3)
-        except Exception as e:
-            self.logger.error(f"超时 ESC 失败: {str(e)}")
-
-        # 步骤 3: 重新激活 xiadan.exe 窗口
+        # 步骤 2: 重新激活 xiadan.exe 窗口（恢复最小化 + 置前，确保 ESC 发到目标窗口）
         try:
             trading_path = self.config.get_trading_app_path()
             if trading_path:
@@ -267,15 +249,16 @@ class TaskQueue(Singleton):
             self.logger.error(f"超时激活窗口失败: {str(e)}")
             recovery_error = str(e)
 
-        # 步骤 4: 切回 F4 查询面板（安全起点）
+        # 步骤 3: ESC×3 重置到 F1 买入界面
         try:
-            self.window_service.send_key("F4")
-            time.sleep(0.3)
+            for i in range(3):
+                self.window_service.send_key("ESC")
+                time.sleep(0.2)
         except Exception as e:
-            self.logger.error(f"超时 F4 重置失败: {str(e)}")
+            self.logger.error(f"超时 ESC 重置失败: {str(e)}")
             recovery_error = str(e)
 
-        # 步骤 5: 所有恢复步骤完成，现在才释放 HTTP 等待
+        # 步骤 4: 所有恢复步骤完成，现在才释放 HTTP 等待
         task.is_timeout = True
         task.error = TaskTimeoutError(
             task_name=task.name,

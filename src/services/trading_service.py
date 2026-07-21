@@ -5,15 +5,16 @@
 - 30002: 撤买
 - 30003: 撤卖
 
-进入撤单界面后会勾选"撤单不需要确认"复选框（cid=2411），
-这样点击撤单按钮后不再弹出确认框，直接执行撤单。
-若未勾选则点击后会弹出确认框（cid=1040 提示文字 + cid=6 "是(Y)" 按钮），
-作为退路仍会处理。
+每次点击撤单按钮后都会弹出确认框（cid=1040 提示文字 + cid=6 "是(Y)" 按钮），
+脚本自动点击"是(Y)"确认，无需依赖"撤单不需要确认"复选框。
+
+进入撤单界面时若出现阻塞型提示弹窗（如非交易时段的 "Begin failed!"），
+会先检测并关闭，避免弹窗遮挡撤单按钮导致点击失败。
 """
 import time
 
 from src.constants import (
-    CANCEL_TYPE_MAP, NO_CONFIRM_CHECKBOX_ID,
+    CANCEL_TYPE_MAP,
     CANCEL_CONFIRM_TEXT_ID, CANCEL_CONFIRM_YES_BUTTON_ID,
     CANCEL_CONFIRM_TEXT_KEYWORD
 )
@@ -72,55 +73,40 @@ class TradingService:
         self.window_service.send_key("F5")
         time.sleep(0.1)
 
-        # F3 打开撤单界面
-        self.window_service.send_key("F3")
-        self.logger.info("已打开委托撤单界面")
-        time.sleep(0.3)
+        # F3 打开撤单界面（带重试）
+        # 非交易时段首次 F3 可能弹出 "Begin failed!" 弹窗导致撤单界面未加载，
+        # 关闭弹窗后需重试 F3。以撤单按钮是否出现为成功判据。
+        for f3_attempt in range(3):
+            self.window_service.send_key("F3")
+            self.logger.info(f"已发送 F3 打开委托撤单界面 (尝试 {f3_attempt + 1}/3)")
+            time.sleep(0.3)
 
-        # 重新获取窗口（界面已切换）
-        window = self.window_service.get_trading_window()
-        if window is None:
-            raise Exception("打开撤单界面后窗口消失")
+            window = self.window_service.get_trading_window()
+            if window is None:
+                raise Exception("打开撤单界面后窗口消失")
 
-        # 勾选"撤单不需要确认"复选框
-        # 首次勾选会弹出"您取消了撤单前确认提示功能"的二次确认框，需要点"是(Y)"
-        no_confirm = self.window_service.find_element_in_window(
-            window, NO_CONFIRM_CHECKBOX_ID
-        )
-        checkbox_checked = False
-        if no_confirm is not None:
-            try:
-                # 读取当前勾选状态（0=未勾选, 1=已勾选, 2=不定）
-                toggle_state = no_confirm.get_toggle_state()
-                is_checked = (toggle_state == 1)
-                self.logger.info(
-                    "'撤单不需要确认' 复选框当前状态: %s",
-                    "已勾选" if is_checked else "未勾选"
-                )
+            # 关闭可能出现的阻塞型提示弹窗（如非交易时段的 "Begin failed!"）
+            self._dismiss_blocking_popup(window)
 
-                if not is_checked:
-                    no_confirm.click_input()
-                    self.logger.info("已点击 '撤单不需要确认' 复选框")
-                    time.sleep(0.4)
-
-                    # 处理可能出现的"取消确认提示功能"二次确认弹窗
-                    self._handle_disable_confirm_dialog()
-
-                checkbox_checked = True
-            except Exception as e:
-                self.logger.warning(f"处理 '撤单不需要确认' 复选框失败: {e}")
+            # 重新获取窗口（弹窗关闭后控件树已变化），检查撤单按钮是否存在
+            window = self.window_service.get_trading_window()
+            if window is not None:
+                btn = self.window_service.find_element_in_window(window, control_id)
+                if btn is not None:
+                    self.logger.info("撤单界面加载成功，撤单按钮已就绪")
+                    break
+            self.logger.warning(f"撤单界面未加载（未找到撤单按钮），将重试 F3")
         else:
-            self.logger.warning("未找到 '撤单不需要确认' 复选框")
-
-        # 重新获取窗口
-        window = self.window_service.get_trading_window()
+            raise Exception(
+                f"打开撤单界面失败，未找到撤单按钮 control_id={control_id}（已重试 3 次）"
+            )
 
         # 点击对应的撤单按钮
         self.window_service.click_element(window, control_id)
         self.logger.info(f"已点击 {operation_name} 按钮")
         time.sleep(0.5)
 
-        # 检测是否出现撤单确认弹窗（始终检测，不依赖复选框状态）
+        # 检测撤单确认弹窗（每次撤单都会弹出，脚本自动点"是(Y)"确认）
         cancelled_count = None
         confirm_dialog_shown = False
         window = self.window_service.get_trading_window()
@@ -132,7 +118,7 @@ class TradingService:
                 prompt_text = text_el.window_text() or ""
                 self.logger.info(f"撤单后检测到弹窗文字: {prompt_text[:200]}")
 
-                # 区分两种弹窗：撤单确认弹窗包含"委托"，关闭提示功能的弹窗不包含
+                # 区分两种弹窗：撤单确认弹窗包含"委托"，其他弹窗不包含
                 if CANCEL_CONFIRM_TEXT_KEYWORD in prompt_text:
                     confirm_dialog_shown = True
                     cancelled_count = self._parse_cancelled_count(prompt_text)
@@ -148,7 +134,7 @@ class TradingService:
                         self.window_service.send_key("Y")
                         time.sleep(0.3)
                 else:
-                    # 可能是"取消提示功能"的二次确认弹窗（兜底处理）
+                    # 非撤单确认弹窗，尝试用 Y 键关闭
                     self.logger.info("检测到非撤单确认弹窗，尝试用 Y 键关闭")
                     try:
                         self.window_service.click_element(
@@ -159,7 +145,7 @@ class TradingService:
                     time.sleep(0.3)
 
         if not confirm_dialog_shown:
-            self.logger.info("未出现撤单确认弹窗（'撤单不需要确认'已生效 或 无委托可撤）")
+            self.logger.info("未出现撤单确认弹窗（可能无委托可撤）")
 
         self.logger.info(
             f"{operation_name} 操作完成, 撤单数量: {cancelled_count}, "
@@ -173,42 +159,41 @@ class TradingService:
             "confirm_dialog_shown": confirm_dialog_shown
         }
 
-    def _handle_disable_confirm_dialog(self) -> bool:
-        """处理勾选"撤单不需要确认"后出现的二次确认弹窗
+    def _dismiss_blocking_popup(self, window) -> bool:
+        """检测并关闭阻塞型提示弹窗（如非交易时段的 "Begin failed!"）
 
-        弹窗文字: "您取消了撤单前确认提示功能。您确定理解该项设置的用法..."
-        这是首次关闭确认提示时的安全确认，点击"是(Y)"确认关闭。
+        同花顺在非交易时段进入撤单界面时可能弹出提示窗（标题"提示"，
+        内容如 "Begin failed!"），阻挡撤单按钮。此方法检测并关闭这类弹窗。
 
         Returns:
-            是否出现了该弹窗并已处理
+            是否关闭了弹窗
         """
-        window = self.window_service.get_trading_window()
         if window is None:
             return False
-
-        text_el = self.window_service.find_element_in_window(
-            window, CANCEL_CONFIRM_TEXT_ID
-        )
-        if text_el is None:
-            return False
-
-        prompt_text = text_el.window_text() or ""
-        # 通过关键词区分：这个弹窗包含"取消"或"风险"，不包含"委托"
-        if "委托" in prompt_text:
-            # 这是撤单确认弹窗，不该在这里处理
-            return False
-
-        self.logger.info(f"检测到关闭确认提示的二次确认弹窗: {prompt_text}")
+        popup_keywords = ["Begin failed", "failed", "提示"]
         try:
-            self.window_service.click_element(window, CANCEL_CONFIRM_YES_BUTTON_ID)
-            self.logger.info("已点击 '是(Y)' 确认关闭撤单确认提示")
-            time.sleep(0.3)
-            return True
-        except Exception as e:
-            self.logger.warning(f"点击 '是(Y)' 失败，尝试 Y 键: {e}")
-            self.window_service.send_key("Y")
-            time.sleep(0.3)
-            return True
+            for ctrl in window.descendants():
+                try:
+                    text = ctrl.window_text() or ""
+                    if any(kw in text for kw in popup_keywords):
+                        self.logger.info(f"检测到提示弹窗: {text[:80]}，尝试关闭")
+                        # 尝试点击"确定"按钮（标准对话框 IDOK=1, IDCANCEL=2）
+                        for btn_id in (1, 2):
+                            btn = self.window_service.find_element_in_window(window, btn_id)
+                            if btn is not None:
+                                btn.click_input()
+                                self.logger.info(f"已点击按钮 cid={btn_id} 关闭弹窗")
+                                time.sleep(0.5)
+                                return True
+                        # 找不到按钮则用 ENTER 关闭
+                        self.window_service.send_key("{ENTER}")
+                        time.sleep(0.5)
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
 
     @staticmethod
     def _parse_cancelled_count(text: str):
