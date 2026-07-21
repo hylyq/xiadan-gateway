@@ -114,6 +114,7 @@ class PositionService:
         self._send_ctrl_c()
         data = self.window_service.get_clipboard()
         if data:
+            self.logger.info(f"剪贴板读取成功，长度={len(data)}，前100字符: {repr(data[:100])}")
             # Ctrl+C 后可能触发了验证码（同花顺的安全机制异步弹出）
             self._refresh_window_ref()
             window = self._cached_window
