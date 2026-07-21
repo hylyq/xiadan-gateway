@@ -135,18 +135,23 @@ class Trader:
         self.logger.info("已点击下单按钮，等待弹窗")
         time.sleep(0.5)
 
-        # 检测弹窗类型：
-        # - 有 "委托确认" 标题 (cid=1365) → 订单确认弹窗，点击 "是(Y)" 提交
-        # - 有 1040 文本 + 有 6 按钮（无 1365 标题）→ 警告弹窗（如价格格式有误，含Y/N），
-        #   点击 "是(Y)" 继续，然后下一轮循环检查委托确认
-        # - 仅有 1040 文本（无 6 按钮）→ 纯错误弹窗，报错退出
-        # - 无弹窗 → 提交失败（控件未正确操作）
-        # - 注意：同花顺可能连续弹出多个弹窗（先警告提示，再委托确认），
-        #   点击"是(Y)"关闭一个后必须继续检测下一个
-        confirm_dialog_detected = False
+        # 检测弹窗类型（按优先级）：
+        # A) cid=1365 标题 + 标题含"委托确认" → 真正的委托确认弹窗
+        #    → confirm=true 点"是(Y)"提交, confirm=false 点"否(N)"取消
+        # B) cid=1365 标题 + 标题不含"委托确认"（如"提示信息"）→ 警告弹窗
+        #    → 点"是(Y)"关闭警告，继续等待后续"委托确认"弹窗
+        #    → 【关键】此时不能设置 confirmed=True，因为订单尚未提交
+        # C) cid=1040 文本 + cid=6 按钮（无 cid=1365）→ 警告弹窗（无标题图）
+        #    → 点"是(Y)"继续
+        # D) cid=1040 文本（无按钮）→ 纯错误弹窗 → 报错退出
+        # E) 无弹窗 → 提交失败
+        #
+        # 同花顺可能连续弹出多个弹窗（先警告→再委托确认），
+        # 关闭警告后必须继续检测后续弹窗。
+        confirm_dialog_detected = False  # 是否检测到真正的"委托确认"弹窗
         order_detail_text = None
-        confirmed = False
-        warning_dismissed = False  # 是否已关闭过警告弹窗
+        confirmed = False  # 仅在真正的"委托确认"弹窗上点Y后才设为True
+        warning_dismissed = False  # 是否关闭过警告/提示弹窗
 
         for check_attempt in range(5):  # 最多5轮：应对连续多个弹窗
             window = self.window_service.get_trading_window()
@@ -154,7 +159,7 @@ class Trader:
                 time.sleep(0.3)
                 continue
 
-            # A) 检查是否有"委托确认"标题（cid=1365 Image）
+            # A/B) 检查是否有标题图（cid=1365）
             title_el = self.window_service.find_element_in_window(
                 window, CONFIRM_DIALOG_TITLE_ID
             )
@@ -162,7 +167,7 @@ class Trader:
                 title_text = title_el.window_text() or ""
                 self.logger.info(f"检测到弹窗标题: {title_text}")
 
-                # 读取委托详情（cid=1040）
+                # 读取弹窗详情文本（cid=1040）
                 detail_el = self.window_service.find_element_in_window(
                     window, CONFIRM_DETAIL_TEXT_ID
                 )
@@ -170,36 +175,42 @@ class Trader:
                     order_detail_text = detail_el.window_text() or ""
                     self.logger.info(f"弹窗详情: {order_detail_text[:200]}")
 
-                if confirm:
-                    # 点击"是(Y)"
+                if "委托确认" in title_text:
+                    # A) 真正的委托确认弹窗 — 订单已提交，等待用户确认
+                    confirm_dialog_detected = True
+                    if confirm:
+                        try:
+                            self.window_service.click_element(window, CONFIRM_YES_BUTTON_ID)
+                            confirmed = True
+                            self.logger.info("已点击 '是(Y)' 确认委托")
+                        except Exception as e:
+                            self.logger.warning(f"点击 '是(Y)' 失败，尝试 Y 键: {e}")
+                            self.window_service.send_key("Y")
+                            confirmed = True
+                    else:
+                        try:
+                            self.window_service.click_element(window, CONFIRM_NO_BUTTON_ID)
+                            self.logger.info("已点击 '否(N)' 取消委托（预览模式）")
+                        except Exception as e:
+                            self.window_service.send_key("{ESC}")
+                            self.logger.warning(f"点击 '否(N)' 失败，尝试 ESC: {e}")
+                    break  # 委托确认处理完毕，结束循环
+                else:
+                    # B) 警告/提示弹窗（如价格超限提醒）— 订单尚未提交
+                    #    点"是(Y)"关闭警告，继续等待后续"委托确认"弹窗
+                    self.logger.warning(
+                        f"检测到警告弹窗（非委托确认）: {title_text}，"
+                        f"点击 '是(Y)' 关闭后继续等待委托确认"
+                    )
                     try:
                         self.window_service.click_element(window, CONFIRM_YES_BUTTON_ID)
-                        confirmed = True
-                        self.logger.info("已点击 '是(Y)' 确认")
-                    except Exception as e:
-                        self.logger.warning(f"点击 '是(Y)' 失败，尝试 Y 键: {e}")
+                    except Exception:
                         self.window_service.send_key("Y")
-                        confirmed = True
-                else:
-                    try:
-                        self.window_service.click_element(window, CONFIRM_NO_BUTTON_ID)
-                        self.logger.info("已点击 '否(N)' 取消")
-                    except Exception as e:
-                        self.window_service.send_key("{ESC}")
-                        self.logger.warning(f"点击 '否(N)' 失败，尝试 ESC: {e}")
-
-                # 如果标题是"提示信息"等非委托确认弹窗，点Y后可能还有"委托确认"弹窗
-                # 等待后继续循环检测，而不是直接 break
-                if "委托确认" in title_text:
-                    confirm_dialog_detected = True
-                    break  # 真正的委托确认弹窗，可以结束
-                else:
-                    # 警告/提示弹窗，点Y后继续检测后续弹窗
-                    confirm_dialog_detected = True  # 标记至少处理了弹窗
+                    warning_dismissed = True
                     time.sleep(0.5)
-                    continue
+                    continue  # 继续检测后续弹窗
 
-            # B) 检查是否有警告/错误弹窗（cid=1040 文本，无 "委托确认" 标题）
+            # C) 无标题图但有文本（cid=1040）+ 有"是(Y)"按钮 → 警告弹窗
             text_el = self.window_service.find_element_in_window(
                 window, CONFIRM_DETAIL_TEXT_ID
             )
@@ -209,11 +220,11 @@ class Trader:
                     time.sleep(0.3)
                     continue
 
-                # 检查是否有 "是(Y)" 按钮 → 警告弹窗（含Y/N）
                 yes_btn = self.window_service.find_element_in_window(
                     window, CONFIRM_YES_BUTTON_ID
                 )
                 if yes_btn is not None:
+                    # C) 警告弹窗（含Y/N按钮，无标题图）
                     self.logger.warning(
                         f"检测到警告弹窗: {dialog_text[:100]}，点击 '是(Y)' 继续"
                     )
@@ -222,14 +233,12 @@ class Trader:
                     time.sleep(0.4)
                     continue  # 继续检测后续弹窗（如委托确认）
                 else:
-                    # 纯错误弹窗（无Y/N按钮），关闭并报错
+                    # D) 纯错误弹窗（无Y/N按钮），关闭并报错
                     self.logger.warning(f"检测到错误弹窗: {dialog_text[:100]}")
                     self.window_service.send_key("{ENTER}")
 
-                    # 诊断：截图 + OCR 全文本，记录完整弹窗信息
                     DiagnosticUtil().snapshot("dialog_error")
 
-                    # 检测 T+1 卖出限制（A股当日买入不可卖出）
                     if status == "2" and any(kw in dialog_text for kw in T1_RESTRICTION_KEYWORDS):
                         raise Exception(
                             f"A 股实行 T+1 交易制度，当日买入的股票次日才能卖出。"
@@ -240,9 +249,17 @@ class Trader:
 
             time.sleep(0.3)
 
-        if not confirm_dialog_detected:  # 未出现任何弹窗
-            self.logger.warning("下单后未检测到弹窗，可能提交失败")
-            DiagnosticUtil().snapshot("no_dialog_after_submit")
+        # 结果判定
+        if not confirm_dialog_detected:
+            if warning_dismissed:
+                # 关闭了警告弹窗，但始终未出现"委托确认"→ 订单未提交
+                self.logger.warning(
+                    "关闭了警告弹窗但未出现委托确认弹窗，订单可能未提交"
+                )
+                DiagnosticUtil().snapshot("warning_but_no_confirm")
+            else:
+                self.logger.warning("下单后未检测到任何弹窗，可能提交失败")
+                DiagnosticUtil().snapshot("no_dialog_after_submit")
 
         action = "买入" if status == "1" else "卖出"
         mode = "市价" if is_market else "限价"
