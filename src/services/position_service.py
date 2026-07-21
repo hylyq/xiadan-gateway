@@ -8,7 +8,7 @@ import time
 from typing import Optional
 
 from src.constants import (
-    BALANCE_FIELDS, TABLE_CONTENT_AREA_ID,
+    BALANCE_FIELDS, TABLE_CONTENT_AREA_ID, ORDERS_VIEW_COMBO_ID,
     CAPTCHA_IMAGE_ID, CAPTCHA_INPUT_ID, CAPTCHA_OK_BUTTON_ID,
     CAPTCHA_CANCEL_BUTTON_ID, CAPTCHA_VERIFY_ID, CAPTCHA_TEXT_KEYWORDS
 )
@@ -348,6 +348,9 @@ class PositionService:
 
         返回字段：时间、委托号、证券代码、证券名称、操作、委托价格、委托数量、
                   成交数量、撤单数量、状态、交易市场
+
+        注意：当日委托页面默认"分组"视图将表格分为上下两区（等待中/已撤单），
+        Ctrl+C 仅复制下半区。切换为"全部"视图后可复制所有委托。
         """
         self.logger.info("开始获取当日委托")
         self._activate_trading_window()
@@ -364,12 +367,51 @@ class PositionService:
         if window is None:
             raise Exception("页面导航后窗口消失")
 
+        # 切换视图为"全部"（默认"分组"模式下 Ctrl+C 仅复制下半区已撤单数据）
+        self._switch_orders_view(window, "全部")
+
         # 刷新
         self.window_service.send_key("F5")
-        time.sleep(0.3)
+        time.sleep(0.5)
+
+        # 重新获取窗口
+        window = self.window_service.get_trading_window()
 
         # 通过剪贴板读取表格数据
-        return self._copy_table_via_clipboard(window)
+        result = self._copy_table_via_clipboard(window)
+
+        # 恢复默认"分组"视图
+        self._switch_orders_view(window, "分组")
+
+        return result
+
+    def _switch_orders_view(self, window, view_name: str) -> bool:
+        """切换当日委托视图模式（分组/可撤/全部）
+
+        通过 cid=2410 下拉框切换。"分组"模式下表格分上下两区，
+        Ctrl+C 仅复制下半区；"全部"模式合并为单表，Ctrl+C 复制所有委托。
+
+        Args:
+            window: 窗口对象
+            view_name: 目标视图（"分组"/"可撤"/"全部"）
+
+        Returns:
+            是否切换成功
+        """
+        try:
+            combo = self.window_service.find_element_in_window(
+                window, ORDERS_VIEW_COMBO_ID
+            )
+            if combo is None:
+                self.logger.warning(f"未找到视图下拉框 cid={ORDERS_VIEW_COMBO_ID}")
+                return False
+            combo.select(view_name)
+            self.logger.info(f"当日委托视图已切换为: {view_name}")
+            time.sleep(0.3)
+            return True
+        except Exception as e:
+            self.logger.warning(f"切换视图失败: {e}")
+            return False
 
     # ------------------------------------------------------------
     # OCR 验证码处理
