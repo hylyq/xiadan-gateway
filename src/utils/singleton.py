@@ -21,14 +21,14 @@ class Singleton:
     """
 
     _instance = None
-    _lock = threading.Lock()
+    _lock = threading.RLock()
     _initialized = False
 
     def __init_subclass__(cls, **kwargs):
         """确保每个子类有独立的 _instance 和 _lock"""
         super().__init_subclass__(**kwargs)
         cls._instance = None
-        cls._lock = threading.Lock()
+        cls._lock = threading.RLock()
         cls._initialized = False
 
     def __new__(cls, *args, **kwargs):
