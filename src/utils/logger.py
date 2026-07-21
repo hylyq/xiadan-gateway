@@ -14,29 +14,18 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from threading import Lock
 
+from src.utils.singleton import Singleton
 
-class Logger:
+
+class Logger(Singleton):
     """单例日志器"""
-    _instance = None
     MAX_CACHE_SIZE = 1000
 
-    def __new__(cls):
-        if not cls._instance:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
     @classmethod
-    def get_instance(cls):
-        if not cls._instance:
-            cls._instance = cls()
-        return cls._instance
+    def get_instance(cls) -> "Logger":
+        return cls._get_instance()
 
-    def __init__(self):
-        if self._initialized:
-            return
-        self._initialized = True
-
+    def _init(self):
         self.log_cache = deque(maxlen=self.MAX_CACHE_SIZE)
         self.lock = Lock()
 

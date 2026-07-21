@@ -12,29 +12,14 @@
 """
 import time
 
+from src.constants import (
+    CANCEL_TYPE_MAP, NO_CONFIRM_CHECKBOX_ID,
+    CANCEL_CONFIRM_TEXT_ID, CANCEL_CONFIRM_YES_BUTTON_ID,
+    CANCEL_CONFIRM_TEXT_KEYWORD
+)
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
 from src.utils.logger import Logger
-
-
-# 撤单按钮 control_id 映射
-CANCEL_TYPE_MAP = {
-    "A": (30001, "全部撤单"),
-    "X": (30002, "撤买"),
-    "C": (30003, "撤卖"),
-}
-
-# "撤单不需要确认"复选框（cid=2411, 邻近的 cid=2413 是文字标签）
-NO_CONFIRM_CHECKBOX_ID = 2411
-
-# 首次勾选"撤单不需要确认"后弹出的二次确认框
-# 提示文字: "您取消了撤单前确认提示功能。您确定理解该项设置的用法，并愿意承担误操作的风险吗？"
-DISABLE_CONFIRM_DIALOG_TEXT_ID = 1040   # 提示文字 control_id
-DISABLE_CONFIRM_YES_BUTTON_ID = 6       # "是(Y)" 按钮
-
-# 撤单确认弹窗（仅在未勾选"撤单不需要确认"时出现）
-# 提示文字: "您确认要撤销这( N )笔委托吗？"
-CANCEL_CONFIRM_TEXT_KEYWORD = "委托"    # 区分两种弹窗的关键词
 
 
 class TradingService:
@@ -141,7 +126,7 @@ class TradingService:
         window = self.window_service.get_trading_window()
         if window is not None:
             text_el = self.window_service.find_element_in_window(
-                window, DISABLE_CONFIRM_DIALOG_TEXT_ID
+                window, CANCEL_CONFIRM_TEXT_ID
             )
             if text_el is not None:
                 prompt_text = text_el.window_text() or ""
@@ -154,7 +139,7 @@ class TradingService:
 
                     try:
                         self.window_service.click_element(
-                            window, DISABLE_CONFIRM_YES_BUTTON_ID
+                            window, CANCEL_CONFIRM_YES_BUTTON_ID
                         )
                         self.logger.info("已点击 '是(Y)' 确认撤单")
                         time.sleep(0.3)
@@ -167,7 +152,7 @@ class TradingService:
                     self.logger.info("检测到非撤单确认弹窗，尝试用 Y 键关闭")
                     try:
                         self.window_service.click_element(
-                            window, DISABLE_CONFIRM_YES_BUTTON_ID
+                            window, CANCEL_CONFIRM_YES_BUTTON_ID
                         )
                     except Exception:
                         self.window_service.send_key("Y")
@@ -202,7 +187,7 @@ class TradingService:
             return False
 
         text_el = self.window_service.find_element_in_window(
-            window, DISABLE_CONFIRM_DIALOG_TEXT_ID
+            window, CANCEL_CONFIRM_TEXT_ID
         )
         if text_el is None:
             return False

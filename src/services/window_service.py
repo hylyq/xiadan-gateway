@@ -12,14 +12,10 @@ import win32con
 import win32gui
 import win32process
 from pywinauto import Application, Desktop
-from pywinauto.clipboard import GetData
 
 from config.key_config import KEY_MAP
+from src.constants import TRADING_WINDOW_TITLE
 from src.utils.logger import Logger
-
-
-# 交易窗口标题（用于查找目标窗口）
-TRADING_WINDOW_TITLE = "网上股票交易系统5.0"
 
 
 class WindowService:
@@ -210,6 +206,43 @@ class WindowService:
 
         raise TypeError("control_id 参数类型错误，应为 int/str 或 list/tuple")
 
+    def find_element_by_text(self, window, text_keywords: list,
+                             control_type: str = None) -> list:
+        """按文本关键词查找控件（不依赖 control_id）
+
+        用于查找验证码弹窗等 control_id 可能变化或不可靠的场景。
+
+        Args:
+            window: 目标窗口对象
+            text_keywords: 文本关键词列表，如 ["验证码", "检测到"]
+            control_type: 可选的控件类型过滤，如 "Button", "Text"
+
+        Returns:
+            匹配的控件列表
+        """
+        result = []
+        try:
+            for ctrl in window.descendants():
+                try:
+                    ctrl_text = ctrl.window_text() or ""
+                    if not ctrl_text.strip():
+                        continue
+                    if control_type:
+                        try:
+                            if ctrl.element_info.control_type != control_type:
+                                continue
+                        except Exception:
+                            continue
+                    for kw in text_keywords:
+                        if kw in ctrl_text:
+                            result.append(ctrl)
+                            break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return result
+
     def find_element_by_tree_path(self, window, root_control_id, path_names: list):
         """在树形结构中按路径查找元素
 
@@ -327,7 +360,7 @@ class WindowService:
         注意:
             功能键（F1-F12）始终走 keybd_event 前台发送，因为这类键触发界面切换，
             PostMessage 可能无法正确触发窗口的加速键/快捷键处理。
-            字母键（Y/N）、方向键、ESC、ENTER、组合键（Ctrl+C）等走 PostMessage。
+            发送功能键前会自动激活交易窗口到前台，避免 F1 泄漏到桌面触发 Windows 帮助。
 
         用法:
             send_key('F1')              # 单键
@@ -335,9 +368,15 @@ class WindowService:
             send_key('{CTRL+C}')        # 组合键（花括号内，+连接）
             send_key('CTRL C')          # 组合键（空格分隔，按下后释放）
         """
-        # 功能键（F1-F12）始终前台发送，PostMessage 无法可靠触发窗口快捷键
+        # 功能键（F1-F12）必须前台发送，PostMessage 无法可靠触发窗口快捷键
+        # 但必须先将交易窗口带到前台，否则 keybd_event 会发到错误窗口（如桌面、浏览器）
         if self._contains_function_key(keys):
-            self._send_key_foreground(keys)
+            self._activate_window_before_keybd(keys)
+            return
+
+        # ESC 也走前台发送，某些子对话框/模式窗口不响应 PostMessage 的 ESC
+        if self._is_escape_key(keys):
+            self._activate_window_before_keybd(keys)
             return
 
         # 如果没有提供 hwnd，尝试自动获取交易窗口句柄
@@ -365,6 +404,12 @@ class WindowService:
             if f"F{i}" in upper:
                 return True
         return False
+
+    @staticmethod
+    def _is_escape_key(keys: str) -> bool:
+        """检查是否为 ESC 键（PostMessage 无法可靠关闭子对话框）"""
+        upper = keys.upper().strip()
+        return upper in ("{ESC}", "ESC", "{ESCAPE}", "ESCAPE")
 
     def _send_key_foreground(self, keys: str) -> None:
         """通过 keybd_event 发送到前台窗口（原有方式，会抢焦点）"""
@@ -488,19 +533,119 @@ class WindowService:
             win32gui.PostMessage(hwnd, win32con.WM_KEYUP, vk, 0)
             time.sleep(delay)
 
+    def _activate_window_before_keybd(self, keys: str) -> None:
+        """发送前台按键前确保交易窗口在前台（避免泄漏到桌面/其他窗口）
+
+        功能键（F1-F12）和 ESC 必须用 keybd_event 前台发送，但 keybd_event
+        将按键发送到当前前台窗口。如果交易窗口不在前台，F1 会触发
+        Windows 帮助（打开 Edge），造成用户描述的问题。
+
+        流程:
+        1. 获取交易窗口
+        2. click_input() 将其带到前台
+        3. 确认窗口已激活后，用 keybd_event 发送按键
+        4. 若窗口未找到或激活失败，**禁止发送按键**（防止泄漏到错误窗口）
+
+        Raises:
+            Exception: 交易窗口未找到或激活失败，不发送按键
+        """
+        window = self.get_trading_window()
+        if window is None:
+            self.logger.error(
+                f"交易窗口未找到，禁止发送按键 '{keys}'（防止泄漏到桌面/其他窗口）"
+            )
+            raise Exception(
+                f"交易窗口未找到，无法发送按键 '{keys}'。"
+                f"请确认券商程序（网上股票交易系统5.0）已启动且窗口可见。"
+            )
+
+        try:
+            window.click_input()
+            time.sleep(0.3)
+        except Exception as e:
+            self.logger.error(
+                f"激活交易窗口到前台失败: {e}，禁止发送按键 '{keys}'"
+            )
+            raise Exception(
+                f"激活交易窗口失败，无法发送按键 '{keys}'。错误: {e}"
+            )
+
+        self._send_key_foreground(keys)
+
+    def close_child_dialog(self, dialog_title: str = "") -> bool:
+        """安全关闭子面板/对话框（如买入/卖出窗口），绝不关闭整个程序
+
+        在 同花顺 xiadan.exe 中，按 F1/F2 打开的子面板（买入/卖出窗口）
+        是嵌入在主窗口内的子视图，不是独立对话框。
+        ESC/WM_CLOSE 均无法关闭这些子面板。
+
+        正确的关闭方式：切换到其他视图（F4 = 查询/持仓视图）。
+
+        Args:
+            dialog_title: 面板标识（如 "买入"），仅用于日志记录
+
+        Returns:
+            是否成功关闭
+
+        Raises:
+            Exception: 交易窗口不存在
+        """
+        window = self.get_trading_window()
+        if window is None:
+            raise Exception("交易窗口未找到，无法关闭子面板")
+
+        self.logger.info(
+            f"关闭子面板 '{dialog_title}'：发送 F4 切换到查询视图"
+        )
+
+        # 在 同花顺 xiadan.exe 中，按 F4 切换回查询/持仓视图即可关闭买入/卖出子面板
+        self.send_key("F4")
+        time.sleep(0.5)
+
+        # 验证：买入/卖出面板是否已关闭（检查是否有 "证券代码" 字段）
+        try:
+            for ctrl in window.descendants():
+                try:
+                    text = ctrl.window_text() or ""
+                    if "证券代码" in text or "买入价格" in text or "卖出价格" in text:
+                        self.logger.warning(
+                            f"F4 后子面板仍存在（检测到 '{text[:20]}'），尝试再按一次 F4"
+                        )
+                        self.send_key("F4")
+                        time.sleep(0.5)
+                        break
+                except Exception:
+                    continue
+        except Exception as e:
+            self.logger.warning(f"验证子面板关闭状态时出错: {e}")
+
+        self.logger.info(f"子面板 '{dialog_title}' 已通过 F4 切换关闭")
+        return True
+
     # ------------------------------------------------------------
     # 剪切板
     # ------------------------------------------------------------
 
     def get_clipboard(self, retries: int = 3, delay: float = 0.1) -> Optional[str]:
-        """获取剪切板数据"""
+        """获取剪切板数据（尝试多种格式：CF_UNICODETEXT → CF_TEXT）"""
+        import win32clipboard
+        import win32con
+        formats = [win32con.CF_UNICODETEXT, win32con.CF_TEXT]
+
         for i in range(retries):
-            try:
-                data = GetData()
-                if data:
-                    return data
-            except Exception as e:
-                if i == retries - 1:
-                    self.logger.error(f"获取剪切板数据失败: {str(e)}")
+            for fmt in formats:
+                try:
+                    win32clipboard.OpenClipboard(0)
+                    try:
+                        data = win32clipboard.GetClipboardData(fmt)
+                        if data:
+                            return data
+                    finally:
+                        win32clipboard.CloseClipboard()
+                except Exception:
+                    continue
+            if i < retries - 1:
                 time.sleep(delay)
+
+        self.logger.error(f"获取剪切板数据失败（已重试 {retries} 次）")
         return None

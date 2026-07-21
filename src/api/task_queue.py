@@ -14,13 +14,16 @@
 import queue
 import threading
 import time
-from typing import Callable, Any, Optional
+from collections import deque
+from typing import Callable, Any, Optional, List
 
 from src.api.response import TaskTimeoutError
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
+from src.utils.diagnostic import DiagnosticUtil
 from src.utils.logger import Logger
 from src.utils.screenshot import ScreenshotUtil
+from src.utils.singleton import Singleton
 
 
 class Task:
@@ -46,28 +49,14 @@ class Task:
         return time.time() - self.start_time
 
 
-class TaskQueue:
+class TaskQueue(Singleton):
     """全局任务队列（单例）"""
 
-    _instance = None
-
-    def __new__(cls):
-        if not cls._instance:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
     @classmethod
-    def get_instance(cls):
-        if not cls._instance:
-            cls._instance = cls()
-        return cls._instance
+    def get_instance(cls) -> "TaskQueue":
+        return cls._get_instance()
 
-    def __init__(self):
-        if self._initialized:
-            return
-        self._initialized = True
-
+    def _init(self):
         self.logger = Logger.get_instance()
         self.config = AppConfig()
         self.window_service = WindowService()
@@ -81,6 +70,10 @@ class TaskQueue:
         self._queue: queue.Queue = queue.Queue(maxsize=self._max_size)
         self._current_task: Optional[Task] = None
         self._lock = threading.Lock()
+
+        # 诊断快照历史（自动记录最近 20 步操作后的界面状态）
+        self._diagnostic_history: deque = deque(maxlen=20)
+        self._diag_lock = threading.Lock()
 
         # 启动 worker 线程
         self._worker = threading.Thread(target=self._worker_loop, daemon=True, name="Task-Worker")
@@ -166,6 +159,10 @@ class TaskQueue:
 
             finally:
                 watchdog.cancel()
+
+                # 自动诊断：任务结束后记录界面状态（无论成功失败）
+                self._auto_diagnostic(task)
+
                 with self._lock:
                     self._current_task = None
 
@@ -188,7 +185,10 @@ class TaskQueue:
         每个任务开始前执行:
         1. ESC×2 关闭可能存在的弹窗
         2. 重新激活窗口
-        3. F1 切回买入默认界面
+        3. F4 打开查询面板（查询/持仓视图，所有操作的安全起点）
+
+        注意：下单操作（place_order）会自动发送 F1 切换到买入面板，
+        因此重置终点设为查询面板（F4）可同时满足查询和下单的起始需求。
         """
         try:
             self.window_service.send_key("ESC")
@@ -202,17 +202,17 @@ class TaskQueue:
             trading_path = self.config.get_trading_app_path()
             if trading_path:
                 # foreground=False: 仅恢复最小化窗口，不抢焦点
-                # 后续 F1 按键通过 PostMessage 后台发送
                 self.window_service.activate_window(trading_path, foreground=False)
                 time.sleep(0.1)
         except Exception as e:
             self.logger.warning(f"重置时激活窗口失败: {str(e)}")
 
         try:
-            self.window_service.send_key("F1")
+            # F4 打开查询面板（比 F1 买入面板更适合作为所有操作的安全起点）
+            self.window_service.send_key("F4")
             time.sleep(0.2)
         except Exception as e:
-            self.logger.warning(f"重置时 F1 失败: {str(e)}")
+            self.logger.warning(f"重置时 F4 失败: {str(e)}")
 
     def _handle_timeout(self, task: Task) -> None:
         """看门狗：任务超时后的恢复流程
@@ -245,6 +245,9 @@ class TaskQueue:
         except Exception as e:
             self.logger.error(f"超时截图失败: {str(e)}")
 
+        # 诊断：OCR 识别截图内容，帮助定位超时原因
+        DiagnosticUtil().snapshot(f"timeout_{task.name}")
+
         # 步骤 2: 发送 ESC 关闭可能存在的弹窗
         try:
             self.window_service.send_key("ESC")
@@ -264,12 +267,12 @@ class TaskQueue:
             self.logger.error(f"超时激活窗口失败: {str(e)}")
             recovery_error = str(e)
 
-        # 步骤 4: 切回 F1 默认界面
+        # 步骤 4: 切回 F4 查询面板（安全起点）
         try:
-            self.window_service.send_key("F1")
+            self.window_service.send_key("F4")
             time.sleep(0.3)
         except Exception as e:
-            self.logger.error(f"超时 F1 重置失败: {str(e)}")
+            self.logger.error(f"超时 F4 重置失败: {str(e)}")
             recovery_error = str(e)
 
         # 步骤 5: 所有恢复步骤完成，现在才释放 HTTP 等待
@@ -302,3 +305,46 @@ class TaskQueue:
             "current_task_duration": current_duration,
             "is_zombie": current_duration is not None and current_duration > 60
         }
+
+    def _auto_diagnostic(self, task: Task) -> None:
+        """任务执行后自动诊断记录（无论成功失败）
+
+        自动捕获界面状态并保存到历史队列。
+        让我（AI 助手）可以随时通过 /diagnostic/history 查看每一步的界面状态。
+        """
+        try:
+            info = DiagnosticUtil().snapshot(f"task_{task.name}")
+            entry = {
+                "task_name": task.name,
+                "task_params": task.params,
+                "elapsed_seconds": round(task.elapsed(), 2),
+                "success": task.error is None,
+                "error": str(task.error) if task.error else None,
+                "timestamp": time.strftime("%H:%M:%S"),
+                "ui_text": info.get("ui_text", ""),
+                "ocr_text": info.get("ocr_text", ""),
+                "screenshot": info.get("screenshot"),
+            }
+            with self._diag_lock:
+                self._diagnostic_history.append(entry)
+            self.logger.info(
+                f"自动诊断 [{task.name}] 完成: "
+                f"UI文本={len(info.get('ui_text','').split(chr(10)))}项"
+            )
+        except Exception as e:
+            self.logger.warning(f"自动诊断失败 [{task.name}]: {e}")
+
+    def get_diagnostic_history(self, n: int = 5) -> List[dict]:
+        """获取最近的诊断历史
+
+        Args:
+            n: 返回最近几条记录（默认 5，最大 20）
+
+        Returns:
+            诊断记录列表（按时间倒序，最新的在前）
+        """
+        with self._diag_lock:
+            history = list(self._diagnostic_history)
+        # 按时间倒序返回（最新的在前）
+        history.reverse()
+        return history[:n]

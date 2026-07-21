@@ -9,10 +9,11 @@ import threading
 from typing import Optional
 
 from src.utils.logger import Logger
+from src.utils.singleton import Singleton
 
 
-class OcrService:
-    """OCR 服务（单例）
+class OcrService(Singleton):
+    """单例 OCR 服务
 
     ddddocr 基于 ONNX Runtime，CPU 推理:
     - 模型文件几十 MB
@@ -21,28 +22,15 @@ class OcrService:
     - 闲置时 CPU 占用为 0
     """
 
-    _instance = None
-    _lock = threading.Lock()
-
-    def __new__(cls):
-        if not cls._instance:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
     @classmethod
-    def get_instance(cls):
-        if not cls._instance:
-            cls._instance = cls()
-        return cls._instance
+    def get_instance(cls) -> "OcrService":
+        return cls._get_instance()
 
-    def __init__(self):
-        if self._initialized:
-            return
-        self._initialized = True
+    def _init(self):
         self.logger = Logger.get_instance()
         self._ddddocr = None
         self._loaded = False
+        self._ocr_lock = threading.Lock()
 
     def warmup(self) -> bool:
         """预热 OCR 引擎（加载模型）
@@ -52,7 +40,7 @@ class OcrService:
         Returns:
             是否加载成功
         """
-        with self._lock:
+        with self._ocr_lock:
             if self._loaded:
                 return True
 
@@ -72,7 +60,7 @@ class OcrService:
                 return False
 
     def recognize(self, image_path: str) -> str:
-        """识别图片中的文字（仅数字）
+        """识别图片中的文字（仅数字，用于验证码场景）
 
         Args:
             image_path: 图片文件路径
@@ -80,29 +68,56 @@ class OcrService:
         Returns:
             识别结果（已清理为纯数字），失败返回空字符串
         """
+        result = self._ocr(image_path)
+        if result:
+            return "".join(filter(str.isdigit, result))
+        return ""
+
+    def recognize_bytes(self, image_data: bytes) -> str:
+        """识别图片字节流（仅数字，用于验证码场景）"""
+        result = self._ocr_bytes(image_data)
+        if result:
+            return "".join(filter(str.isdigit, result))
+        return ""
+
+    def recognize_text(self, image_path: str) -> str:
+        """识别图片中的全部文字（全文本，用于诊断/调试）
+
+        与 recognize() 的区别：不过滤数字，保留所有识别出的字符，
+        包括中文、字母、标点等，适用于弹窗截图 OCR 诊断。
+
+        Args:
+            image_path: 图片文件路径
+
+        Returns:
+            识别出的全部文本，失败返回空字符串
+        """
+        return self._ocr(image_path) or ""
+
+    def recognize_text_bytes(self, image_data: bytes) -> str:
+        """识别图片字节流中的全部文字（全文本，用于诊断）"""
+        return self._ocr_bytes(image_data) or ""
+
+    def _ocr(self, image_path: str) -> str:
+        """底层 OCR 识别（原始结果，不经任何过滤）"""
         if not self._loaded:
             if not self.warmup():
                 return ""
-
         try:
             with open(image_path, "rb") as f:
                 image_data = f.read()
-            result = self._ddddocr.classification(image_data)
-            # 清理为纯数字
-            cleaned = "".join(filter(str.isdigit, result))
-            return cleaned
+            return self._ddddocr.classification(image_data) or ""
         except Exception as e:
             self.logger.error(f"OCR 识别失败: {str(e)}")
             return ""
 
-    def recognize_bytes(self, image_data: bytes) -> str:
-        """识别图片字节流"""
+    def _ocr_bytes(self, image_data: bytes) -> str:
+        """底层 OCR 识别字节流（原始结果）"""
         if not self._loaded:
             if not self.warmup():
                 return ""
         try:
-            result = self._ddddocr.classification(image_data)
-            return "".join(filter(str.isdigit, result))
+            return self._ddddocr.classification(image_data) or ""
         except Exception as e:
             self.logger.error(f"OCR 识别失败: {str(e)}")
             return ""

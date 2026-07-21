@@ -7,6 +7,7 @@ import os
 from typing import Any
 
 from src.utils.logger import Logger
+from src.utils.singleton import Singleton
 
 
 # 项目根目录（main.py 所在目录），所有相对路径基于此计算
@@ -46,21 +47,14 @@ DEFAULT_CONFIG = {
 }
 
 
-class AppConfig:
+class AppConfig(Singleton):
     """应用配置（单例）"""
 
-    _instance = None
+    @classmethod
+    def get_instance(cls) -> "AppConfig":
+        return cls._get_instance()
 
-    def __new__(cls):
-        if not cls._instance:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
-    def __init__(self):
-        if self._initialized:
-            return
-        self._initialized = True
+    def _init(self):
         self.logger = Logger.get_instance()
         self._config = self._load_config()
 
@@ -149,3 +143,32 @@ class AppConfig:
     def get_all(self) -> dict:
         """获取全部配置（用于 /health 接口）"""
         return self._config.copy()
+
+    def reload(self) -> dict:
+        """热重载配置文件
+
+        重新读取 config/app_config.json 并合并到当前配置。
+        注意: trading_app_path 等路径变更需重启服务才能完全生效。
+
+        Returns:
+            重载后的配置摘要
+        """
+        old_config = self._config.copy()
+        self._config = self._load_config()
+
+        # 计算变更项
+        changes = []
+        for key in self._config:
+            if self._config.get(key) != old_config.get(key):
+                changes.append(key)
+
+        if changes:
+            self.logger.info(f"配置热重载完成，变更项: {changes}")
+        else:
+            self.logger.info("配置热重载完成，无变更")
+
+        return {
+            "reloaded": True,
+            "changes": changes,
+            "config_path": CONFIG_PATH
+        }

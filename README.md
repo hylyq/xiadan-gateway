@@ -8,11 +8,15 @@
 |------|------|
 | 单实例运行 | 通过 Windows 全局互斥锁保证同一时刻只有一个实例运行 |
 | 顺序执行 | 单 worker 线程的任务队列，避免 `xiadan.exe` 并发冲突 |
-| 看门狗机制 | 任务超时自动触发截图 + ESC + 激活 + F1 恢复 |
+| 看门狗机制 | 任务超时自动触发截图 + ESC + 激活 + F4 恢复 |
 | 幂等检查 | 60 秒窗口内相同参数的下单请求会被拒绝，防止 HTTP 超时重试导致重复下单 |
 | OCR 验证码 | 基于 `ddddocr` 自动识别同花顺查询时的验证码 |
 | 一键清仓 | `/orders/sell-all` 自动查询持仓并市价卖出指定股票全部可用数量 |
 | 价格自动校验 | A 股价格限制 2 位小数，API 层拦截 + 输入前自动修正 |
+| 生产级服务器 | 基于 `waitress` WSGI 服务器，支持优雅关闭（SIGINT/SIGTERM） |
+| 配置热更新 | `POST /admin/reload-config` 无需重启即可重载配置 |
+| 截图自动清理 | 启动时自动清理过期截图（保留 200 张 / 7 天内） |
+| 安全认证 | Token 使用 `hmac.compare_digest` 常量时间比较，防时序攻击 |
 
 ## 快速开始
 
@@ -42,7 +46,7 @@ uv run python main.py --dev
   "task_queue": {
     "max_size": 50,
     "watchdog_timeout_seconds": 30,
-    "query_timeout_seconds": 15,
+    "query_timeout_seconds": 35,
     "confirm_timeout_seconds": 10
   },
   "idempotency": { "order_dedup_window_seconds": 60 },
@@ -57,12 +61,14 @@ uv run python main.py --dev
 |--------|--------|------|
 | `trading_app_path` | "" | `xiadan.exe` 完整路径，**必须配置** |
 | `task_queue.watchdog_timeout_seconds` | 30 | 下单看门狗超时（秒） |
-| `task_queue.query_timeout_seconds` | 15 | 查询类操作超时（秒） |
+| `task_queue.query_timeout_seconds` | 35 | 查询类操作超时（秒，含验证码处理） |
 | `task_queue.confirm_timeout_seconds` | 10 | 确认/按键类操作超时（秒） |
 | `task_queue.max_size` | 50 | 任务队列最大长度 |
 | `idempotency.order_dedup_window_seconds` | 60 | 下单去重窗口（秒） |
 | `ocr.max_retry` | 3 | 验证码识别最大重试次数 |
 | `window_monitor.enabled` | true | 是否启用窗口最小化监控 |
+
+> **热更新**：修改配置后可调用 `POST /admin/reload-config` 热重载，无需重启服务。部分配置（如 `trading_app_path`）仍需重启才能完全生效。通过 `GET /health` 确认服务状态。
 
 ## 统一响应格式
 
@@ -114,6 +120,7 @@ uv run python main.py --dev
 |------|------|------|------|-------------|
 | GET | `/health` | 健康检查 | 否 | 5s |
 | GET | `/queue/status` | 任务队列状态 | 否 | 5s |
+| POST | `/admin/reload-config` | 热重载配置文件 | 否 | 5s |
 | GET | `/account/balance` | 资金余额 | 是 | 40s |
 | GET | `/positions` | 持仓查询 | 是 | 40s |
 | GET | `/trades/today` | 今日成交 | 是 | 40s |
@@ -124,6 +131,9 @@ uv run python main.py --dev
 | POST | `/orders/confirm` | Y 键确认委托 | 是 | 30s |
 | POST | `/actions/send-key` | 手动发送按键 | 是 | 30s |
 | POST | `/actions/click` | 鼠标点击坐标 | 是 | 30s |
+| POST | `/actions/close-dialog` | 安全关闭子面板（买入/卖出） | 是 | 30s |
+| GET | `/diagnostic/snapshot` | 当前窗口截图+UI文本+OCR（调试用） | **否** | 10s |
+| GET | `/diagnostic/history` | 最近N步操作后的界面状态历史（调试用） | **否** | 5s |
 
 > **命名规范**：采用 RESTful 资源风格 — 资源用名词复数（`/orders`、`/positions`），子操作用连字符路径（`/orders/cancel-all`、`/orders/sell-all`），辅助操作归入 `/actions/` 命名空间。
 > 查询类接口（无副作用）使用 GET，操作类接口（有副作用）使用 POST。
@@ -250,6 +260,73 @@ curl -X POST http://localhost:5000/actions/send-key -H "Content-Type: applicatio
 curl -X POST http://localhost:5000/actions/click -H "Content-Type: application/json" -d '{"x": 100, "y": 200}'
 ```
 
+### POST /actions/close-dialog 安全关闭子面板
+
+关闭买入/卖出等嵌入子面板（通过 F4 切换视图实现，绝不关闭整个程序）。
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `title` | 否 | 面板名称（如 `"买入"`），仅用于日志 |
+
+```bash
+curl -X POST http://localhost:5000/actions/close-dialog -H "Content-Type: application/json" -d '{"title": "买入"}'
+```
+
+**说明：** 同花顺的买入/卖出窗口是嵌入主窗口的子视图（不是独立对话框），ESC/WM_CLOSE 均无效。本接口发送 F4 切换到查询视图来实现关闭。
+
+### GET /diagnostic/snapshot 诊断快照
+
+当前窗口的截图路径 + UI 控件文本 + OCR 全文识别。不入队，立即返回。
+
+```bash
+curl http://localhost:5000/diagnostic/snapshot
+```
+
+响应示例：
+```json
+{
+  "status": "success",
+  "data": {
+    "screenshot": "logs/screenshots/api_diagnostic_20260721_120000.png",
+    "ui_text": "[窗口标题] 网上股票交易系统5.0\n可用金额\n148444.77\n...",
+    "ocr_text": "",
+    "ocr_failed": true
+  }
+}
+```
+
+### GET /diagnostic/history 诊断历史
+
+返回最近 N 个任务执行后的界面状态快照。让我（AI 助手）可以查看每一步操作后的窗口状态，从而自信地编写和调试代码。
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `n` | 否 | 返回条数（默认 5，最大 20） |
+
+```bash
+curl "http://localhost:5000/diagnostic/history?n=3"
+```
+
+响应示例：
+```json
+{
+  "status": "success",
+  "data": {
+    "total_returned": 3,
+    "max_available": 20,
+    "entries": [
+      {
+        "task_name": "get_position",
+        "elapsed_seconds": 14.22,
+        "success": true,
+        "timestamp": "17:01:13",
+        "ui_text": "[窗口标题] 网上股票交易系统5.0\n可用金额\n148444.77\n..."
+      }
+    ]
+  }
+}
+```
+
 ## 调用方 timeout 配置
 
 **关键约束**：调用方 HTTP timeout 必须 > 服务端看门狗 timeout + 恢复耗时（约 5 秒）。否则会出现 HTTP 超时但服务端仍在恢复的中间状态。
@@ -291,8 +368,12 @@ xiadan-gateway/
 │   ├── app_config.json       # 运行时配置文件
 │   └── key_config.py         # Windows 虚拟键码映射表
 ├── src/
+│   ├── constants.py          # 集中管理控件ID/窗口标题/关键词常量
 │   ├── api/                  # API 层
-│   │   ├── routes.py         # Flask 路由 + 应用工厂
+│   │   ├── routes.py         # Flask 应用工厂 + 系统路由
+│   │   ├── query_routes.py   # 查询类 Blueprint（持仓/资金/成交/委托）
+│   │   ├── order_routes.py   # 下单/撤单/清仓 Blueprint
+│   │   ├── action_routes.py  # 手动操作/诊断 Blueprint
 │   │   ├── task_queue.py     # 全局任务队列 + 看门狗
 │   │   ├── response.py       # 统一响应封装 + 错误码
 │   │   └── idempotency.py    # 下单幂等检查
@@ -305,32 +386,52 @@ xiadan-gateway/
 │   │   ├── position_service.py # 持仓/资金/成交查询
 │   │   └── trading_service.py  # 撤单服务
 │   ├── models/
-│   │   └── config.py         # AppConfig 配置管理（单例）
+│   │   └── config.py         # AppConfig 配置管理（单例 + 热重载）
 │   └── utils/
+│       ├── singleton.py      # 线程安全单例基类（双重检查锁定）
 │       ├── logger.py         # 单例日志器
-│       └── screenshot.py     # 截图工具
+│       ├── screenshot.py     # 截图工具 + 自动清理
+│       └── diagnostic.py     # 诊断工具（截图+UI文本+OCR）
+├── tests/
+│   └── test_core.py          # 核心逻辑单元测试（pytest）
 ├── logs/                     # 日志目录（运行时生成）
 │   ├── app.log
 │   └── screenshots/
-├── main.py                   # 启动入口
+├── main.py                   # 启动入口（waitress + 优雅关闭）
+├── .python-version           # Python 版本锁定（3.11）
 └── pyproject.toml            # 依赖与构建配置
 ```
 
 ## 技术栈
 
 - **Python 3.11+** / **uv**（包管理）
-- **Flask** + **flask-cors**（HTTP 服务）
+- **Flask** + **flask-cors**（HTTP 路由，Blueprint 模块化）
+- **waitress**（生产级 WSGI 服务器）
 - **pywinauto**（UIA backend，窗口/控件自动化）
 - **pywin32**（Windows API：按键、窗口、互斥锁）
 - **psutil**（进程枚举与 exe 路径匹配）
 - **pyautogui**（鼠标点击、全屏截图）
 - **ddddocr**（验证码识别，基于 ONNX Runtime）
+- **pytest**（单元测试）
+
+## 开发
+
+```bash
+# 运行单元测试
+uv run pytest
+
+# 运行指定测试文件
+uv run pytest tests/test_core.py -v
+
+# 开发模式（热加载）
+uv run python main.py --dev
+```
 
 ## 关键设计要点
 
-- **单 worker 线程任务队列**：所有写操作（下单/撤单/查询）通过 `TaskQueue` 顺序执行，避免 `xiadan.exe` 并发冲突。`/health` 和 `/queue/status` 不入队。
-- **看门狗恢复**：任务超时后必须完成所有恢复步骤（截图 + ESC + 激活 + F1）才返回错误，确保 HTTP 调用方收到 `TASK_TIMEOUT` 时 `xiadan.exe` 已重置为初始状态。
-- **任务前状态重置**：每个任务开始前执行 ESC×2 + 激活 + F1，确保从已知初始状态开始。
+- **单 worker 线程任务队列**：所有写操作（下单/撤单/查询）通过 `TaskQueue` 顺序执行，避免 `xiadan.exe` 并发冲突。`/health`、`/queue/status`、`/admin/reload-config` 不入队。
+- **看门狗恢复**：任务超时后必须完成所有恢复步骤（截图 + ESC + 激活 + F4）才返回错误，确保 HTTP 调用方收到 `TASK_TIMEOUT` 时 `xiadan.exe` 已重置为初始状态。
+- **任务前状态重置**：每个任务开始前执行 ESC×2 + 激活 + F4，确保从查询面板（安全起点）开始。
 - **幂等检查**：60 秒窗口内相同 `code+status+amount+price+price_type` 的下单请求会被拒绝（HTTP 409）。
 - **控件树缓存**：`pywinauto` 的 `descendants()` 会缓存控件树，界面变化后必须重新 `get_trading_window()`。
 - **后台按键（PostMessage）**：字母键（Y/N）、ESC、ENTER、组合键（Ctrl+C 等）通过 `PostMessage` 直接发送到 `xiadan.exe` 的消息队列，**不改变前台窗口、不抢焦点**。
@@ -348,3 +449,95 @@ xiadan-gateway/
 - **撤单调复选框**：进入撤单界面后读取「撤单不需要确认」复选框的实际勾选状态（`get_toggle_state()`），未勾选才点击勾选（避免误反选）。点击撤单按钮后始终检测确认弹窗，不依赖复选框状态。
 - **幂等回滚**：下单失败时清除幂等记录，允许客户端重试。超时不清除（防止重复提交），客户端应通过 `/orders/pending` 确认状态。
 - **`sell-all` 流程**：先查持仓定位股票代码 → 自动提取可用余额（兼容多种字段名）→ 市价卖出全部可用数量 → 失败时清除幂等记录。
+
+## 已知问题与注意事项
+
+以下是在开发测试过程中发现的关键陷阱与防御措施。
+
+### 按键安全：前台 keybd_event 泄漏
+
+`send_key()` 对功能键（F1-F12）使用 `keybd_event` 前台发送，这些按键会发到**当前前台窗口**。如果交易窗口不在前台，F1 会触发 Windows 帮助（打开 Edge）。
+
+**防御**：发送前台按键前必须调用 `click_input()` 将交易窗口带到前台。窗口未找到或激活失败时**必须抛出异常**，绝不静默发送按键。
+
+```python
+# window_service.py :: _activate_window_before_keybd()
+window = self.get_trading_window()
+if window is None:
+    raise Exception("交易窗口未找到，禁止发送按键")  # 不发送！
+window.click_input()  # 确保在前台
+self._send_key_foreground(keys)
+```
+
+同花顺买入/卖出窗口关闭方式：
+- **不要使用 ALT+F4**：会关闭整个 `xiadan.exe` 窗口（最小化到系统托盘），导致后续按键全部泄漏到桌面/IDE，可能造成 IDE 关闭等连锁反应
+- **不要使用 ESC**：买入/卖出子面板不是独立对话框，ESC 无效
+- **正确方式**：发送 F4 切换到查询/持仓视图即可关闭买入/卖出子面板
+
+### F4 切换键状态管理
+
+在 `xiadan.exe` 中，F4 是查询面板的**切换键**：
+- 按一次 F4：打开查询面板
+- 再按一次 F4：关闭查询面板
+
+如果上一个任务（如 `get_balance()`）已经按了 F4 打开了查询面板，下一个任务（如 `get_position()`）再按 F4 会**关闭**查询面板，导致 Ctrl+C 复制的是交易主面板数据（空数据）。
+
+**防御**：每个查询方法开头先按一次 F4（确保关闭可能已打开的面板），再按 F5 刷新，最后再按 F4 打开查询面板：
+
+```python
+self.send_key("F4")  # 关闭可能已打开的查询面板
+time.sleep(0.3)
+self.send_key("F5")  # 刷新
+time.sleep(0.3)
+self.send_key("F4")  # 打开查询面板（默认进入持仓视图）
+```
+
+### Custom Logger 不支持 %s 格式化
+
+项目自定义的 Logger（`src/utils/logger.py`）只接受单个 `message` 参数，**不支持**标准 Python logger 的 `%s` 格式占位符：
+
+```python
+# 正确 - 使用 f-string
+self.logger.warning(f"错误信息: {e}")
+self.logger.info(f"状态: {status}")
+
+# 错误 - 不支持 %s 语法（会抛出 TypeError）
+self.logger.warning("错误信息: %s", e)  # TypeError!
+```
+
+### 诊断截图 + OCR 的局限性
+
+诊断工具 `DiagnosticUtil` 提供两种方式确认界面状态：
+
+| 方式 | 可靠性 | 说明 |
+|------|--------|------|
+| **UI 控件文本提取**（pywinauto） | 高 | 直接枚举窗口控件文本，精确可靠 |
+| **全文本 OCR**（ddddocr） | 低 | 对整屏截图中文识别极差，仅验证码场景（小图数字）可用 |
+
+开发测试时应优先使用 UI 控件文本提取来判断界面状态（如检测 `证券代码` 字段判断买入窗口是否打开）。
+
+### 自动诊断历史
+
+每个任务执行后（无论成功失败），系统自动调用 `DiagnosticUtil` 记录界面状态（UI 文本 + 截图路径），保存到 20 条循环历史队列。可以通过 `GET /diagnostic/history` 随时查看最近 N 步操作后的窗口状态，无需手动调用诊断。
+
+开发测试流程：
+1. 执行 API 操作（如下单、查询）
+2. 调用 `GET /diagnostic/history?n=1` 查看操作后的界面状态
+3. 通过 UI 文本确认窗口是否正确切换、数据是否正确显示
+4. 若发现问题，UI 文本会明确显示当前窗口上的所有控件文字，帮助快速定位
+
+```bash
+# 执行操作后自动记录诊断，随时查看历史
+curl "http://localhost:5000/diagnostic/history?n=3"
+```
+
+### keybd_event 窗口焦点依赖
+
+`keybd_event` 系列函数（Ctrl+C、功能键等）必须确保目标窗口在前台。`PostMessage` 系列函数（普通字母键）可后台发送，不依赖焦点。
+
+| 发送方式 | 依赖前台 | 适用场景 |
+|---------|---------|---------|
+| `keybd_event` | 是 | 功能键 F1-F12、Ctrl+C 等组合键 |
+| `PostMessage` | 否 | 字母键 Y/N、方向键、ENTER、ESC（非子面板） |
+
+在任务 worker 线程中调用 `click_input()` 可以正常将窗口带到前台（与主线程不同，`SetForegroundWindow` 在 worker 线程无效）。

@@ -6,10 +6,12 @@
 3. 初始化 Logger
 4. 预加载 ddddocr
 5. 启动窗口监控
-6. 启动任务队列（自动启动 worker 线程）
-7. 启动 Flask 服务（主线程）
+6. 启动 waitress 生产服务器（主线程）
+7. 优雅关闭（Ctrl+C 时停止监控、等待队列排空）
 """
+import signal
 import sys
+import threading
 
 import win32api
 import win32event
@@ -19,7 +21,6 @@ from src.api.routes import create_app
 from src.core.ocr import OcrService
 from src.models.config import AppConfig
 from src.services.window_monitor import WindowMonitor
-from src.services.window_service import WindowService
 from src.utils.logger import Logger
 
 
@@ -40,6 +41,10 @@ def check_single_instance():
 def main():
     # 1. 单实例检查
     mutex = check_single_instance()
+
+    # 优雅关闭事件
+    shutdown_event = threading.Event()
+    monitor = None
 
     try:
         # 2. 加载配置
@@ -76,9 +81,15 @@ def main():
             monitor.start(trading_path)
         else:
             logger.info("窗口监控已禁用")
-            monitor = None
 
-        # 6. 启动 Flask 服务（任务队列在第一次请求时初始化）
+        # 5.5 清理过期截图
+        from src.utils.screenshot import ScreenshotUtil
+        screenshot_util = ScreenshotUtil(
+            config.get_logging_config().get("screenshot_dir", "logs/screenshots")
+        )
+        screenshot_util.cleanup_old_screenshots()
+
+        # 6. 创建 Flask 应用
         app = create_app()
 
         # 获取服务监听配置
@@ -104,13 +115,29 @@ def main():
         logger.info(f"撤单接口: POST http://{host}:{port}/orders/cancel-all")
         logger.info(f"队列状态: GET  http://{host}:{port}/queue/status")
         logger.info(f"看门狗超时: {watchdog_timeout}s, 推荐客户端 timeout: {watchdog_timeout + 10}s")
+        logger.info(f"服务器: waitress (生产级 WSGI)")
         logger.info("-" * 60)
 
-        # threaded=True 让不入队的快速接口（/health 等）可并行响应
-        # TaskQueue 仍保证下单/撤单/查询串行执行
-        app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
+        # 7. 注册优雅关闭信号处理
+        def _graceful_shutdown(signum, frame):
+            logger.info("\n收到关闭信号，正在优雅停机...")
+            shutdown_event.set()
+            if monitor:
+                monitor.stop()
+            logger.info("窗口监控已停止，服务已关闭")
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, _graceful_shutdown)
+        signal.signal(signal.SIGTERM, _graceful_shutdown)
+
+        # 8. 启动 waitress 生产服务器
+        from waitress import serve
+        serve(app, host=host, port=port, threads=4,
+              channel_timeout=watchdog_timeout + 15)
 
     finally:
+        if monitor:
+            monitor.stop()
         if mutex:
             win32api.CloseHandle(mutex)
 

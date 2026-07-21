@@ -16,6 +16,7 @@ dependencies = [
     "pyautogui>=0.9.54",
     "ddddocr>=1.5.6",
     "pillow>=10.0.0",
+    "waitress>=3.0.2",
 ]
 
 [project.optional-dependencies]
@@ -25,3 +26,13 @@ dev = [
 
 [tool.uv]
 package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-mock>=3.15.1",
+]

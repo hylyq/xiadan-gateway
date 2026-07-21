@@ -10,34 +10,22 @@ from typing import Optional
 from src.api.response import ApiError, ErrorCode
 from src.models.config import AppConfig
 from src.utils.logger import Logger
+from src.utils.singleton import Singleton
 
 
-class IdempotencyChecker:
+class IdempotencyChecker(Singleton):
     """幂等检查器（单例）"""
 
-    _instance = None
-
-    def __new__(cls):
-        if not cls._instance:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
     @classmethod
-    def get_instance(cls):
-        if not cls._instance:
-            cls._instance = cls()
-        return cls._instance
+    def get_instance(cls) -> "IdempotencyChecker":
+        return cls._get_instance()
 
-    def __init__(self):
-        if self._initialized:
-            return
-        self._initialized = True
+    def _init(self):
         self.logger = Logger.get_instance()
         self.config = AppConfig()
         # 任务记录: {task_key: timestamp}
         self._records = {}
-        self._lock = Lock()
+        self._records_lock = Lock()
 
     def _make_key(self, code: str, status: str, amount: Optional[str],
                   price: Optional[str], price_type: str) -> str:
@@ -61,7 +49,7 @@ class IdempotencyChecker:
         key = self._make_key(code, status, amount, price, price_type)
         now = time.time()
 
-        with self._lock:
+        with self._records_lock:
             # 清理过期记录
             expired_keys = [k for k, t in self._records.items() if now - t > window]
             for k in expired_keys:
@@ -77,8 +65,8 @@ class IdempotencyChecker:
                     message=f"60秒内已提交相同订单（{elapsed}秒前），请勿重复下单",
                     suggestion=(
                         "请先确认上一笔订单状态: "
-                        "1) 调用 GET /today_trades 查询订单是否已成交；"
-                        "2) 如需撤单请调用 GET /cancel_all_orders；"
+                        "1) 调用 GET /trades/today 查询订单是否已成交；"
+                        "2) 如需撤单请调用 POST /orders/cancel-all；"
                         "3) 确认后再重新下单"
                     ),
                     details={
@@ -106,7 +94,7 @@ class IdempotencyChecker:
             是否清除了记录
         """
         key = self._make_key(code, status, amount, price, price_type)
-        with self._lock:
+        with self._records_lock:
             if key in self._records:
                 del self._records[key]
                 self.logger.info(f"下单失败，已清除幂等记录: {key}")
@@ -115,7 +103,7 @@ class IdempotencyChecker:
 
     def get_status(self) -> dict:
         """获取幂等检查状态"""
-        with self._lock:
+        with self._records_lock:
             return {
                 "record_count": len(self._records),
                 "records": [

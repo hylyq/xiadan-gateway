@@ -1,0 +1,387 @@
+{
+  "test_time": "2026-07-21 17:58:55",
+  "summary": {
+    "total_steps": 12,
+    "successful": 12,
+    "failed": 0,
+    "success_rate": "100.0%",
+    "avg_duration_ms": 13093.5,
+    "total_duration_ms": 157121.9,
+    "data_responses": 12
+  },
+  "error_details": [],
+  "ocr_snapshots": [],
+  "steps": [
+    {
+      "step": 1,
+      "time": "17:55:44",
+      "method": "GET",
+      "path": "/health",
+      "description": "基础健康检查，确认服务和 xiadan.exe 状态",
+      "request_body": null,
+      "status_code": 200,
+      "response": {
+        "data": {
+          "config": {
+            "recommended_client_timeout_seconds": 40,
+            "recovery_time_seconds": 5,
+            "watchdog_timeout_seconds": 30
+          },
+          "queue_status": {
+            "current_task": null,
+            "current_task_duration": null,
+            "is_zombie": false,
+            "max_size": 50,
+            "queue_size": 0,
+            "worker_alive": true
+          },
+          "service": "xiadan-gateway",
+          "trading_app_path": "C:\\Users\\Marvin\\Documents\\同花顺安装目录\\同花顺远航版\\transaction\\xiadan.exe",
+          "version": "1.0.0",
+          "xiadan_running": true
+        },
+        "request_id": "req_20260721_175544_2135b290",
+        "status": "success",
+        "timestamp": "2026-07-21 17:55:44"
+      },
+      "duration_ms": 66.3
+    },
+    {
+      "step": 2,
+      "time": "17:55:48",
+      "method": "GET",
+      "path": "/queue/status",
+      "description": "查看任务队列当前状态",
+      "request_body": null,
+      "status_code": 200,
+      "response": {
+        "data": {
+          "current_task": null,
+          "current_task_duration": null,
+          "is_zombie": false,
+          "max_size": 50,
+          "queue_size": 0,
+          "worker_alive": true
+        },
+        "request_id": "req_20260721_175548_3bea9e42",
+        "status": "success",
+        "timestamp": "2026-07-21 17:55:48"
+      },
+      "duration_ms": 4.1
+    },
+    {
+      "step": 3,
+      "time": "17:55:48",
+      "method": "GET",
+      "path": "/account/balance",
+      "description": "查询资金余额，包含可用资金、总资产等",
+      "request_body": null,
+      "status_code": 200,
+      "response": {
+        "data": {
+          "冻结金额": "0.00",
+          "可取金额": "0.00",
+          "可用金额": "148444.77",
+          "当日盈亏": "-1260.35",
+          "当日盈亏比": "-0.84%",
+          "总资产": "149528.77",
+          "持仓盈亏": "-0.35",
+          "股票市值": "1084.00",
+          "资金余额": "148444.77"
+        },
+        "duration_ms": 12899.0,
+        "request_id": "req_20260721_175548_7f080b2a",
+        "status": "success",
+        "timestamp": "2026-07-21 17:56:01"
+      },
+      "duration_ms": 12902.8
+    },
+    {
+      "step": 4,
+      "time": "17:56:05",
+      "method": "GET",
+      "path": "/positions",
+      "description": "查询当前持仓列表",
+      "request_body": null,
+      "status_code": 200,
+      "response": {
+        "data": [
+          {
+            "": "",
+            "交易市场": "深圳Ａ股",
+            "仓位占比(%)": "0.72",
+            "冻结数量": "0",
+            "可用余额": "100",
+            "市价": "10.840",
+            "市值": "1084.000",
+            "序号": "1",
+            "当日买入": "100",
+            "当日卖出": "0",
+            "当日盈亏": "-0.35",
+            "当日盈亏比(%)": "-0.03",
+            "成本价": "10.844",
+            "操作": "",
+            "盈亏": "-0.350",
+            "盈亏比例(%)": "-0.030",
+            "股票余额": "100",
+            "证券代码": "000001",
+            "证券名称": "平安银行"
+          }
+        ],
+        "duration_ms": 25972.3,
+        "request_id": "req_20260721_175605_98303c03",
+        "status": "success",
+        "timestamp": "2026-07-21 17:56:31"
+      },
+      "duration_ms": 25976.1
+    },
+    {
+      "step": 5,
+      "time": "17:56:35",
+      "method": "GET",
+      "path": "/trades/today",
+      "description": "查询今日成交记录",
+      "request_body": null,
+      "status_code": 200,
+      "response": {
+        "data": [
+          {
+            "": "",
+            "交易市场": "深圳Ａ股",
+            "仓位占比(%)": "0.72",
+            "冻结数量": "0",
+            "可用余额": "100",
+            "市价": "10.840",
+            "市值": "1084.000",
+            "序号": "1",
+            "当日买入": "100",
+            "当日卖出": "0",
+            "当日盈亏": "-0.35",
+            "当日盈亏比(%)": "-0.03",
+            "成本价": "10.844",
+            "操作": "",
+            "盈亏": "-0.350",
+            "盈亏比例(%)": "-0.030",
+            "股票余额": "100",
+            "证券代码": "000001",
+            "证券名称": "平安银行"
+          }
+        ],
+        "duration_ms": 19888.2,
+        "request_id": "req_20260721_175635_c6cdabc6",
+        "status": "success",
+        "timestamp": "2026-07-21 17:56:54"
+      },
+      "duration_ms": 19892.4
+    },
+    {
+      "step": 6,
+      "time": "17:56:58",
+      "method": "GET",
+      "path": "/orders/pending",
+      "description": "查询当日所有委托记录",
+      "request_body": null,
+      "status_code": 200,
+      "response": {
+        "data": [
+          {
+            "": "",
+            "交易市场": "",
+            "合同编号": "",
+            "备注": "",
+            "委托价格": "0.000",
+            "委托数量": "0",
+            "委托时间": "",
+            "成交均价": "0.000",
+            "成交数量": "0",
+            "撤消数量": "0",
+            "操作": "",
+            "证券代码": "",
+            "证券名称": ""
+          },
+          {
+            "": "",
+            "交易市场": "",
+            "合同编号": "",
+            "备注": "",
+            "委托价格": "0.000",
+            "委托数量": "0",
+            "委托时间": "",
+            "成交均价": "0.000",
+            "成交数量": "0",
+            "撤消数量": "0",
+            "操作": "",
+            "证券代码": "",
+            "证券名称": ""
+          }
+        ],
+        "duration_ms": 26121.9,
+        "request_id": "req_20260721_175658_3534d92b",
+        "status": "success",
+        "timestamp": "2026-07-21 17:57:24"
+      },
+      "duration_ms": 26141.9
+    },
+    {
+      "step": 7,
+      "time": "17:57:27",
+      "method": "POST",
+      "path": "/actions/send-key",
+      "description": "模拟按 F1 打开买入窗口，用 OCR 验证窗口是否打开",
+      "request_body": {
+        "key": "F1"
+      },
+      "status_code": 200,
+      "response": {
+        "data": {
+          "key": "F1",
+          "sent": true
+        },
+        "duration_ms": 8314.9,
+        "request_id": "req_20260721_175727_66893cea",
+        "status": "success",
+        "timestamp": "2026-07-21 17:57:36"
+      },
+      "duration_ms": 8320.3
+    },
+    {
+      "step": 8,
+      "time": "17:57:40",
+      "method": "POST",
+      "path": "/actions/close-dialog",
+      "description": "安全关闭买入子对话框",
+      "request_body": {
+        "title": "买入"
+      },
+      "status_code": 200,
+      "response": {
+        "data": true,
+        "duration_ms": 10100.2,
+        "request_id": "req_20260721_175740_7bc3f10a",
+        "status": "success",
+        "timestamp": "2026-07-21 17:57:50"
+      },
+      "duration_ms": 10104.3
+    },
+    {
+      "step": 9,
+      "time": "17:57:54",
+      "method": "POST",
+      "path": "/orders/cancel-all",
+      "description": "执行全部撤单（F3 → 全部撤单 → 确认）",
+      "request_body": null,
+      "status_code": 200,
+      "response": {
+        "data": {
+          "cancel_type": "全部撤单",
+          "cancelled_count": null,
+          "confirm_dialog_shown": false,
+          "success": true
+        },
+        "duration_ms": 14619.2,
+        "request_id": "req_20260721_175754_8b5db611",
+        "status": "success",
+        "timestamp": "2026-07-21 17:58:08"
+      },
+      "duration_ms": 14624.0
+    },
+    {
+      "step": 10,
+      "time": "17:58:12",
+      "method": "POST",
+      "path": "/actions/click",
+      "description": "鼠标点击坐标 (200,10)，用于恢复窗口焦点",
+      "request_body": {
+        "x": 200,
+        "y": 10
+      },
+      "status_code": 200,
+      "response": {
+        "data": {
+          "x": 200,
+          "y": 10
+        },
+        "duration_ms": 7280.9,
+        "request_id": "req_20260721_175812_3350c38d",
+        "status": "success",
+        "timestamp": "2026-07-21 17:58:20"
+      },
+      "duration_ms": 7285.4
+    },
+    {
+      "step": 11,
+      "time": "17:58:20",
+      "method": "GET",
+      "path": "/account/balance",
+      "description": "再次查询余额，对比与第一次结果是否一致",
+      "request_body": null,
+      "status_code": 200,
+      "response": {
+        "data": {
+          "冻结金额": "0.00",
+          "可取金额": "0.00",
+          "可用金额": "148444.77",
+          "当日盈亏": "-1260.35",
+          "当日盈亏比": "-0.84%",
+          "总资产": "149528.77",
+          "持仓盈亏": "-0.35",
+          "股票市值": "1084.00",
+          "资金余额": "148444.77"
+        },
+        "duration_ms": 12740.3,
+        "request_id": "req_20260721_175820_32772411",
+        "status": "success",
+        "timestamp": "2026-07-21 17:58:32"
+      },
+      "duration_ms": 12743.8
+    },
+    {
+      "step": 12,
+      "time": "17:58:32",
+      "method": "GET",
+      "path": "/positions",
+      "description": "再次查询持仓，对比与第一次结果是否一致",
+      "request_body": null,
+      "status_code": 200,
+      "response": {
+        "data": [
+          {
+            "": "",
+            "交易市场": "",
+            "合同编号": "",
+            "备注": "",
+            "委托价格": "0.000",
+            "委托数量": "0",
+            "委托时间": "",
+            "成交均价": "0.000",
+            "成交数量": "0",
+            "撤消数量": "0",
+            "操作": "",
+            "证券代码": "",
+            "证券名称": ""
+          },
+          {
+            "": "",
+            "交易市场": "",
+            "合同编号": "",
+            "备注": "",
+            "委托价格": "0.000",
+            "委托数量": "0",
+            "委托时间": "",
+            "成交均价": "0.000",
+            "成交数量": "0",
+            "撤消数量": "0",
+            "操作": "",
+            "证券代码": "",
+            "证券名称": ""
+          }
+        ],
+        "duration_ms": 19056.6,
+        "request_id": "req_20260721_175832_27daee04",
+        "status": "success",
+        "timestamp": "2026-07-21 17:58:51"
+      },
+      "duration_ms": 19060.5
+    }
+  ]
+}

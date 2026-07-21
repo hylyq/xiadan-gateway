@@ -83,8 +83,8 @@ class TaskTimeoutError(ApiError):
             message = "任务执行超时，已截图存档并重置下单程序为初始状态"
             suggestion = (
                 "请立即采取以下检查操作："
-                "1) 调用 GET /today_trades 查询订单是否已提交；"
-                "2) 调用 GET /position 查看持仓变化；"
+                "1) 调用 GET /trades/today 查询订单是否已提交；"
+                "2) 调用 GET /positions 查看持仓变化；"
                 "3) 必要时登录同花顺客户端手动确认"
             )
         else:
@@ -107,18 +107,27 @@ def generate_request_id() -> str:
     return f"req_{timestamp}_{short_uuid}"
 
 
-def success_response(data: Any, request_id: Optional[str] = None) -> tuple:
+def success_response(data: Any, request_id: Optional[str] = None,
+                     duration_ms: Optional[float] = None) -> tuple:
     """构建成功响应
+
+    Args:
+        data: 响应数据
+        request_id: 请求 ID，不传则自动生成
+        duration_ms: 请求处理耗时（毫秒），不传则不返回
 
     Returns:
         (flask Response, http_status)
     """
-    return jsonify({
+    body = {
         "status": "success",
         "request_id": request_id or generate_request_id(),
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "data": data
-    }), 200
+        "data": data,
+    }
+    if duration_ms is not None:
+        body["duration_ms"] = round(duration_ms, 1)
+    return jsonify(body), 200
 
 
 def error_response(

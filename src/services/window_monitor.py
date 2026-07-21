@@ -116,6 +116,7 @@ class WindowMonitor:
     def _monitor_loop(self) -> None:
         self.logger.info("窗口监控线程已启动")
         consecutive_failures = 0
+        startup_skip = True  # 启动初期跳过日志噪音
 
         while self._running:
             try:
@@ -123,17 +124,26 @@ class WindowMonitor:
                 if hwnd is None:
                     consecutive_failures += 1
                     if consecutive_failures >= 5:
-                        self.logger.warning("连续5次未找到目标窗口，请检查 xiadan.exe 是否已启动")
+                        if not startup_skip:
+                            self.logger.warning("连续5次未找到目标窗口，请检查 xiadan.exe 是否已启动")
                         consecutive_failures = 0
+                        startup_skip = False
                 else:
                     consecutive_failures = 0
+                    startup_skip = False
                     self._target_hwnd = hwnd
                     if win32gui.IsIconic(hwnd):
                         self.logger.info("检测到目标窗口已最小化，正在恢复...")
                         if not self._restore_window(hwnd):
                             self._target_hwnd = None
             except Exception as e:
-                self.logger.error(f"监控循环异常: {str(e)}")
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    self.logger.warning(f"窗口监控连续失败 {consecutive_failures} 次: {str(e)}")
+                if consecutive_failures >= 10:
+                    self.logger.error(
+                        f"窗口监控已连续失败 {consecutive_failures} 次，可能 xiadan.exe 未启动"
+                    )
 
             time.sleep(self.check_interval)
 
