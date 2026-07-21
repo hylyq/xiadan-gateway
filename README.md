@@ -205,7 +205,7 @@ curl -X POST http://localhost:5000/orders/sell-all \
 - 股票 `code` 不在持仓中 → 返回 `VALIDATION_ERROR`
 - 可用余额 = 0 → 返回 `VALIDATION_ERROR`（提示无需卖出）
 
-### POST /orders/pending 当日委托
+### GET /orders/pending 当日委托
 
 ```bash
 curl http://localhost:5000/orders/pending
