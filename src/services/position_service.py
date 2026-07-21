@@ -102,6 +102,9 @@ class PositionService:
             self.logger.warning(f"点击内容区域(1047)失败: {e}")
         time.sleep(0.3)
 
+        # 2.5 检测并关闭提示弹窗（如非交易时段的 "Begin failed!"）
+        self._dismiss_popup_if_present(window)
+
         # 3. 检测是否有验证码弹窗（混合检测：control_id + 文本匹配）
         if self._detect_captcha(window):
             self.logger.info("检测到验证码弹窗（control_id 2405 或文本匹配），启动 OCR 处理")
@@ -187,6 +190,43 @@ class PositionService:
 
         return False
 
+    def _dismiss_popup_if_present(self, window) -> bool:
+        """检测并关闭常见提示弹窗（如非交易时段的 'Begin failed!' 提示）
+
+        同花顺在非交易时段查询时可能弹出提示窗（标题"提示"，内容如 "Begin failed!"），
+        阻挡表格数据的复制。此方法检测并关闭这类弹窗。
+
+        Returns:
+            是否关闭了弹窗
+        """
+        if window is None:
+            return False
+        try:
+            # 检测弹窗特征：查找"确定"按钮（标准对话框 cid=1 或 cid=2）
+            popup_keywords = ["Begin failed", "failed", "提示"]
+            for ctrl in window.descendants():
+                try:
+                    text = ctrl.window_text() or ""
+                    if any(kw in text for kw in popup_keywords):
+                        self.logger.info(f"检测到提示弹窗: {text[:80]}，尝试关闭")
+                        # 尝试点击"确定"按钮
+                        for btn_id in (1, 2):  # IDOK=1, IDCANCEL=2
+                            btn = self.window_service.find_element_in_window(window, btn_id)
+                            if btn is not None:
+                                btn.click_input()
+                                self.logger.info(f"已点击按钮 cid={btn_id} 关闭弹窗")
+                                time.sleep(0.5)
+                                return True
+                        # 找不到按钮则用 ENTER 关闭
+                        self.window_service.send_key("{ENTER}")
+                        time.sleep(0.5)
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
+
     # ------------------------------------------------------------
     # 资金余额（control_id 批量读取，无需 OCR）
     # ------------------------------------------------------------
@@ -223,6 +263,30 @@ class PositionService:
         self.logger.info(f"资金余额查询完成: {result}")
         return result
 
+    def _ensure_query_panel_open(self, window) -> None:
+        """确保查询面板已打开（F4 是切换键，不能盲按两次）
+
+        通过检测窗口中是否存在查询面板的树形菜单项（如"资金股票"、"当日委托"）
+        来判断面板状态。若未打开则按 F4 打开。
+        """
+        query_markers = ["资金股票", "当日成交", "当日委托", "历史成交"]
+        try:
+            for ctrl in window.descendants():
+                try:
+                    text = ctrl.window_text() or ""
+                    if any(marker in text for marker in query_markers):
+                        self.logger.info("查询面板已打开，无需按 F4")
+                        return
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # 查询面板未打开，按 F4 打开
+        self.logger.info("查询面板未打开，按 F4 打开")
+        self.window_service.send_key("F4")
+        time.sleep(0.5)
+
     # ------------------------------------------------------------
     # 持仓查询（F4 + Ctrl+C + 剪切板 + OCR 兜底）
     # ------------------------------------------------------------
@@ -233,15 +297,10 @@ class PositionService:
         self._activate_trading_window()
         window = self._get_focused_window()
 
-        # 先关闭可能已打开的查询面板（F4 是切换键，确保从主界面开始）
-        self.logger.info("确保从主交易界面开始（按 F4 关闭可能已打开的查询面板）")
-        self.window_service.send_key("F4")
-        time.sleep(0.3)
+        # 确保查询面板已打开（检测状态，不盲按 F4）
+        self._ensure_query_panel_open(window)
         self.window_service.send_key("F5")
         time.sleep(0.3)
-        # 再按 F4 打开查询面板 → 默认显示持仓
-        self.window_service.send_key("F4")
-        time.sleep(0.2)
 
         # 界面切换后重新获取窗口（避免缓存控件树）
         window = self.window_service.get_trading_window()
@@ -261,12 +320,8 @@ class PositionService:
         self._activate_trading_window()
         window = self._get_focused_window()
 
-        # 确保从主界面开始（关闭可能已打开的查询面板）
-        self.window_service.send_key("F4")
-        time.sleep(0.3)
-        # 进入查询界面
-        self.window_service.send_key("F4")
-        time.sleep(0.1)
+        # 确保查询面板已打开
+        self._ensure_query_panel_open(window)
 
         # 导航到"当日成交"页面（树形菜单 + 键盘兜底）
         self._navigate_to_query_page(window, "当日成交")
@@ -297,12 +352,8 @@ class PositionService:
         self._activate_trading_window()
         window = self._get_focused_window()
 
-        # 确保从主界面开始（关闭可能已打开的查询面板）
-        self.window_service.send_key("F4")
-        time.sleep(0.3)
-        # 进入查询界面
-        self.window_service.send_key("F4")
-        time.sleep(0.1)
+        # 确保查询面板已打开
+        self._ensure_query_panel_open(window)
 
         # 导航到"当日委托"页面（树形菜单 + 键盘兜底）
         self._navigate_to_query_page(window, "当日委托")
@@ -530,6 +581,8 @@ class PositionService:
         同花顺 Ctrl+C 复制出来的数据格式:
             表头1\t表头2\t表头3
             数据1\t数据2\t数据3
+
+        自动过滤空占位行（关键字段全为空的行）。
         """
         if not table_data:
             return []
@@ -544,6 +597,10 @@ class PositionService:
             values = line.split("\t")
             if len(values) != len(headers):
                 continue
-            result.append({headers[i]: values[i] for i in range(len(headers))})
+            row = {headers[i]: values[i] for i in range(len(headers))}
+            # 过滤空占位行：关键字段全为空则跳过
+            key_fields = ["证券代码", "委托时间", "时间", "代码"]
+            if any(row.get(k, "").strip() for k in key_fields):
+                result.append(row)
 
         return result
