@@ -200,7 +200,7 @@ class TradingService:
 
         self.logger.info(f"检测到关闭确认提示的二次确认弹窗: {prompt_text}")
         try:
-            self.window_service.click_element(window, DISABLE_CONFIRM_YES_BUTTON_ID)
+            self.window_service.click_element(window, CANCEL_CONFIRM_YES_BUTTON_ID)
             self.logger.info("已点击 '是(Y)' 确认关闭撤单确认提示")
             time.sleep(0.3)
             return True
