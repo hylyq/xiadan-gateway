@@ -13,9 +13,10 @@ from src.utils.singleton import Singleton
 # 项目根目录（main.py 所在目录），所有相对路径基于此计算
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CONFIG_PATH = os.path.join(BASE_DIR, "config", "app_config.json")
+EXAMPLE_CONFIG_PATH = os.path.join(BASE_DIR, "config", "app_config.example.json")
 
 DEFAULT_CONFIG = {
-    "trading_app_path": "",
+    "trading_app_paths": [],
     "host": "127.0.0.1",
     "port": 5000,
     "auth": {
@@ -73,7 +74,12 @@ class AppConfig(Singleton):
                     config[key] = value
             self.logger.info(f"配置加载完成: {CONFIG_PATH}")
         except FileNotFoundError:
-            self.logger.warning(f"配置文件不存在，使用默认配置: {CONFIG_PATH}")
+            self.logger.warning(
+                f"配置文件不存在: {CONFIG_PATH}"
+            )
+            self.logger.info(
+                f"请复制 {EXAMPLE_CONFIG_PATH} 为 {CONFIG_PATH} 并按实际路径修改"
+            )
         except Exception as e:
             self.logger.error(f"加载配置失败: {str(e)}，使用默认配置")
 
@@ -90,12 +96,30 @@ class AppConfig(Singleton):
         return self._config.get(key, default)
 
     def get_trading_app_path(self) -> str:
-        """获取 xiadan.exe 路径"""
-        return self._config.get("trading_app_path", "")
+        """获取第一个配置的 xiadan.exe 路径（向后兼容，用于显示/日志）"""
+        paths = self.get_trading_app_paths()
+        return paths[0] if paths else ""
 
-    def set_trading_app_path(self, path: str) -> None:
-        """设置 xiadan.exe 路径"""
-        self._config["trading_app_path"] = path
+    def get_trading_app_paths(self) -> list:
+        """获取所有配置的 xiadan.exe 路径列表
+
+        支持向后兼容：新格式 trading_app_paths（列表）或旧格式 trading_app_path（字符串）
+        """
+        # 新格式：列表
+        paths = self._config.get("trading_app_paths")
+        if paths:
+            return list(paths)
+        # 旧格式：单个字符串（向后兼容）
+        single = self._config.get("trading_app_path")
+        if single:
+            return [single]
+        return []
+
+    def set_trading_app_paths(self, paths: list) -> None:
+        """设置 xiadan.exe 路径列表"""
+        self._config["trading_app_paths"] = list(paths)
+        # 清理旧格式字段
+        self._config.pop("trading_app_path", None)
         self._save_config()
 
     def get_host(self) -> str:

@@ -16,6 +16,7 @@ from pywinauto import Application, Desktop
 from config.key_config import KEY_MAP
 from src.constants import TRADING_WINDOW_TITLE
 from src.utils.logger import Logger
+from src.utils.poll import timed
 
 
 class WindowService:
@@ -23,6 +24,7 @@ class WindowService:
 
     def __init__(self):
         self.logger = Logger.get_instance()
+        self._cached_hwnd = None  # 缓存窗口句柄，避免重复 Desktop().windows() 开销
 
     # ------------------------------------------------------------
     # 窗口枚举与激活
@@ -54,11 +56,12 @@ class WindowService:
             self.logger.error(f"获取窗口信息失败: {str(e)}")
             raise Exception(f"获取窗口信息失败: {str(e)}")
 
-    def activate_window(self, app_path: str, foreground: bool = True) -> int:
-        """根据 exe 完整路径激活窗口
+    def activate_window(self, app_path, foreground: bool = True) -> int:
+        """根据 exe 完整路径激活窗口（支持单个路径或路径列表）
 
         Args:
-            app_path: 应用程序完整路径（如 xiadan.exe 的绝对路径）
+            app_path: 应用程序完整路径，如 xiadan.exe 的绝对路径。
+                      支持单个 str 或 List[str]（按列表顺序决定优先级）。
             foreground: True=强制置前（默认，原有行为）；False=仅恢复窗口不抢焦点，
                         配合 PostMessage 后台按键使用
 
@@ -68,29 +71,53 @@ class WindowService:
         Raises:
             Exception: 未找到匹配窗口
         """
-        hwnd_found = None
+        # 统一转为列表
+        if isinstance(app_path, str):
+            paths = [app_path]
+        else:
+            paths = list(app_path)
+        paths_lower = [p.lower() for p in paths]
+
+        # 一轮扫描收集所有匹配窗口
+        # 不要求 IsWindowVisible — 窗口可能被隐藏到系统托盘
+        # 优先按主窗口标题匹配，子窗口作为 fallback
+        found_windows = {}  # exe_lower -> hwnd
 
         def callback(hwnd, extra):
-            nonlocal hwnd_found
-            if win32gui.IsWindowVisible(hwnd):
-                _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                try:
-                    proc = psutil.Process(pid)
-                    if proc.exe().lower() == app_path.lower():
-                        hwnd_found = hwnd
-                        if win32gui.IsIconic(hwnd):
-                            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-                        if foreground:
-                            self._set_foreground(hwnd)
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            try:
+                proc = psutil.Process(pid)
+                exe = proc.exe().lower()
+                if exe in paths_lower:
+                    title = win32gui.GetWindowText(hwnd)
+                    # 主窗口标题优先覆盖（如"网上股票交易系统5.0"）
+                    if title == TRADING_WINDOW_TITLE:
+                        found_windows[exe] = hwnd
+                    elif exe not in found_windows:
+                        found_windows[exe] = hwnd
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
             return True
 
         win32gui.EnumWindows(callback, None)
 
-        if hwnd_found:
-            return hwnd_found
-        raise Exception(f"未找到匹配窗口，路径: {app_path}")
+        if found_windows:
+            # 按配置顺序选优先级最高的（第一个匹配的路径）
+            for path in paths_lower:
+                if path in found_windows:
+                    hwnd = found_windows[path]
+                    # 如果窗口不可见（如系统托盘），先显示
+                    if not win32gui.IsWindowVisible(hwnd):
+                        self.logger.info(f"目标窗口不可见 (title='{win32gui.GetWindowText(hwnd)}')，正在显示...")
+                        win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+                        time.sleep(0.1)
+                    if win32gui.IsIconic(hwnd):
+                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                    if foreground:
+                        self._set_foreground(hwnd)
+                    return hwnd
+
+        raise Exception(f"未找到匹配窗口，路径: {paths}")
 
     def activate_window_by_pid(self, pid: int, retries: int = 3, delay: float = 0.5) -> int:
         """根据进程 ID 激活窗口"""
@@ -166,8 +193,67 @@ class WindowService:
         return None
 
     def get_trading_window(self):
-        """获取同花顺交易窗口（网上股票交易系统5.0）"""
-        return self.get_target_window({"title": TRADING_WINDOW_TITLE})
+        """获取同花顺交易窗口（网上股票交易系统5.0）
+
+        优先通过缓存的窗口句柄重连（快），失败时走 Desktop().windows() 搜索（慢）。
+        """
+        # 优先通过缓存的句柄重连（避免 Desktop().windows() 的 ~2s 开销）
+        if self._cached_hwnd is not None:
+            try:
+                if win32gui.IsWindow(self._cached_hwnd):
+                    app = Application(backend="uia").connect(handle=self._cached_hwnd)
+                    return app.window(handle=self._cached_hwnd)
+            except Exception:
+                self._cached_hwnd = None
+
+        window = self.get_target_window({"title": TRADING_WINDOW_TITLE})
+        if window is not None:
+            try:
+                self._cached_hwnd = window.handle
+            except Exception:
+                pass
+        return window
+
+    def get_trading_window_fast(self):
+        """获取交易窗口（不重试，用于轮询检测场景）
+
+        优先通过缓存的窗口句柄重连。
+        """
+        if self._cached_hwnd is not None:
+            try:
+                if win32gui.IsWindow(self._cached_hwnd):
+                    app = Application(backend="uia").connect(handle=self._cached_hwnd)
+                    return app.window(handle=self._cached_hwnd)
+            except Exception:
+                self._cached_hwnd = None
+
+        try:
+            dialogs = Desktop(backend="uia").windows(title=TRADING_WINDOW_TITLE)
+            if dialogs:
+                self._cached_hwnd = dialogs[0].handle
+                return dialogs[0]
+        except Exception:
+            pass
+        return None
+
+    def invalidate_window_cache(self):
+        """使窗口缓存失效（窗口可能被关闭/重建后调用）"""
+        self._cached_hwnd = None
+
+    def get_all_visible_texts(self, window) -> str:
+        """获取窗口中所有控件的可见文本（用于诊断和弹窗文本提取）"""
+        try:
+            texts = []
+            for c in window.descendants():
+                try:
+                    t = c.window_text()
+                    if t and t.strip():
+                        texts.append(t.strip())
+                except Exception:
+                    pass
+            return "\n".join(texts)
+        except Exception:
+            return ""
 
     # ------------------------------------------------------------
     # 控件查找（支持单个 / 批量）
@@ -549,11 +635,13 @@ class WindowService:
         将按键发送到当前前台窗口。如果交易窗口不在前台，F1 会触发
         Windows 帮助（打开 Edge），造成用户描述的问题。
 
-        流程:
+        防御逻辑：
         1. 获取交易窗口
-        2. click_input() 将其带到前台
-        3. 确认窗口已激活后，用 keybd_event 发送按键
-        4. 若窗口未找到或激活失败，**禁止发送按键**（防止泄漏到错误窗口）
+        2. 如果窗口被最小化，先 ShowWindow(SW_RESTORE) 恢复
+        3. click_input() 强制带到前台
+        4. GetForegroundWindow() 句柄级校验（最多 2 次重试）
+        5. 校验通过后才用 keybd_event 发送按键
+        6. 窗口未找到或激活失败，**禁止发送按键**
 
         Raises:
             Exception: 交易窗口未找到或激活失败，不发送按键
@@ -568,15 +656,44 @@ class WindowService:
                 f"请确认券商程序（网上股票交易系统5.0）已启动且窗口可见。"
             )
 
-        try:
-            window.click_input()
-            time.sleep(0.3)
-        except Exception as e:
+        hwnd = window.handle
+
+        # 如果窗口被最小化，先恢复（click_input 对最小化窗口可能点击到无效坐标）
+        if win32gui.IsIconic(hwnd):
+            self.logger.info(f"检测到交易窗口已最小化，恢复后再发送按键 '{keys}'")
+            try:
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                time.sleep(0.2)
+            except Exception as e:
+                self.logger.warning(f"恢复最小化窗口失败: {e}")
+                # 继续尝试 click_input，这可能通过点击任务栏按钮恢复
+
+        # click_input 带到前台 + 句柄级校验
+        for attempt in range(2):
+            try:
+                window.click_input()
+                time.sleep(0.3)
+            except Exception as e:
+                self.logger.warning(f"click_input 失败 (attempt {attempt + 1}): {e}")
+                continue
+
+            if win32gui.GetForegroundWindow() == hwnd:
+                break
+
+            self.logger.warning(
+                f"激活后前台句柄 {win32gui.GetForegroundWindow():#x} ≠ "
+                f"目标 {hwnd:#x} (attempt {attempt + 1})"
+            )
+
+        # 最终校验：确保前台确实是目标窗口
+        if win32gui.GetForegroundWindow() != hwnd:
             self.logger.error(
-                f"激活交易窗口到前台失败: {e}，禁止发送按键 '{keys}'"
+                f"无法将交易窗口带到前台，前台={win32gui.GetForegroundWindow():#x} "
+                f"目标={hwnd:#x}，禁止发送按键 '{keys}'"
             )
             raise Exception(
-                f"激活交易窗口失败，无法发送按键 '{keys}'。错误: {e}"
+                f"无法激活交易窗口到前台，无法发送按键 '{keys}'。"
+                f"当前前台窗口不是交易窗口。"
             )
 
         self._send_key_foreground(keys)
@@ -630,6 +747,37 @@ class WindowService:
 
         self.logger.info(f"子面板 '{dialog_title}' 已通过 F4 切换关闭")
         return True
+
+    # ------------------------------------------------------------
+    # 状态重置
+    # ------------------------------------------------------------
+
+    def reset_window_state(self) -> None:
+        """重置交易窗口到基准态（F1 买入界面）
+
+        click_input 激活窗口 + ESC×5 确保从任意状态回退到 F1 买入界面。
+        后续操作（下单/撤单/查询）依赖此函数确保窗口在前台且处于基准态，
+        无需再关心窗口激活状态。
+
+        每个 TaskQueue 任务开始前自动调用一次，查询方法内部也会调用。
+        """
+        window = self.get_trading_window()
+        if window is None:
+            raise Exception(
+                "未找到交易窗口 '网上股票交易系统5.0'。"
+                "请确认券商程序已启动且窗口可见。"
+            )
+
+        with timed("click_input 激活", self.logger):
+            window.click_input()
+            time.sleep(0.3)
+
+        # ESC×5 确保从任意子面板/弹窗回退到 F1 买入界面
+        # 使用 background=True 跳过冗余激活（click_input 已激活）
+        with timed("ESC×5 回退到 F1", self.logger):
+            for _ in range(5):
+                self.send_key("ESC", background=True)
+                time.sleep(0.1)
 
     # ------------------------------------------------------------
     # 剪切板

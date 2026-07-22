@@ -16,12 +16,14 @@ from src.constants import (
     CONTROL_ID_SUBMIT, CONTROL_ID_PRICE_TYPE,
     CONFIRM_DIALOG_TITLE_ID, CONFIRM_YES_BUTTON_ID,
     CONFIRM_NO_BUTTON_ID, CONFIRM_DETAIL_TEXT_ID,
-    MARKET_KEYWORD, T1_RESTRICTION_KEYWORDS
+    CANCEL_CONFIRM_TEXT_ID, T1_RESTRICTION_KEYWORDS
 )
+from src.api.response import ApiError, ErrorCode
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
 from src.utils.diagnostic import DiagnosticUtil
 from src.utils.logger import Logger
+from src.utils.poll import poll_until, timed, PollTimeoutError
 
 
 class Trader:
@@ -93,47 +95,67 @@ class Trader:
             price = sanitized_price
 
         # 1. 激活 xiadan.exe（下单需要前台激活，因为 type_keys() 和 click_input() 需要焦点）
-        trading_path = self.config.get_trading_app_path()
-        if not trading_path:
-            raise Exception("未配置 xiadan.exe 路径，请检查 config/app_config.json")
-        self.window_service.activate_window(trading_path)
-        time.sleep(0.2)
+        with timed("激活窗口", self.logger):
+            trading_paths = self.config.get_trading_app_paths()
+            if not trading_paths:
+                raise Exception("未配置 xiadan.exe 路径，请检查 config/app_config.json")
+            self.window_service.activate_window(trading_paths)
+            time.sleep(0.2)
 
         # 2. F1/F2 切换买卖界面
-        self.window_service.send_key("F1" if status == "1" else "F2")
-        time.sleep(0.2)
+        with timed("F1/F2 切换买卖界面", self.logger):
+            self.window_service.send_key("F1" if status == "1" else "F2")
+            time.sleep(0.1)
 
         # 3. 获取交易窗口
         window = self.window_service.get_trading_window()
         if window is None:
             raise Exception("未找到交易窗口 '网上股票交易系统5.0'")
 
-        # 4. 切换限价/市价模式
-        want_market = (price_type == "market")
-        is_market = self._switch_price_type(window, want_market)
-        # 切换后必须重新获取窗口（descendants() 会缓存控件树）
-        window = self.window_service.get_trading_window()
-        if window is None:
-            raise Exception("切换价格模式后窗口消失")
+        # 4. 填写股票代码（必须先填代码，否则价格模式切换可能被禁用）
+        with timed("填写股票代码", self.logger):
+            self.window_service.input_text_to_element(window, CONTROL_ID_CODE, code)
+            time.sleep(0.3)  # 等待券商自动填充价格完成
 
-        # 5. 填写股票代码
-        self.window_service.input_text_to_element(window, CONTROL_ID_CODE, code)
-        time.sleep(0.5)  # 等待券商自动填充价格完成
+        # 5. 切换限价/市价模式（必须在填完代码之后，券商要求先有代码才能切换）
+        with timed("切换价格模式", self.logger):
+            want_market = (price_type == "market")
+            is_market = self._switch_price_type(window, want_market)
+            # 切换后必须重新获取窗口（descendants() 会缓存控件树）
+            window = self.window_service.get_trading_window()
+            if window is None:
+                raise Exception("切换价格模式后窗口消失")
 
         # 6. 填写价格（仅限价）
         if price_type == "limit" and price:
-            self.window_service.input_text_to_element(window, CONTROL_ID_PRICE, price)
-            time.sleep(0.1)
+            with timed("填写价格", self.logger):
+                self.window_service.input_text_to_element(window, CONTROL_ID_PRICE, price)
+                time.sleep(0.1)
 
         # 7. 填写数量
         if amount:
-            self.window_service.input_text_to_element(window, CONTROL_ID_AMOUNT, amount)
-            time.sleep(0.1)
+            with timed("填写数量", self.logger):
+                self.window_service.input_text_to_element(window, CONTROL_ID_AMOUNT, amount)
+                time.sleep(0.1)
 
         # 8. 点击下单按钮并处理弹窗
-        self.window_service.click_element(window, CONTROL_ID_SUBMIT)
-        self.logger.info("已点击下单按钮，等待弹窗")
-        time.sleep(0.5)
+        with timed("点击下单按钮", self.logger):
+            self.window_service.click_element(window, CONTROL_ID_SUBMIT)
+            self.logger.info("已点击下单按钮，等待弹窗")
+
+        # 轮询等待弹窗出现（替代固定 sleep(0.5)），超时则走后续无弹窗逻辑。
+        # 快速交易模式下（买入/卖出确认=否）不弹委托确认窗，仅可能弹警告窗。
+        # 警告弹窗在点击下单按钮后立即出现，0.3s 足够检测；
+        # 正常情况无弹窗则快速跳过，不再浪费等待时间。
+        with timed("等待下单弹窗", self.logger):
+            try:
+                poll_until(
+                    lambda: self._has_any_dialog(),
+                    timeout=0.3, interval=0.1,
+                    description="下单后弹窗"
+                )
+            except PollTimeoutError:
+                pass
 
         # 检测弹窗类型（按优先级）：
         # A) cid=1365 标题 + 标题含"委托确认" → 真正的委托确认弹窗
@@ -153,101 +175,148 @@ class Trader:
         confirmed = False  # 仅在真正的"委托确认"弹窗上点Y后才设为True
         warning_dismissed = False  # 是否关闭过警告/提示弹窗
 
-        for check_attempt in range(5):  # 最多5轮：应对连续多个弹窗
-            window = self.window_service.get_trading_window()
-            if window is None:
-                time.sleep(0.3)
-                continue
-
-            # A/B) 检查是否有标题图（cid=1365）
-            title_el = self.window_service.find_element_in_window(
-                window, CONFIRM_DIALOG_TITLE_ID
-            )
-            if title_el is not None:
-                title_text = title_el.window_text() or ""
-                self.logger.info(f"检测到弹窗标题: {title_text}")
-
-                # 读取弹窗详情文本（cid=1040）
-                detail_el = self.window_service.find_element_in_window(
-                    window, CONFIRM_DETAIL_TEXT_ID
-                )
-                if detail_el is not None:
-                    order_detail_text = detail_el.window_text() or ""
-                    self.logger.info(f"弹窗详情: {order_detail_text[:200]}")
-
-                if "委托确认" in title_text:
-                    # A) 真正的委托确认弹窗 — 订单已提交，等待用户确认
-                    confirm_dialog_detected = True
-                    if confirm:
-                        try:
-                            self.window_service.click_element(window, CONFIRM_YES_BUTTON_ID)
-                            confirmed = True
-                            self.logger.info("已点击 '是(Y)' 确认委托")
-                        except Exception as e:
-                            self.logger.warning(f"点击 '是(Y)' 失败，尝试 Y 键: {e}")
-                            self.window_service.send_key("Y")
-                            confirmed = True
-                    else:
-                        try:
-                            self.window_service.click_element(window, CONFIRM_NO_BUTTON_ID)
-                            self.logger.info("已点击 '否(N)' 取消委托（预览模式）")
-                        except Exception as e:
-                            self.window_service.send_key("{ESC}")
-                            self.logger.warning(f"点击 '否(N)' 失败，尝试 ESC: {e}")
-                    break  # 委托确认处理完毕，结束循环
-                else:
-                    # B) 警告/提示弹窗（如价格超限提醒）— 订单尚未提交
-                    #    点"是(Y)"关闭警告，继续等待后续"委托确认"弹窗
-                    self.logger.warning(
-                        f"检测到警告弹窗（非委托确认）: {title_text}，"
-                        f"点击 '是(Y)' 关闭后继续等待委托确认"
-                    )
-                    try:
-                        self.window_service.click_element(window, CONFIRM_YES_BUTTON_ID)
-                    except Exception:
-                        self.window_service.send_key("Y")
-                    warning_dismissed = True
-                    time.sleep(0.5)
-                    continue  # 继续检测后续弹窗
-
-            # C) 无标题图但有文本（cid=1040）+ 有"是(Y)"按钮 → 警告弹窗
-            text_el = self.window_service.find_element_in_window(
-                window, CONFIRM_DETAIL_TEXT_ID
-            )
-            if text_el is not None:
-                dialog_text = text_el.window_text() or ""
-                if not dialog_text.strip():
-                    time.sleep(0.3)
+        with timed("弹窗处理循环", self.logger):
+            window = self.window_service.get_trading_window_fast()  # poll_until 已确认窗口存在，快速获取
+            for check_attempt in range(5):
+                if window is None:
+                    time.sleep(0.1)
+                    window = self.window_service.get_trading_window_fast()
                     continue
 
-                yes_btn = self.window_service.find_element_in_window(
-                    window, CONFIRM_YES_BUTTON_ID
+                # A/B) 检查是否有标题图（cid=1365）
+                title_el = self.window_service.find_element_in_window(
+                    window, CONFIRM_DIALOG_TITLE_ID
                 )
-                if yes_btn is not None:
-                    # C) 警告弹窗（含Y/N按钮，无标题图）
-                    self.logger.warning(
-                        f"检测到警告弹窗: {dialog_text[:100]}，点击 '是(Y)' 继续"
+                if title_el is not None:
+                    title_text = title_el.window_text() or ""
+                    self.logger.info(f"检测到弹窗标题: {title_text}")
+
+                    # 读取弹窗详情文本（cid=1040）
+                    detail_el = self.window_service.find_element_in_window(
+                        window, CONFIRM_DETAIL_TEXT_ID
                     )
-                    yes_btn.click_input()
-                    warning_dismissed = True
-                    time.sleep(0.4)
-                    continue  # 继续检测后续弹窗（如委托确认）
-                else:
-                    # D) 纯错误弹窗（无Y/N按钮），关闭并报错
-                    self.logger.warning(f"检测到错误弹窗: {dialog_text[:100]}")
-                    self.window_service.send_key("{ENTER}")
+                    if detail_el is not None:
+                        order_detail_text = detail_el.window_text() or ""
+                        self.logger.info(f"弹窗详情: {order_detail_text[:200]}")
 
-                    DiagnosticUtil().snapshot("dialog_error")
-
-                    if status == "2" and any(kw in dialog_text for kw in T1_RESTRICTION_KEYWORDS):
-                        raise Exception(
-                            f"A 股实行 T+1 交易制度，当日买入的股票次日才能卖出。"
-                            f"弹窗信息: {dialog_text[:200]}"
+                    if "委托确认" in title_text:
+                        # A) 真正的委托确认弹窗 — 订单已提交，等待用户确认
+                        confirm_dialog_detected = True
+                        if confirm:
+                            try:
+                                self.window_service.click_element(window, CONFIRM_YES_BUTTON_ID)
+                                confirmed = True
+                                self.logger.info("已点击 '是(Y)' 确认委托")
+                            except Exception as e:
+                                self.logger.warning(f"点击 '是(Y)' 失败，尝试 Y 键: {e}")
+                                self.window_service.send_key("Y")
+                                confirmed = True
+                        else:
+                            try:
+                                self.window_service.click_element(window, CONFIRM_NO_BUTTON_ID)
+                                self.logger.info("已点击 '否(N)' 取消委托（预览模式）")
+                            except Exception as e:
+                                self.window_service.send_key("{ESC}")
+                                self.logger.warning(f"点击 '否(N)' 失败，尝试 ESC: {e}")
+                        break  # 委托确认处理完毕，结束循环
+                    else:
+                        # B) 警告/提示弹窗（如价格超限提醒）— 订单尚未提交
+                        #    点"是(Y)"关闭警告，继续等待后续"委托确认"弹窗
+                        self.logger.warning(
+                            f"检测到警告弹窗（非委托确认）: {title_text}，"
+                            f"点击 '是(Y)' 关闭后继续等待委托确认"
                         )
+                        try:
+                            self.window_service.click_element(window, CONFIRM_YES_BUTTON_ID)
+                        except Exception:
+                            self.window_service.send_key("Y")
+                        warning_dismissed = True
+                        time.sleep(0.2)
+                        window = self.window_service.get_trading_window_fast()  # 弹窗关闭后重新获取
+                        continue  # 继续检测后续弹窗
 
-                    raise Exception(f"下单失败: {dialog_text[:200]}")
+                # C) 无标题图但有文本（cid=1040）+ 有"是(Y)"按钮 → 警告弹窗
+                text_el = self.window_service.find_element_in_window(
+                    window, CONFIRM_DETAIL_TEXT_ID
+                )
+                if text_el is not None:
+                    dialog_text = text_el.window_text() or ""
+                    if not dialog_text.strip():
+                        time.sleep(0.1)
+                        continue
 
-            time.sleep(0.3)
+                    yes_btn = self.window_service.find_element_in_window(
+                        window, CONFIRM_YES_BUTTON_ID
+                    )
+                    if yes_btn is not None:
+                        # C) 警告弹窗（含Y/N按钮，无标题图）
+                        self.logger.warning(
+                            f"检测到警告弹窗: {dialog_text[:100]}，点击 '是(Y)' 继续"
+                        )
+                        yes_btn.click_input()
+                        warning_dismissed = True
+                        time.sleep(0.2)
+                        window = self.window_service.get_trading_window_fast()  # 弹窗关闭后重新获取
+                        continue  # 继续检测后续弹窗（如委托确认）
+                    else:
+                        # D) 纯错误弹窗（无Y/N按钮），关闭并报错
+                        self.logger.warning(f"检测到错误弹窗: {dialog_text[:100]}")
+                        self.window_service.send_key("{ENTER}")
+
+                        DiagnosticUtil().snapshot("dialog_error")
+
+                        if status == "2" and any(kw in dialog_text for kw in T1_RESTRICTION_KEYWORDS):
+                            raise Exception(
+                                f"A 股实行 T+1 交易制度，当日买入的股票次日才能卖出。"
+                                f"弹窗信息: {dialog_text[:200]}"
+                            )
+
+                        raise Exception(f"下单失败: {dialog_text[:200]}")
+
+                time.sleep(0.1)
+
+        # 确认后检测"提交失败"弹窗
+        # 点击"是(Y)"确认委托后（或快速交易模式直接提交后），券商可能返回"提交失败"弹窗
+        if confirmed or not confirm_dialog_detected:
+            with timed("检测提交失败弹窗", self.logger):
+                time.sleep(0.3)  # 等待弹窗出现
+                window = self.window_service.get_trading_window_fast()
+                if window is not None:
+                    # 检查是否有新的提示弹窗（cid=1365 标题）
+                    title_el = self.window_service.find_element_in_window(
+                        window, CONFIRM_DIALOG_TITLE_ID
+                    )
+                    if title_el is not None:
+                        title_text = title_el.window_text() or ""
+                        # 排除"委托确认"弹窗（正常流程中已处理）
+                        if "委托确认" not in title_text:
+                            # cid=1040 可能在提交失败弹窗中为空，用全量文本扫描兜底
+                            detail_el = self.window_service.find_element_in_window(
+                                window, CONFIRM_DETAIL_TEXT_ID
+                            )
+                            fail_reason = detail_el.window_text() if detail_el else ""
+                            if not fail_reason.strip():
+                                # 兜底：扫描所有控件文本，提取"提交失败"相关内容
+                                all_texts = self.window_service.get_all_visible_texts(window)
+                                for line in all_texts.split("\n"):
+                                    if "提交失败" in line or "失败" in line:
+                                        fail_reason = line.strip()
+                                        break
+                            self.logger.warning(
+                                f"检测到提交失败弹窗: {title_text}, 原因: {fail_reason[:200]}"
+                            )
+                            # 关闭弹窗
+                            try:
+                                self.window_service.send_key("{ENTER}")
+                            except Exception:
+                                pass
+                            DiagnosticUtil().snapshot("order_submit_failed", window)
+                            raise ApiError(
+                                ErrorCode.ORDER_SUBMIT_FAILED,
+                                f"订单提交失败: {fail_reason[:200]}" if fail_reason else "订单提交失败（券商返回错误）",
+                                suggestion="请检查交易条件（余额、交易时间、涨跌停限制等）后重试",
+                                details={"popup_title": title_text, "popup_text": fail_reason}
+                            )
 
         # 结果判定
         if not confirm_dialog_detected:
@@ -258,8 +327,9 @@ class Trader:
                 )
                 DiagnosticUtil().snapshot("warning_but_no_confirm")
             else:
-                self.logger.warning("下单后未检测到任何弹窗，可能提交失败")
-                DiagnosticUtil().snapshot("no_dialog_after_submit")
+                # 无弹窗 = 快速交易模式（确认已关闭），订单已直接提交
+                self.logger.info("未检测到弹窗，快速交易模式下订单已直接提交")
+                confirmed = True  # 无弹窗时视为已提交
 
         action = "买入" if status == "1" else "卖出"
         mode = "市价" if is_market else "限价"
@@ -277,12 +347,9 @@ class Trader:
     def _switch_price_type(self, window, want_market: bool) -> bool:
         """切换限价/市价模式
 
-        通过点击 control_id=1400 标签切换:
-        - 标签 name 含 "市价" = 当前市价模式
-        - 标签 name 不含 "市价" = 当前限价模式
-
-        每次点击后必须重新 get_target_window，因为 descendants() 会缓存控件树。
-        重试之间发送 F5 刷新界面，确保标签状态更新。
+        F1 买入界面内，点击 control_id=1400（"买入价格"按钮）触发服务器请求，
+        网络正常时标签从"买入价格"变为"对手方最优"，网络异常时不变。
+        用 poll_until 轮询等待标签变化，最多重试 3 次。
 
         Args:
             window: 当前窗口对象
@@ -291,53 +358,89 @@ class Trader:
         Returns:
             切换后是否处于市价模式
         """
-        is_market = False
-        for attempt in range(3):
-            # 每次循环都重新获取窗口
-            window = self.window_service.get_trading_window()
-            if window is None:
-                raise Exception("切换价格模式时窗口消失")
+        is_market = self._is_market_mode(window)
+        if want_market == is_market:
+            return is_market
 
-            label = self.window_service.find_element_in_window(window, CONTROL_ID_PRICE_TYPE)
-            if label is None:
-                self.logger.warning(f"未找到价格类型标签 control_id={CONTROL_ID_PRICE_TYPE}")
-                break
+        if want_market:
+            for attempt in range(3):
+                self.logger.info(
+                    f"尝试切换到市价模式（点击 1400, 尝试 {attempt + 1}/3）"
+                )
+                label = self.window_service.find_element_in_window(window, CONTROL_ID_PRICE_TYPE)
+                if label is None:
+                    raise Exception(f"未找到价格类型控件 control_id={CONTROL_ID_PRICE_TYPE}")
+                label.click_input()
 
-            current_name = label.window_text() or ""
-            is_market = MARKET_KEYWORD in current_name
+                # 轮询等待标签变化（服务器响应）
+                try:
+                    poll_until(
+                        lambda: self._is_market_mode(
+                            self.window_service.get_trading_window()
+                        ),
+                        timeout=5.0, interval=0.3,
+                        description=f"价格模式切换（尝试 {attempt + 1}/3）"
+                    )
+                    self.logger.info("市价模式切换成功")
+                    return True
+                except PollTimeoutError:
+                    self.logger.warning(
+                        f"尝试 {attempt + 1}/3 超时，标签未变化（网络可能异常）"
+                    )
+                    # 重新获取窗口，下次循环再试
+                    window = self.window_service.get_trading_window()
+                    if window is None:
+                        raise Exception("切换价格模式时窗口消失")
 
-            if want_market == is_market:
-                # 已是目标模式
-                break
-
-            self.logger.info(
-                f"点击 {CONTROL_ID_PRICE_TYPE} 切换价格模式 "
-                f"(尝试 {attempt + 1}/3), 当前: {current_name}"
+            raise ApiError(
+                ErrorCode.MODE_SWITCH_FAILED,
+                "切换市价模式失败（已重试 3 次，网络可能异常）",
+                suggestion="请检查网络连接后重试，或改用限价模式（price_type=limit）"
             )
-            label.click_input()
-            time.sleep(0.8)  # 延长等待时间，等待 UI 渲染完成
+        else:
+            # 切换到限价：F1 重置到默认限价模式
+            self.logger.info("切换到限价模式（发送 F1）")
+            self.window_service.send_key("F1")
+            time.sleep(0.3)
 
-            # 重新获取窗口读取最新状态
+            # 验证
             window = self.window_service.get_trading_window()
-            if window is not None:
-                label2 = self.window_service.find_element_in_window(window, CONTROL_ID_PRICE_TYPE)
-                if label2 is not None:
-                    new_name = label2.window_text() or ""
-                    is_market = MARKET_KEYWORD in new_name
-                    if want_market == is_market:
-                        break
+            if not self._is_market_mode(window):
+                return False
 
-            # 未切换成功时发送 F5 刷新标签状态
-            if want_market != is_market:
-                self.window_service.send_key("F5")
-                time.sleep(0.5)
+            raise Exception("切换限价模式失败")
 
-        if want_market != is_market:
-            mode_text = "市价" if want_market else "限价"
-            DiagnosticUtil().snapshot(f"switch_mode_failed_{mode_text}")
-            raise Exception(f"切换 {mode_text} 模式失败（已重试 3 次）")
+    def _is_market_mode(self, window) -> bool:
+        """检查当前是否处于市价模式
 
-        return is_market
+        control_id=1400 标签文本：
+        - "买入价格" = 限价模式
+        - "市价买入" / "对手方最优" 等 = 市价模式
+        """
+        label = self.window_service.find_element_in_window(window, CONTROL_ID_PRICE_TYPE)
+        if label is None:
+            return False
+        text = label.window_text() or ""
+        return "市价" in text or "最优" in text
+
+    def _has_any_dialog(self) -> bool:
+        """检查下单后是否有弹窗出现
+
+        检测 cid=1365（标题图）或 cid=1040（详情文本），
+        用于 poll_until 替代固定 sleep。
+        使用快速窗口获取（不重试），避免轮询时每 0.1s 产生 1.5s 开销。
+        """
+        window = self.window_service.get_trading_window_fast()
+        if window is None:
+            return False
+        return (
+            self.window_service.find_element_in_window(
+                window, CONFIRM_DIALOG_TITLE_ID
+            ) is not None
+            or self.window_service.find_element_in_window(
+                window, CONFIRM_DETAIL_TEXT_ID
+            ) is not None
+        )
 
     def confirm_order(self) -> dict:
         """单独发送 Y 键确认委托（用于 confirm=false 的下单后续确认）"""

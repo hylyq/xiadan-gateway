@@ -180,31 +180,16 @@ class TaskQueue(Singleton):
                 self._queue.task_done()
 
     def _reset_trading_window(self) -> None:
-        """重置 xiadan.exe 到初始状态
+        """重置 xiadan.exe 到基准态（F1 买入界面）
 
-        每个任务开始前执行:
-        1. 激活窗口（恢复可能最小化的窗口，确保 ESC 能发到目标窗口）
-        2. 快速 ESC×3 重置到 F1 买入界面（同花顺默认界面）
-
-        ESC×3 是实测行为：连续三次 ESC 会将界面从任意状态回退到
-        F1 买入界面（默认起点）。下单/撤单/查询方法会各自发送
-        F1/F3/F4 切换到目标视图，因此 F1 作为统一重置起点可满足所有场景。
+        使用 WindowService.reset_window_state() 统一处理窗口激活 + ESC×5，
+        确保窗口在前台且处于 F1 基准态。后续下单/撤单/查询方法各自发送
+        F1/F3/F4 切换到目标视图。
         """
         try:
-            trading_path = self.config.get_trading_app_path()
-            if trading_path:
-                # foreground=False: 仅恢复最小化窗口，不抢焦点
-                self.window_service.activate_window(trading_path, foreground=False)
-                time.sleep(0.1)
+            self.window_service.reset_window_state()
         except Exception as e:
-            self.logger.warning(f"重置时激活窗口失败: {str(e)}")
-
-        try:
-            for i in range(3):
-                self.window_service.send_key("ESC")
-                time.sleep(0.1)
-        except Exception as e:
-            self.logger.warning(f"重置时 ESC 失败: {str(e)}")
+            self.logger.warning(f"重置交易窗口到基准态失败: {str(e)}")
 
     def _handle_timeout(self, task: Task) -> None:
         """看门狗：任务超时后的恢复流程
@@ -241,9 +226,9 @@ class TaskQueue(Singleton):
 
         # 步骤 2: 重新激活 xiadan.exe 窗口（恢复最小化 + 置前，确保 ESC 发到目标窗口）
         try:
-            trading_path = self.config.get_trading_app_path()
-            if trading_path:
-                self.window_service.activate_window(trading_path)
+            trading_paths = self.config.get_trading_app_paths()
+            if trading_paths:
+                self.window_service.activate_window(trading_paths)
                 time.sleep(0.2)
         except Exception as e:
             self.logger.error(f"超时激活窗口失败: {str(e)}")

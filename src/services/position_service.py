@@ -7,6 +7,7 @@ import os
 import time
 from typing import Optional
 
+from src.utils.poll import poll_until, poll_until_not, timed, PollTimeoutError
 from src.constants import (
     BALANCE_FIELDS,
     CAPTCHA_IMAGE_ID, CAPTCHA_INPUT_ID, CAPTCHA_OK_BUTTON_ID,
@@ -26,16 +27,17 @@ class PositionService:
         self.ocr_service = ocr_service  # 注入 OCR 服务（避免循环依赖）
         self.config = AppConfig()
         self.logger = Logger.get_instance()
-        self._cached_window = None  # 用于窗口引用刷新
+        self._cached_window = None   # 用于窗口引用刷新
+        self._captcha_window = None  # 验证码弹窗引用（可能是独立顶层窗口）
 
     def _send_ctrl_c(self):
-        """click_input 激活 → 前台发送 Ctrl+C（keybd_event）
+        """激活窗口 → keybd_event 发送两次 Ctrl+C（绕过中文输入法）
 
-        keybd_event 把按键发到当前前台窗口。必须确保交易窗口在后台前，
-        否则 Ctrl+C 会发到错误窗口（IDE/浏览器），既不复制数据也不触发验证码弹窗。
+        中文输入法在中文模式下会拦截第一次 Ctrl+C（用于取消组合状态），
+        第二次才真正送达。因此连续发送两次 Ctrl+C。
 
-        click_input 是激活窗口最可靠的方式，配合句柄级校验确保目标正确。
-        SetForegroundWindow 因 Windows UIPI 限制可能静默失败，不使用。
+        使用 keybd_event（虚拟键码）而非 SendInput（扫描码），因为券商软件
+        可能通过 LLKHF_INJECTED 标志过滤 SendInput 注入的键盘输入。
         """
         import win32api
         import win32con
@@ -47,12 +49,29 @@ class PositionService:
             raise Exception("交易窗口未找到，无法发送 Ctrl+C")
 
         target_handle = window.handle
-        for _ in range(2):
-            window.click_input()
-            time.sleep(0.3)
-            if win32gui.GetForegroundWindow() == target_handle:
-                break
-            self.logger.warning(f"激活后前台句柄 {win32gui.GetForegroundWindow():#x} ≠ 目标 {target_handle:#x}，重试")
+
+        # 如果窗口被最小化，先恢复
+        if win32gui.IsIconic(target_handle):
+            self.logger.info("检测到交易窗口已最小化，恢复后再发送 Ctrl+C")
+            try:
+                win32gui.ShowWindow(target_handle, win32con.SW_RESTORE)
+                time.sleep(0.2)
+            except Exception as e:
+                self.logger.warning(f"恢复最小化窗口失败: {e}")
+
+        with timed("click_input 激活窗口", self.logger):
+            # 先用 SetForegroundWindow 强制置前，再 click_input 确保焦点
+            try:
+                win32gui.SetForegroundWindow(target_handle)
+                time.sleep(0.15)
+            except Exception:
+                pass
+            for _ in range(2):
+                window.click_input()
+                time.sleep(0.3)
+                if win32gui.GetForegroundWindow() == target_handle:
+                    break
+                self.logger.warning(f"激活后前台句柄 {win32gui.GetForegroundWindow():#x} ≠ 目标 {target_handle:#x}，重试")
 
         if win32gui.GetForegroundWindow() != target_handle:
             self.logger.error(
@@ -60,67 +79,95 @@ class PositionService:
             )
             raise Exception("无法将交易窗口带到前台，放弃发送 Ctrl+C 避免按键泄漏")
 
-        VK_CONTROL = 0x11
-        VK_C = 0x43
-        win32api.keybd_event(VK_CONTROL, 0, 0, 0)
-        win32api.keybd_event(VK_C, 0, 0, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(VK_C, 0, win32con.KEYEVENTF_KEYUP, 0)
-        win32api.keybd_event(VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-        time.sleep(0.3)
+        with timed("keybd_event Ctrl+C ×2", self.logger):
+            VK_CONTROL = win32con.VK_CONTROL  # 0x11
+            VK_C = ord('C')                   # 0x43
+
+            def _send_one():
+                # 关键：Ctrl 按下后延迟 0.1s，让系统键盘状态更新为"Ctrl 已按住"，
+                # 券商软件用 GetAsyncKeyState 检测 Ctrl 是否真的在按下状态，
+                # 无延迟则检测不到组合键，Ctrl+C 无效。
+                win32api.keybd_event(VK_CONTROL, 0, 0, 0)
+                time.sleep(0.1)
+                win32api.keybd_event(VK_C, 0, 0, 0)
+                time.sleep(0.05)
+                win32api.keybd_event(VK_C, 0, win32con.KEYEVENTF_KEYUP, 0)
+                time.sleep(0.05)
+                win32api.keybd_event(VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+            # 第一次：取消中文输入法组合状态（可能被 IME 拦截）
+            _send_one()
+            time.sleep(0.15)
+            # 第二次：真正送达券商软件
+            _send_one()
+            time.sleep(0.3)
 
     def _is_valid_table_data(self, data: str) -> bool:
         """校验剪贴板内容是否为有效的表格数据
 
         同花顺 Ctrl+C 复制的表格数据特征：
-        - 表头行 + 至少一行数据行（用 \\r\\n 分隔）
-        - 每行用 \\t 分隔列
-        - 至少 2 行（表头 + 数据），每行都含 \\t
+        - 表头行用 \\t 分隔列，数据行用 \\r\\n 分隔
+        - 至少要有一行表头，且含 \\t（至少 2 列）
 
-        仅校验含 \\t 不足以区分——普通文本也可能含 \\t。
+        接受仅有表头无数据行的情况（账户当日无数据时正常现象），
+        由 _format_table_data 负责返回空列表。
         """
         if not data:
             return False
         lines = data.strip().split("\r\n")
-        if len(lines) < 2:
+        if not lines:
             return False
-        # 每行都必须含制表符（列分隔符）
-        return all("\t" in line for line in lines if line.strip())
+        # 首行必须有制表符（至少 2 列），其余行有内容的也必须含制表符
+        return "\t" in lines[0] and all(
+            "\t" in line for line in lines[1:] if line.strip()
+        )
 
     def _copy_table_via_clipboard(self) -> list:
         """通过剪贴板读取表格数据（含验证码处理）
 
         流程：Ctrl+C → 验证码弹窗 → OCR 识别 → 读剪贴板，最多 3 次。
-
-        Ctrl+C 必然触发验证码弹窗。验证码弹窗的出现 = Ctrl+C 已正确发送到
-        目标窗口的确认信号。无验证码弹窗 = Ctrl+C 未到达目标窗口，Ctrl+C 失败。
         """
         for attempt in range(3):
             self.logger.info(f"第 {attempt + 1}/3 次尝试 Ctrl+C 读取表格数据")
 
-            self._send_ctrl_c()
-            time.sleep(1.0)  # 等待验证码弹窗异步弹出
+            with timed("Ctrl+C 发送", self.logger):
+                self._send_ctrl_c()
 
-            self._refresh_window_ref()
-            window = self._cached_window
+            # 轮询等待验证码弹窗出现
+            with timed("等待验证码弹窗", self.logger):
+                try:
+                    poll_until(
+                        lambda: self._detect_captcha(
+                            self.window_service.get_trading_window()
+                        ),
+                        timeout=3.0, interval=0.1,
+                        description="Ctrl+C 后验证码弹窗"
+                    )
+                except PollTimeoutError:
+                    self._refresh_window_ref()
+                    if not self._detect_captcha(self._cached_window):
+                        self.logger.warning(
+                            f"第 {attempt + 1} 次 Ctrl+C 后未检测到验证码弹窗"
+                            f"（{3.0}s 超时），可能焦点丢失"
+                        )
+                        continue
 
-            # Ctrl+C 必然触发验证码，无验证码 = Ctrl+C 未到达目标窗口
-            if not self._detect_captcha(window):
-                self.logger.warning(f"第 {attempt + 1} 次 Ctrl+C 后未检测到验证码弹窗，可能焦点丢失")
-                continue
+            # 使用检测到的验证码弹窗（可能是独立顶层窗口）
+            captcha_win = self._captcha_window or self._cached_window
 
-            if not self._solve_captcha(window):
-                self.logger.warning(f"第 {attempt + 1} 次验证码处理失败")
-                continue
+            with timed("验证码 OCR + 输入 + 确认", self.logger):
+                if not self._solve_captcha(captcha_win):
+                    self.logger.warning(f"第 {attempt + 1} 次验证码处理失败")
+                    continue
 
-            data = self.window_service.get_clipboard()
-            if self._is_valid_table_data(data):
-                self.logger.info(f"第 {attempt + 1} 次成功获取表格数据")
-                return self._format_table_data(data)
-
-            self.logger.warning(
-                f"第 {attempt + 1} 次剪贴板内容无效: {repr(data[:100]) if data else '空'}"
-            )
+            with timed("读取剪贴板数据", self.logger):
+                data = self.window_service.get_clipboard()
+                if self._is_valid_table_data(data):
+                    self.logger.info(f"第 {attempt + 1} 次成功获取表格数据")
+                    return self._format_table_data(data)
+                self.logger.warning(
+                    f"第 {attempt + 1} 次剪贴板内容无效: {repr(data[:100]) if data else '空'}"
+                )
 
         # 所有尝试失败，截图诊断
         DiagnosticUtil().snapshot("query_empty_clipboard")
@@ -137,13 +184,16 @@ class PositionService:
             self.logger.warning(f"刷新窗口引用失败: {e}")
 
     def _detect_captcha(self, window) -> bool:
-        """检测验证码弹窗（control_id + 文本匹配双重检测）
+        """检测验证码弹窗（主窗口 + 独立弹出窗口双重检测）
+
+        验证码弹窗可能是独立顶层窗口（独立于主交易窗口），
+        仅搜索主窗口子孙控件会漏掉。此方法同时搜索主窗口和所有可见 Desktop 窗口。
 
         Args:
-            window: 窗口对象（若为 None 则先刷新）
+            window: 主交易窗口对象（若为 None 则先刷新）
 
         Returns:
-            是否检测到验证码弹窗
+            是否检测到验证码弹窗。找到后弹窗引用存入 self._captcha_window 供 OCR 使用。
         """
         if window is None:
             self._refresh_window_ref()
@@ -151,27 +201,58 @@ class PositionService:
         if window is None:
             return False
 
-        # 方法1: control_id=2405 检测
+        # 搜集所有需要搜索的窗口：主窗口 + 所有可见 Desktop 窗口
+        windows_to_search = [window]
         try:
-            image = self.window_service.find_element_in_window(window, CAPTCHA_IMAGE_ID)
-            if image is not None:
-                self.logger.info("通过 control_id=2405 检测到验证码弹窗")
-                return True
-        except Exception as e:
-            self.logger.warning(f"control_id 检测验证码失败: {e}")
+            from pywinauto import Desktop
+            for w in Desktop(backend="uia").windows(visible_only=True):
+                if w.handle != window.handle:
+                    windows_to_search.append(w)
+        except Exception:
+            pass
 
-        # 方法2: 文本匹配（关键词检测）
-        try:
-            matches = self.window_service.find_element_by_text(
-                window, CAPTCHA_TEXT_KEYWORDS
-            )
-            if matches:
-                self.logger.info(f"通过文本匹配检测到验证码弹窗（{len(matches)} 个匹配控件）")
-                return True
-        except Exception as e:
-            self.logger.warning(f"文本匹配检测验证码失败: {e}")
+        for w in windows_to_search:
+            # 方法1: control_id=2405 检测
+            try:
+                image = self.window_service.find_element_in_window(w, CAPTCHA_IMAGE_ID)
+                if image is not None:
+                    self.logger.info("通过 control_id=2405 检测到验证码弹窗")
+                    self._captcha_window = w
+                    return True
+            except Exception:
+                pass
+
+            # 方法2: 文本匹配（关键词检测）
+            try:
+                matches = self.window_service.find_element_by_text(
+                    w, CAPTCHA_TEXT_KEYWORDS
+                )
+                if matches:
+                    self.logger.info(f"通过文本匹配检测到验证码弹窗（{len(matches)} 个匹配控件）")
+                    self._captcha_window = w
+                    return True
+            except Exception:
+                pass
 
         self.logger.info("未检测到验证码弹窗（control_id 和文本匹配均未命中）")
+        return False
+
+    def _has_popup_text(self, popup_keywords: list) -> bool:
+        """检查窗口中是否存在弹窗特征文本（用于 poll_until_not）
+        
+        Returns:
+            True=弹窗仍存在, False=弹窗已关闭或窗口不可用
+        """
+        window = self.window_service.get_trading_window()
+        if window is None:
+            return False
+        try:
+            for ctrl in window.descendants():
+                text = ctrl.window_text() or ""
+                if any(kw in text for kw in popup_keywords):
+                    return True
+        except Exception:
+            pass
         return False
 
     def _dismiss_popup_if_present(self, window) -> bool:
@@ -185,9 +266,10 @@ class PositionService:
         """
         if window is None:
             return False
+
+        popup_keywords = ["Begin failed", "failed", "提示"]
         try:
             # 检测弹窗特征：查找"确定"按钮（标准对话框 cid=1 或 cid=2）
-            popup_keywords = ["Begin failed", "failed", "提示"]
             for ctrl in window.descendants():
                 try:
                     text = ctrl.window_text() or ""
@@ -199,11 +281,26 @@ class PositionService:
                             if btn is not None:
                                 btn.click_input()
                                 self.logger.info(f"已点击按钮 cid={btn_id} 关闭弹窗")
-                                time.sleep(0.5)
+                                # 轮询等待弹窗消失（替代固定 sleep(0.5)）
+                                try:
+                                    poll_until_not(
+                                        lambda: self._has_popup_text(popup_keywords),
+                                        timeout=2.0, interval=0.1,
+                                        description="弹窗关闭"
+                                    )
+                                except (PollTimeoutError, Exception):
+                                    pass
                                 return True
                         # 找不到按钮则用 ENTER 关闭
                         self.window_service.send_key("{ENTER}")
-                        time.sleep(0.5)
+                        try:
+                            poll_until_not(
+                                lambda: self._has_popup_text(popup_keywords),
+                                timeout=2.0, interval=0.1,
+                                description="弹窗关闭(ENTER)"
+                            )
+                        except (PollTimeoutError, Exception):
+                            pass
                         return True
                 except Exception:
                     continue
@@ -216,23 +313,17 @@ class PositionService:
     # ------------------------------------------------------------
 
     def _prepare_query_panel(self):
-        """激活窗口 → ESC×3 → F4 打开查询面板
+        """重置到 F1 → F4 打开查询面板
 
-        标准查询流程：确保从 F1 买入界面切换到查询面板，F4 永远是「打开」动作。
-        每个 keybd_event 都带 click_input 激活，确保窗口稳态在前台。
+        调用 window_service.reset_window_state() 确保窗口在前台且处于 F1 基准态，
+        然后发送 F4 切换到查询面板。
         """
-        window = self.window_service.get_trading_window()
-        if window is None:
-            raise Exception("未找到交易窗口 '网上股票交易系统5.0'")
-        window.click_input()
-        time.sleep(0.3)
+        with timed("reset_window_state", self.logger):
+            self.window_service.reset_window_state()
 
-        for _ in range(3):
-            self.window_service.send_key("ESC")
-            time.sleep(0.1)
-
-        self.window_service.send_key("F4")
-        time.sleep(0.5)
+        with timed("F4 打开查询面板", self.logger):
+            self.window_service.send_key("F4", background=True)
+            time.sleep(0.5)
 
     # ------------------------------------------------------------
     # 资金余额（control_id 批量读取，无需 OCR）
@@ -241,23 +332,26 @@ class PositionService:
     def get_balance(self) -> dict:
         """获取资金余额"""
         self.logger.info("开始获取资金余额")
-        self._prepare_query_panel()
 
-        # 批量获取所有字段
-        window = self.window_service.get_trading_window()
-        if window is None:
-            raise Exception("未找到交易窗口 '网上股票交易系统5.0'")
-        control_ids = list(BALANCE_FIELDS.values())
-        elements = self.window_service.find_element_in_window(window, control_ids)
+        with timed("_prepare_query_panel", self.logger):
+            self._prepare_query_panel()
 
-        result = {}
-        for field_name, control_id in BALANCE_FIELDS.items():
-            element = next((e for e in elements if e.control_id() == control_id), None)
-            if element:
-                result[field_name] = element.window_text()
-            else:
-                result[field_name] = None
-                self.logger.warning(f"未找到 {field_name} 对应的控件 control_id={control_id}")
+        with timed("control_id 批量读取", self.logger):
+            # 批量获取所有字段
+            window = self.window_service.get_trading_window()
+            if window is None:
+                raise Exception("未找到交易窗口 '网上股票交易系统5.0'")
+            control_ids = list(BALANCE_FIELDS.values())
+            elements = self.window_service.find_element_in_window(window, control_ids)
+
+            result = {}
+            for field_name, control_id in BALANCE_FIELDS.items():
+                element = next((e for e in elements if e.control_id() == control_id), None)
+                if element:
+                    result[field_name] = element.window_text()
+                else:
+                    result[field_name] = None
+                    self.logger.warning(f"未找到 {field_name} 对应的控件 control_id={control_id}")
 
         self.logger.info(f"资金余额查询完成: {result}")
         return result
@@ -269,7 +363,9 @@ class PositionService:
     def get_position(self) -> list:
         """获取当前持仓"""
         self.logger.info("开始获取持仓")
-        self._prepare_query_panel()
+
+        with timed("_prepare_query_panel", self.logger):
+            self._prepare_query_panel()
 
         # F4 打开后默认就是"资金股票"页面，无需额外导航
         return self._copy_table_via_clipboard()
@@ -281,11 +377,14 @@ class PositionService:
     def get_today_trades(self) -> list:
         """获取今日成交"""
         self.logger.info("开始获取今日成交")
-        self._prepare_query_panel()
 
-        self._refresh_window_ref()
-        window = self._cached_window
-        self._navigate_to_query_page(window, "当日成交")
+        with timed("_prepare_query_panel", self.logger):
+            self._prepare_query_panel()
+
+        with timed("导航到当日成交", self.logger):
+            self._refresh_window_ref()
+            window = self._cached_window
+            self._navigate_to_query_page(window, "当日成交")
 
         return self._copy_table_via_clipboard()
 
@@ -300,11 +399,14 @@ class PositionService:
                   成交数量、撤单数量、状态、交易市场
         """
         self.logger.info("开始获取当日委托")
-        self._prepare_query_panel()
 
-        self._refresh_window_ref()
-        window = self._cached_window
-        self._navigate_to_query_page(window, "当日委托")
+        with timed("_prepare_query_panel", self.logger):
+            self._prepare_query_panel()
+
+        with timed("导航到当日委托", self.logger):
+            self._refresh_window_ref()
+            window = self._cached_window
+            self._navigate_to_query_page(window, "当日委托")
 
         return self._copy_table_via_clipboard()
 
@@ -344,17 +446,19 @@ class PositionService:
                 return False
 
         # 保存验证码图片
-        cache_dir = "logs/screenshots"
-        os.makedirs(cache_dir, exist_ok=True)
-        image_path = os.path.join(cache_dir, "captcha.png")
-        image_element.capture_as_image().save(image_path)
-        self.logger.info(f"验证码图片已保存: {image_path}")
+        with timed("验证码截图保存", self.logger):
+            cache_dir = "logs/screenshots"
+            os.makedirs(cache_dir, exist_ok=True)
+            image_path = os.path.join(cache_dir, "captcha.png")
+            image_element.capture_as_image().save(image_path)
+            self.logger.info(f"验证码图片已保存: {image_path}")
 
         max_retry = self.config.get_ocr_config().get("max_retry", 3)
 
         for attempt in range(max_retry):
             try:
-                ocr_text = self.ocr_service.recognize(image_path)
+                with timed("OCR 识别", self.logger):
+                    ocr_text = self.ocr_service.recognize(image_path)
                 if not ocr_text:
                     self.logger.warning(f"OCR 识别为空（尝试 {attempt + 1}/{max_retry}）")
                     continue
@@ -362,20 +466,30 @@ class PositionService:
                 self.logger.info(f"OCR 识别结果: {ocr_text}")
 
                 # 输入验证码 + 点击确定
-                self.window_service.input_text_to_element(window, CAPTCHA_INPUT_ID, ocr_text)
+                with timed("输入验证码", self.logger):
+                    self.window_service.input_text_to_element(window, CAPTCHA_INPUT_ID, ocr_text)
                 if not self._click_button(window, CAPTCHA_OK_BUTTON_ID):
                     self.logger.warning("未找到验证码确定按钮")
                     continue
 
-                time.sleep(0.3)
-
-                # 刷新窗口验证结果
-                self._refresh_window_ref()
-                window = self._cached_window
-
-                if self._verify_captcha_success(window):
-                    self.logger.info("验证码验证成功")
-                    return True
+                # 轮询等待验证结果
+                with timed("等待验证码确认", self.logger):
+                    try:
+                        poll_until(
+                            lambda: self._verify_captcha_success(
+                                self.window_service.get_trading_window()
+                            ),
+                            timeout=2.0, interval=0.1,
+                            description="验证码验证结果"
+                        )
+                        self.logger.info("验证码验证成功")
+                        return True
+                    except PollTimeoutError:
+                        self._refresh_window_ref()
+                        window = self._cached_window
+                        if self._verify_captcha_success(window):
+                            self.logger.info("验证码验证成功")
+                            return True
 
                 # 失败：点击取消，重新识别
                 self.logger.warning(f"验证码错误（尝试 {attempt + 1}/{max_retry}）")
@@ -441,35 +555,38 @@ class PositionService:
         """
         parent_name = "查询[F4]"
 
-        # 策略1: 树形菜单文本导航
-        button = self.window_service.find_element_by_tree_path(
-            window, ('control_type', 'Tree'), [parent_name, page_name]
-        )
-        if button is not None:
-            button.click_input()
-            self.logger.info(f"已通过树形路径点击 '{page_name}'")
-            time.sleep(0.3)
-            self._dismiss_popup_if_present(window)
-            return
+        with timed(f"树形菜单导航 → {page_name}", self.logger):
+            # 策略1: 树形菜单文本导航
+            button = self.window_service.find_element_by_tree_path(
+                window, ('control_type', 'Tree'), [parent_name, page_name]
+            )
+            if button is not None:
+                button.click_input()
+                self.logger.info(f"已通过树形路径点击 '{page_name}'")
+                time.sleep(0.3)
+                with timed("弹窗防御", self.logger):
+                    self._dismiss_popup_if_present(window)
+                return
 
         self.logger.warning(f"树形路径导航失败，尝试扫描 TreeItem 文本匹配: {page_name}")
 
-        # 策略2: 全量扫描 TreeItem 按文本匹配
-        try:
-            for el in window.descendants():
-                try:
-                    if el.element_info.control_type == "TreeItem":
-                        text = el.window_text() or ""
-                        if page_name in text:
-                            el.click_input()
-                            self.logger.info(f"已通过 TreeItem 文本匹配点击 '{page_name}'")
-                            time.sleep(0.3)
-                            self._dismiss_popup_if_present(window)
-                            return
-                except Exception:
-                    continue
-        except Exception as e:
-            self.logger.warning(f"TreeItem 扫描失败: {str(e)}")
+        with timed(f"TreeItem 全量扫描 → {page_name}", self.logger):
+            # 策略2: 全量扫描 TreeItem 按文本匹配
+            try:
+                for el in window.descendants():
+                    try:
+                        if el.element_info.control_type == "TreeItem":
+                            text = el.window_text() or ""
+                            if page_name in text:
+                                el.click_input()
+                                self.logger.info(f"已通过 TreeItem 文本匹配点击 '{page_name}'")
+                                time.sleep(0.3)
+                                self._dismiss_popup_if_present(window)
+                                return
+                    except Exception:
+                        continue
+            except Exception as e:
+                self.logger.warning(f"TreeItem 扫描失败: {str(e)}")
 
         raise Exception(
             f"导航到 '{page_name}' 失败：树形路径和 TreeItem 扫描均未找到目标页面"

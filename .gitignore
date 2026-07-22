@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -26,6 +26,9 @@ logs/screenshots/*.png
 
 # 配置覆盖
 config/app_config.local.json
+
+# 用户本地配置（含个人路径，不提交）
+config/app_config.json
 
 # OS
 Thumbs.db

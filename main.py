@@ -56,13 +56,13 @@ def main():
         logger.info("=" * 60)
 
         # 3. 检查 xiadan.exe 路径
-        trading_path = config.get_trading_app_path()
-        if not trading_path:
+        trading_paths = config.get_trading_app_paths()
+        if not trading_paths:
             logger.warning(
-                "未配置 xiadan.exe 路径！请在 config/app_config.json 中设置 trading_app_path"
+                "未配置 xiadan.exe 路径！请在 config/app_config.json 中设置 trading_app_paths"
             )
         else:
-            logger.info(f"交易程序路径: {trading_path}")
+            logger.info(f"交易程序路径: {trading_paths}")
 
         # 4. 预加载 ddddocr
         ocr_config = config.get_ocr_config()
@@ -76,9 +76,9 @@ def main():
 
         # 5. 启动窗口监控
         monitor_config = config.get_window_monitor_config()
-        if monitor_config.get("enabled", True) and trading_path:
-            monitor = WindowMonitor(check_interval=monitor_config.get("check_interval", 5))
-            monitor.start(trading_path)
+        if monitor_config.get("enabled", True) and trading_paths:
+            monitor = WindowMonitor(check_interval=monitor_config.get("check_interval", 2))
+            monitor.start(trading_paths)
         else:
             logger.info("窗口监控已禁用")
 

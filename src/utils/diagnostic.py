@@ -29,7 +29,7 @@ class DiagnosticUtil:
         self.screenshot_dir = screenshot_dir
         os.makedirs(self.screenshot_dir, exist_ok=True)
 
-    def snapshot(self, prefix: str = "diagnostic") -> dict:
+    def snapshot(self, prefix: str = "diagnostic", window=None) -> dict:
         """截取当前状态并提取 UI 文本 + OCR 诊断
 
         流程:
@@ -40,6 +40,7 @@ class DiagnosticUtil:
 
         Args:
             prefix: 文件名前缀，如 "dialog_unknown", "timeout_place_order"
+            window: 可选的窗口对象，避免重复 Desktop().windows() 查找
 
         Returns:
             {
@@ -56,6 +57,8 @@ class DiagnosticUtil:
             "ocr_failed": False,
         }
 
+        main_window = window
+
         # 1. 截图
         try:
             util = ScreenshotUtil(self.screenshot_dir)
@@ -63,14 +66,16 @@ class DiagnosticUtil:
             filename = f"{prefix}_{timestamp}.png"
             filepath = os.path.join(self.screenshot_dir, filename)
 
-            # 优先截取交易窗口
-            from pywinauto import Desktop
-            dialogs = Desktop(backend="uia").windows(title=TRADING_WINDOW_TITLE)
-            if dialogs:
-                dialogs[0].capture_as_image().save(filepath)
+            if main_window is not None:
+                main_window.capture_as_image().save(filepath)
             else:
-                import pyautogui
-                pyautogui.screenshot(filepath)
+                from pywinauto import Desktop
+                dialogs = Desktop(backend="uia").windows(title=TRADING_WINDOW_TITLE)
+                if dialogs:
+                    dialogs[0].capture_as_image().save(filepath)
+                else:
+                    import pyautogui
+                    pyautogui.screenshot(filepath)
             result["screenshot"] = filepath
             self.logger.info(f"诊断截图保存: {filepath}")
         except Exception as e:
@@ -79,10 +84,13 @@ class DiagnosticUtil:
         # 2. 提取 UI 控件文本（比 OCR 更可靠）
         try:
             ui_text_lines = []
-            from pywinauto import Desktop
-            dialogs = Desktop(backend="uia").windows(title=TRADING_WINDOW_TITLE)
-            if dialogs:
-                main_window = dialogs[0]
+            if main_window is None:
+                from pywinauto import Desktop
+                dialogs = Desktop(backend="uia").windows(title=TRADING_WINDOW_TITLE)
+                if dialogs:
+                    main_window = dialogs[0]
+
+            if main_window is not None:
                 # 枚举所有子孙控件，提取文本
                 seen_texts = set()
                 for ctrl in main_window.descendants():

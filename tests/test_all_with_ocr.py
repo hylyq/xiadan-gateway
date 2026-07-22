@@ -9,6 +9,10 @@ import urllib.request
 import urllib.error
 import os
 import sys
+
+# 强制 UTF-8 输出，避免 GBK 编码报错
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 from datetime import datetime
 
 BASE_URL = "http://127.0.0.1:5000"
@@ -67,7 +71,7 @@ def diagnostic_snapshot(context: str = "", wait_ms: int = 500) -> dict:
         screenshot = ocr.get("screenshot", "")
         failed = ocr.get("ocr_failed", True)
         ui_lines = len(ui_text.split("\n")) if ui_text else 0
-        status = "✓ UI OK" if ui_text else ("✓ OCR OK" if (not failed and text) else "⚠ empty" if not failed else "✗ failed")
+        status = "[OK] UI OK" if ui_text else ("[OK] OCR OK" if (not failed and text) else "[WARN] empty" if not failed else "[FAIL] failed")
         print(f"      诊断结果 → {status} | UI文本{ui_lines}项, OCR文本({len(text)}字)")
         if ui_text:
             print(f"      UI 控件文本 ({ui_lines} 项):")
@@ -77,7 +81,7 @@ def diagnostic_snapshot(context: str = "", wait_ms: int = 500) -> dict:
             print(f"      OCR 原文:\n{text}")
         return ocr
     except Exception as e:
-        print(f"      诊断截图 → ✗ 失败: {e}")
+        print(f"      诊断截图 → [FAIL] 失败: {e}")
         return {"ocr_failed": True, "ocr_text": "", "error": str(e)}
 
 
@@ -199,11 +203,11 @@ def do_test():
     ocr_final = diagnostic_snapshot("final_state", wait_ms=0)
     if ocr_final.get("ui_text", "").strip():
         ui_count = len(ocr_final["ui_text"].split("\n"))
-        print(f"\n  ✓ 最终诊断结果: UI 控件文本 {ui_count} 项")
+        print(f"\n  [OK] 最终诊断结果: UI 控件文本 {ui_count} 项")
     elif ocr_final.get("ocr_text", "").strip():
-        print(f"\n  ✓ 最终 OCR 识别结果 ({len(ocr_final['ocr_text'])} 字符)")
+        print(f"\n  [OK] 最终 OCR 识别结果 ({len(ocr_final['ocr_text'])} 字符)")
     else:
-        print(f"\n  ⚠ 最终诊断未提取到文本")
+        print(f"\n  [WARN] 最终诊断未提取到文本")
 
     # =========================================================
     # 生成测试报告

@@ -21,6 +21,7 @@ from src.constants import (
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
 from src.utils.logger import Logger
+from src.utils.poll import poll_until, poll_until_not, timed, PollTimeoutError
 
 
 class TradingService:
@@ -56,10 +57,11 @@ class TradingService:
         self.logger.info(f"开始撤单: {operation_name}")
 
         # 激活窗口（撤单需要前台激活，因为 click_input() 需要焦点）
-        trading_path = self.config.get_trading_app_path()
-        if not trading_path:
-            raise Exception("未配置 xiadan.exe 路径")
-        self.window_service.activate_window(trading_path)
+        with timed("激活窗口", self.logger):
+            trading_paths = self.config.get_trading_app_paths()
+            if not trading_paths:
+                raise Exception("未配置 xiadan.exe 路径")
+            self.window_service.activate_window(trading_paths)
 
         window = self.window_service.get_trading_window()
         if window is None:
@@ -76,35 +78,53 @@ class TradingService:
         # F3 打开撤单界面（带重试）
         # 非交易时段首次 F3 可能弹出 "Begin failed!" 弹窗导致撤单界面未加载，
         # 关闭弹窗后需重试 F3。以撤单按钮是否出现为成功判据。
-        for f3_attempt in range(3):
-            self.window_service.send_key("F3")
-            self.logger.info(f"已发送 F3 打开委托撤单界面 (尝试 {f3_attempt + 1}/3)")
-            time.sleep(0.3)
+        with timed("F3 打开撤单界面", self.logger):
+            for f3_attempt in range(3):
+                self.window_service.send_key("F3")
+                self.logger.info(f"已发送 F3 打开委托撤单界面 (尝试 {f3_attempt + 1}/3)")
+                time.sleep(0.3)
 
-            window = self.window_service.get_trading_window()
-            if window is None:
-                raise Exception("打开撤单界面后窗口消失")
+                window = self.window_service.get_trading_window()
+                if window is None:
+                    raise Exception("打开撤单界面后窗口消失")
 
-            # 关闭可能出现的阻塞型提示弹窗（如非交易时段的 "Begin failed!"）
-            self._dismiss_blocking_popup(window)
+                # 关闭可能出现的阻塞型提示弹窗（如非交易时段的 "Begin failed!"）
+                self._dismiss_blocking_popup(window)
 
-            # 重新获取窗口（弹窗关闭后控件树已变化），检查撤单按钮是否存在
-            window = self.window_service.get_trading_window()
-            if window is not None:
-                btn = self.window_service.find_element_in_window(window, control_id)
-                if btn is not None:
-                    self.logger.info("撤单界面加载成功，撤单按钮已就绪")
-                    break
-            self.logger.warning(f"撤单界面未加载（未找到撤单按钮），将重试 F3")
-        else:
-            raise Exception(
-                f"打开撤单界面失败，未找到撤单按钮 control_id={control_id}（已重试 3 次）"
-            )
+                # 重新获取窗口（弹窗关闭后控件树已变化），检查撤单按钮是否存在
+                window = self.window_service.get_trading_window()
+                if window is not None:
+                    btn = self.window_service.find_element_in_window(window, control_id)
+                    if btn is not None:
+                        self.logger.info("撤单界面加载成功，撤单按钮已就绪")
+                        break
+                self.logger.warning(f"撤单界面未加载（未找到撤单按钮），将重试 F3")
+            else:
+                raise Exception(
+                    f"打开撤单界面失败，未找到撤单按钮 control_id={control_id}（已重试 3 次）"
+                )
 
         # 点击对应的撤单按钮
-        self.window_service.click_element(window, control_id)
-        self.logger.info(f"已点击 {operation_name} 按钮")
-        time.sleep(0.5)
+        with timed("点击撤单按钮", self.logger):
+            self.window_service.click_element(window, control_id)
+            self.logger.info(f"已点击 {operation_name} 按钮")
+
+        # 轮询等待撤单确认弹窗出现（替代固定 sleep(0.5)）。
+        # 快速交易模式下撤单也不弹确认窗（"撤单时是否需要确认"=否），
+        # 仅可能弹通用提示窗（如非交易时段），1.0s 足够检测。
+        with timed("等待撤单确认弹窗", self.logger):
+            try:
+                poll_until(
+                    lambda: self.window_service.get_trading_window() is not None
+                            and self.window_service.find_element_in_window(
+                                self.window_service.get_trading_window(),
+                                CANCEL_CONFIRM_TEXT_ID
+                            ) is not None,
+                    timeout=1.0, interval=0.1,
+                    description=f"{operation_name} 确认弹窗"
+                )
+            except PollTimeoutError:
+                pass
 
         # 检测撤单确认弹窗（每次撤单都会弹出，脚本自动点"是(Y)"确认）
         cancelled_count = None
@@ -183,14 +203,47 @@ class TradingService:
                             if btn is not None:
                                 btn.click_input()
                                 self.logger.info(f"已点击按钮 cid={btn_id} 关闭弹窗")
-                                time.sleep(0.5)
+                                # 轮询等待弹窗消失（替代固定 sleep(0.5)）
+                                try:
+                                    poll_until_not(
+                                        lambda: self._has_popup_text(popup_keywords),
+                                        timeout=2.0, interval=0.1,
+                                        description="弹窗关闭"
+                                    )
+                                except (PollTimeoutError, Exception):
+                                    pass
                                 return True
                         # 找不到按钮则用 ENTER 关闭
                         self.window_service.send_key("{ENTER}")
-                        time.sleep(0.5)
+                        try:
+                            poll_until_not(
+                                lambda: self._has_popup_text(popup_keywords),
+                                timeout=2.0, interval=0.1,
+                                description="弹窗关闭(ENTER)"
+                            )
+                        except (PollTimeoutError, Exception):
+                            pass
                         return True
                 except Exception:
                     continue
+        except Exception:
+            pass
+        return False
+
+    def _has_popup_text(self, popup_keywords: list) -> bool:
+        """检查窗口中是否存在弹窗特征文本（用于 poll_until_not）
+        
+        Returns:
+            True=弹窗仍存在, False=弹窗已关闭或窗口不可用
+        """
+        window = self.window_service.get_trading_window()
+        if window is None:
+            return False
+        try:
+            for ctrl in window.descendants():
+                text = ctrl.window_text() or ""
+                if any(kw in text for kw in popup_keywords):
+                    return True
         except Exception:
             pass
         return False

@@ -24,6 +24,7 @@ class ErrorCode:
     WINDOW_NOT_FOUND = "WINDOW_NOT_FOUND"           # 交易窗口未找到
     CONTROL_NOT_FOUND = "CONTROL_NOT_FOUND"         # 控件未找到
     MODE_SWITCH_FAILED = "MODE_SWITCH_FAILED"       # 限价/市价切换失败
+    ORDER_SUBMIT_FAILED = "ORDER_SUBMIT_FAILED"     # 订单提交失败（券商返回错误）
     OCR_FAILED = "OCR_FAILED"                       # 验证码识别失败
     INTERNAL_ERROR = "INTERNAL_ERROR"               # 未知异常
 
@@ -45,6 +46,7 @@ HTTP_STATUS = {
     ErrorCode.WINDOW_NOT_FOUND: 503,
     ErrorCode.CONTROL_NOT_FOUND: 500,
     ErrorCode.MODE_SWITCH_FAILED: 500,
+    ErrorCode.ORDER_SUBMIT_FAILED: 500,
     ErrorCode.OCR_FAILED: 500,
     ErrorCode.INTERNAL_ERROR: 500,
     ErrorCode.QUEUE_TIMEOUT: 503,
@@ -158,7 +160,9 @@ def error_response(
         response["screenshot"] = screenshot
 
     http_status = HTTP_STATUS.get(error_code, 500)
-    return jsonify(response), http_status
+    # 统一返回 HTTP 200，通过 JSON 中的 status 字段区分成功/失败。
+    # 避免 PowerShell 的 Invoke-RestMethod 等客户端因 HTTP 错误状态码抛异常。
+    return jsonify(response), 200
 
 
 def error_response_from_exception(e: Exception, request_id: Optional[str] = None) -> tuple:

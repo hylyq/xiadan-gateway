@@ -97,8 +97,8 @@ def _register_system_routes(app: Flask) -> None:
 
         # 检查 xiadan.exe 是否在运行
         xiadan_running = False
-        trading_path = config.get_trading_app_path()
-        if trading_path:
+        trading_paths = config.get_trading_app_paths()
+        if trading_paths:
             try:
                 import psutil
                 for proc in psutil.process_iter(["name"]):
@@ -112,7 +112,7 @@ def _register_system_routes(app: Flask) -> None:
             "service": "xiadan-gateway",
             "version": "1.0.0",
             "xiadan_running": xiadan_running,
-            "trading_app_path": trading_path,
+            "trading_app_paths": trading_paths,
             "queue_status": task_queue.get_status(),
             "config": {
                 "watchdog_timeout_seconds": watchdog_timeout,
@@ -131,7 +131,7 @@ def _register_system_routes(app: Flask) -> None:
         """热重载配置文件
 
         重新读取 config/app_config.json，无需重启服务。
-        注意: 部分配置（如 trading_app_path）需重启才能完全生效。
+        注意: trading_app_paths 等路径变更需重启服务才能完全生效。
         """
         result = config.reload()
         return success_response(result, generate_request_id())
