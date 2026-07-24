@@ -25,6 +25,8 @@ class ErrorCode:
     ORDER_SUBMIT_FAILED = "ORDER_SUBMIT_FAILED"     # 订单提交失败（券商返回错误，通用）
     SERVER_CLEARING = "SERVER_CLEARING"             # 券商系统清算中
     OUTSIDE_TRADING_HOURS = "OUTSIDE_TRADING_HOURS" # 非交易时段
+    T1_RESTRICTION = "T1_RESTRICTION"             # T+1 制度限制（当日买入次日可卖）
+    INSUFFICIENT_SHARES = "INSUFFICIENT_SHARES"   # 可卖数量不足
     SERVER_UNAVAILABLE = "SERVER_UNAVAILABLE"       # 券商服务器不可用（维护中）
     OCR_FAILED = "OCR_FAILED"                       # 验证码识别失败
     INTERNAL_ERROR = "INTERNAL_ERROR"               # 未知异常
@@ -50,6 +52,8 @@ HTTP_STATUS = {
     ErrorCode.ORDER_SUBMIT_FAILED: 500,
     ErrorCode.SERVER_CLEARING: 503,
     ErrorCode.OUTSIDE_TRADING_HOURS: 400,
+    ErrorCode.T1_RESTRICTION: 400,
+    ErrorCode.INSUFFICIENT_SHARES: 400,
     ErrorCode.SERVER_UNAVAILABLE: 503,
     ErrorCode.OCR_FAILED: 500,
     ErrorCode.INTERNAL_ERROR: 500,

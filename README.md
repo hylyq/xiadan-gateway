@@ -120,6 +120,8 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `ORDER_SUBMIT_FAILED` | 订单提交失败（通用，含弹窗原文） |
 | `SERVER_CLEARING` | 券商系统清算中 |
 | `OUTSIDE_TRADING_HOURS` | 非交易时段 |
+| `T1_RESTRICTION` | T+1 制度限制（当日买入次日可卖） |
+| `INSUFFICIENT_SHARES` | 可卖数量不足 |
 | `SERVER_UNAVAILABLE` | 券商服务器不可用（事务处理机转发失败等） |
 | `OCR_FAILED` | 验证码识别失败 |
 | `INTERNAL_ERROR` | 未知异常 |

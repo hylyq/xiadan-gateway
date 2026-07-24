@@ -313,16 +313,12 @@ class Trader:
                         # D) 纯错误弹窗（无Y/N按钮），关闭并报错
                         self.logger.warning(f"检测到错误弹窗: {dialog_text[:100]}")
                         self._close_non_confirm_popup(window, descendants=_descendants)
-
                         DiagnosticUtil().snapshot("dialog_error")
-
-                        if status == "2" and any(kw in dialog_text for kw in T1_RESTRICTION_KEYWORDS):
-                            raise Exception(
-                                f"A 股实行 T+1 交易制度，当日买入的股票次日才能卖出。"
-                                f"弹窗信息: {dialog_text[:200]}"
-                            )
-
-                        raise Exception(f"下单失败: {dialog_text[:200]}")
+                        _error_code, _message, _suggestion = self._classify_submit_error(dialog_text)
+                        raise ApiError(
+                            _error_code, _message, suggestion=_suggestion,
+                            details={"popup_title": "（无标题）", "popup_text": dialog_text[:200]}
+                        )
 
                 time.sleep(0.1)
 
@@ -555,6 +551,20 @@ class Trader:
                 ErrorCode.OUTSIDE_TRADING_HOURS,
                 f"非交易时段: {error_text[:150]}",
                 "请在交易时段内操作（工作日 9:30-11:30, 13:00-15:00）。"
+            )
+        # T+1 制度限制（仅卖出）：当日买入的股票次日才能卖出
+        if any(kw in error_text for kw in T1_RESTRICTION_KEYWORDS):
+            return (
+                ErrorCode.T1_RESTRICTION,
+                f"T+1 制度限制: {error_text[:150]}",
+                "A 股实行 T+1 交易制度，当日买入的股票需至下一个交易日方可卖出。"
+            )
+        # 可卖数量不足（仅卖出）
+        if "可卖数量" in error_text or "可用余额不足" in error_text:
+            return (
+                ErrorCode.INSUFFICIENT_SHARES,
+                f"可卖数量不足: {error_text[:150]}",
+                "请检查持仓的可卖数量（冻结数量/当日买入不可卖出）后调整委托数量。"
             )
         if "事务处理机" in error_text or "转发数据失败" in error_text:
             return (
