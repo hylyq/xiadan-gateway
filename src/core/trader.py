@@ -117,18 +117,19 @@ class Trader:
                     raise Exception("关闭弹窗后窗口消失")
                 _descendants = list(window.descendants())
 
-        # 5. 切换限价/市价模式（必须在填完代码之后，券商要求先有代码才能切换）
+        # 5. 确保价格模式匹配（券商可能记住上次模式，输入代码后自动切换）
         with timed("切换价格模式", self.logger):
             want_market = (price_type == "market")
-            is_market = self._switch_price_type(window, want_market)
-            # 切换后必须重新获取窗口（descendants() 会缓存控件树）
+            is_market = self._is_market_mode(window)
+            if want_market != is_market:
+                is_market = self._switch_price_type(window, want_market)
+            # 刷新 window 连接 + descendants（模式切换/代码输入后控件树已变化）
             window = self.window_service.get_trading_window()
             if window is None:
                 raise Exception("切换价格模式后窗口消失")
-            # 价格切换只改标签文本，控件树结构不变，仅在弹窗关闭触发了
-            # window 重建时才重取 _descendants（已在步骤 4.1 处理）
+            _descendants = list(window.descendants())
 
-        # 6. 填写价格（仅限价）
+        # 6. 填写价格（仅限价，步骤 5 已确保处于限价模式）
         if price_type == "limit" and price:
             with timed("填写价格", self.logger):
                 self.window_service.input_text_to_element(
@@ -381,8 +382,9 @@ class Trader:
     def _switch_price_type(self, window, want_market: bool) -> bool:
         """切换限价/市价模式
 
-        F1 买入界面内，点击 control_id=1400（"买入价格"按钮）触发服务器请求，
-        网络正常时标签从"买入价格"变为"对手方最优"，服务器异常时不变或弹窗。
+        点击 control_id=1400 在限价/市价之间切换（toggle），双向通用。
+        服务器正常时标签在「买入价格」↔「对手方最优」之间切换，
+        服务器异常时不变或弹窗。
 
         策略：点击后先用短超时检测弹窗（服务器拒绝时弹窗 <0.5s），
         无弹窗再用长超时等待标签变化。
@@ -394,85 +396,69 @@ class Trader:
         Returns:
             切换后是否处于市价模式
         """
-        is_market = self._is_market_mode(window)
-        if want_market == is_market:
-            return is_market
-
-        if want_market:
-            for attempt in range(2):
-                self.logger.info(
-                    f"尝试切换到市价模式（点击 1400, 尝试 {attempt + 1}/2）"
-                )
-                label = self.window_service.find_element_in_window(window, CONTROL_ID_PRICE_TYPE)
-                if label is None:
-                    raise Exception(f"未找到价格类型控件 control_id={CONTROL_ID_PRICE_TYPE}")
-                label.click_input()
-
-                # 第一步：短超时检测弹窗（服务器直接拒绝时弹窗立即出现）
-                time.sleep(0.3)
-                window = self.window_service.get_trading_window()
-                if window is not None and self._dismiss_server_error_popup(window):
-                    window = self.window_service.get_trading_window()
-                    # 提取弹窗文本，分类报错
-                    try:
-                        _desc = list(window.descendants()) if window else []
-                        _text = self._extract_popup_error_text(_desc)
-                    except Exception:
-                        _text = ""
-                    _code, _msg, _sug = self._classify_submit_error(_text)
-                    raise ApiError(
-                        _code,
-                        f"切换市价模式失败: {_msg}",
-                        suggestion=_sug + " 或改用限价模式（price_type=limit）。",
-                        details={"phase": "switch_price_type", "attempt": attempt + 1}
-                    )
-
-                # 第二步：等待标签变化（服务器正常但响应慢）
-                try:
-                    poll_until(
-                        lambda: self._is_market_mode(
-                            self.window_service.get_trading_window()
-                        ),
-                        timeout=3.0, interval=0.3,
-                        description=f"价格模式切换（尝试 {attempt + 1}/2）"
-                    )
-                    self.logger.info("市价模式切换成功")
-                    return True
-                except PollTimeoutError:
-                    self.logger.warning(
-                        f"尝试 {attempt + 1}/2 超时，标签未变化"
-                    )
-                    window = self.window_service.get_trading_window()
-                    if window is None:
-                        raise Exception("切换价格模式时窗口消失")
-
-            raise ApiError(
-                ErrorCode.MODE_SWITCH_FAILED,
-                "切换市价模式失败（已重试 2 次）",
-                suggestion="可能原因：券商服务器异常/模拟账户不支持市价/网络问题。"
-                           "建议改用限价模式（price_type=limit）重试。"
+        _mode_name = "市价" if want_market else "限价"
+        for attempt in range(2):
+            self.logger.info(
+                f"尝试切换到{_mode_name}模式（点击 1400, 尝试 {attempt + 1}/2）"
             )
-        else:
-            # 切换到限价：F1 重置到默认限价模式
-            self.logger.info("切换到限价模式（发送 F1）")
-            self.window_service.send_key("F1")
+            label = self.window_service.find_element_in_window(window, CONTROL_ID_PRICE_TYPE)
+            if label is None:
+                raise Exception(f"未找到价格类型控件 control_id={CONTROL_ID_PRICE_TYPE}")
+            label.click_input()
+
+            # 第一步：短超时检测弹窗（服务器拒绝时弹窗立即出现）
             time.sleep(0.3)
-
-            # 验证
             window = self.window_service.get_trading_window()
-            if not self._is_market_mode(window):
-                return False
+            if window is not None and self._dismiss_server_error_popup(window):
+                window = self.window_service.get_trading_window()
+                try:
+                    _desc = list(window.descendants()) if window else []
+                    _text = self._extract_popup_error_text(_desc)
+                except Exception:
+                    _text = ""
+                _code, _msg, _sug = self._classify_submit_error(_text)
+                raise ApiError(
+                    _code,
+                    f"切换{_mode_name}模式失败: {_msg}",
+                    suggestion=_sug + (" 或改用限价模式（price_type=limit）。" if want_market else ""),
+                    details={"phase": "switch_price_type", "attempt": attempt + 1}
+                )
 
-            raise Exception("切换限价模式失败")
+            # 第二步：等待标签变化到目标状态
+            try:
+                poll_until(
+                    lambda: (self._is_market_mode(
+                        self.window_service.get_trading_window()
+                    ) == want_market),
+                    timeout=3.0, interval=0.3,
+                    description=f"切换到{_mode_name}（尝试 {attempt + 1}/2）"
+                )
+                self.logger.info(f"{_mode_name}模式切换成功")
+                return want_market
+            except PollTimeoutError:
+                self.logger.warning(
+                    f"尝试 {attempt + 1}/2 超时，标签未变化"
+                )
+                window = self.window_service.get_trading_window()
+                if window is None:
+                    raise Exception("切换价格模式时窗口消失")
 
-    def _is_market_mode(self, window) -> bool:
+        raise ApiError(
+            ErrorCode.MODE_SWITCH_FAILED,
+            f"切换{_mode_name}模式失败（已重试 2 次）",
+            suggestion="可能原因：券商服务器异常/模拟账户不支持市价/网络问题。"
+                       + ("建议改用限价模式（price_type=limit）重试。" if want_market else "")
+        )
+
+    def _is_market_mode(self, window, descendants=None) -> bool:
         """检查当前是否处于市价模式
 
         control_id=1400 标签文本：
         - "买入价格" = 限价模式
         - "市价买入" / "对手方最优" 等 = 市价模式
         """
-        label = self.window_service.find_element_in_window(window, CONTROL_ID_PRICE_TYPE)
+        label = self.window_service.find_element_in_window(
+            window, CONTROL_ID_PRICE_TYPE, descendants=descendants)
         if label is None:
             return False
         text = label.window_text() or ""

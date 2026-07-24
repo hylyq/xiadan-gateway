@@ -472,6 +472,8 @@ class WindowService:
         for i in range(retries):
             try:
                 element = self.find_element_in_window(window, control_id, descendants=descendants)
+                if element is None and descendants is not None:
+                    element = self.find_element_in_window(window, control_id)
                 if element is None:
                     raise Exception(f"未找到 control_id={control_id} 的控件")
                 element.click_input()
@@ -486,6 +488,9 @@ class WindowService:
         """向输入框输入文本（先清空已有内容，再输入新内容）"""
         try:
             element = self.find_element_in_window(window, control_id, descendants=descendants)
+            if element is None and descendants is not None:
+                # 缓存未命中：控件树可能已变化，降级走 fresh scan
+                element = self.find_element_in_window(window, control_id)
             if element is None:
                 raise Exception(f"未找到 control_id={control_id} 的输入框")
             element.set_focus()
