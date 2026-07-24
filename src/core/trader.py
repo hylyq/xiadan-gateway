@@ -152,6 +152,7 @@ class Trader:
         # 快速交易模式下（买入/卖出确认=否）不弹委托确认窗，仅可能弹警告窗。
         # 警告弹窗在点击下单按钮后立即出现，0.3s 足够检测；
         # 正常情况无弹窗则快速跳过，不再浪费等待时间。
+        _dialog_detected = True
         with timed("等待下单弹窗", self.logger):
             try:
                 poll_until(
@@ -160,7 +161,7 @@ class Trader:
                     description="下单后弹窗"
                 )
             except PollTimeoutError:
-                pass
+                _dialog_detected = False
 
         # 检测弹窗类型（按优先级）：
         # A) cid=1365 标题 + 标题含"委托确认" → 真正的委托确认弹窗
@@ -188,6 +189,12 @@ class Trader:
                     window = self.window_service.get_trading_window_fast()
                     continue
 
+                # 快速交易模式：轮询超时（0.3s 无弹窗）+ 缓存未命中 →
+                # 确认无弹窗，省去后续 4 轮 descendants 遍历（~4s）
+                if check_attempt > 0 and not _dialog_detected and self._cached_descendants is None:
+                    self.logger.info("未检测到任何弹窗，跳过后续检测")
+                    break
+
                 # 每轮重置弹窗文本（避免上一轮的旧值污染兜底逻辑）
                 order_detail_text = None
 
@@ -204,6 +211,7 @@ class Trader:
                     window, CONFIRM_DIALOG_TITLE_ID, descendants=_descendants
                 )
                 if title_el is not None:
+                    _dialog_detected = True  # 标记已检测到弹窗，防止后续轮次错误跳出
                     title_text = title_el.window_text() or ""
                     self.logger.info(f"检测到弹窗标题: {title_text}")
 
@@ -282,6 +290,7 @@ class Trader:
                     window, CONFIRM_DETAIL_TEXT_ID, descendants=_descendants
                 )
                 if text_el is not None:
+                    _dialog_detected = True  # 标记已检测到弹窗（无标题图的弹窗）
                     dialog_text = text_el.window_text() or ""
                     if not dialog_text.strip():
                         time.sleep(0.1)
