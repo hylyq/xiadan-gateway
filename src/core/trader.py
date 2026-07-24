@@ -242,7 +242,8 @@ class Trader:
                         confirm_dialog_detected = True
                         if confirm:
                             try:
-                                self.window_service.click_element(window, CONFIRM_YES_BUTTON_ID)
+                                self.window_service.click_element(
+                                    window, CONFIRM_YES_BUTTON_ID, descendants=_descendants)
                                 confirmed = True
                                 self.logger.info("已点击 '是(Y)' 确认委托")
                             except Exception as e:
@@ -251,7 +252,8 @@ class Trader:
                                 confirmed = True
                         else:
                             try:
-                                self.window_service.click_element(window, CONFIRM_NO_BUTTON_ID)
+                                self.window_service.click_element(
+                                    window, CONFIRM_NO_BUTTON_ID, descendants=_descendants)
                                 self.logger.info("已点击 '否(N)' 取消委托（预览模式）")
                             except Exception as e:
                                 self.window_service.send_key("{ESC}")
@@ -430,11 +432,15 @@ class Trader:
                 )
 
             # 第二步：等待标签变化到目标状态
+            # 缓存 label 元素引用，轮询时只读文本（避免每次 get_trading_window + descendants 遍历）
+            _label = self.window_service.find_element_in_window(window, CONTROL_ID_PRICE_TYPE)
             try:
                 poll_until(
-                    lambda: (self._is_market_mode(
-                        self.window_service.get_trading_window()
-                    ) == want_market),
+                    lambda: (_label is not None
+                             and want_market == (
+                                 "市价" in (_label.window_text() or "")
+                                 or "最优" in (_label.window_text() or "")
+                             )),
                     timeout=3.0, interval=0.3,
                     description=f"切换到{_mode_name}（尝试 {attempt + 1}/2）"
                 )
@@ -447,6 +453,7 @@ class Trader:
                 window = self.window_service.get_trading_window()
                 if window is None:
                     raise Exception("切换价格模式时窗口消失")
+                _label = None  # 下次重试重新获取
 
         raise ApiError(
             ErrorCode.MODE_SWITCH_FAILED,
@@ -502,7 +509,7 @@ class Trader:
         弹窗文本通常只有几行（标题 + 错误内容 + 按钮文字），
         过滤掉交易窗口的大量 UI 标签（证券代码、买入价格 等）。
         """
-        # 交易窗口 UI 标签（不应出现在弹窗文本中）
+        # 交易窗口 UI 标签 + 侧边栏菜单项（不应出现在弹窗文本中）
         _ui_labels = {
             "证券代码", "证券名称", "买入价格", "卖出价格", "买入数量",
             "卖出数量", "可买(股)", "可卖(股)", "买入股票", "卖出股票",
@@ -512,6 +519,17 @@ class Trader:
             "左移一列", "右移一列", "上一行", "下一行",
             "向上翻页", "向下翻页", "向左翻页", "向右翻页",
             "买入[F1]", "卖出[F2]", "撤单[F3]", "查询[F4]",
+            # 侧边栏菜单
+            "买入", "卖出", "自选股", "条件单", "组合交易", "科创板",
+            "盘后定价委托", "批量下单", "申购", "北交所交易", "双向委托",
+            "市价委托", "资金股票", "当日成交", "当日委托", "历史成交",
+            "历史持仓", "历史委托", "资金明细", "对 帐 单", "交 割 单",
+            "证券在途业务查询", "账户分析", "通用回购", "银证转账",
+            "场内基金", "资金管理", "其他业务", "修改密码",
+            "风险承受能力测评", "查询风险承受能力等级测评结果", "开通极速版",
+            "刷新当前页面", "HexinScrollWnd2", "EmbChart",
+            # 券商名称/状态栏
+            "恒泰证券欢迎您", "内蒙", "报告问题",
         }
         lines = []
         for el in descendants:
@@ -519,14 +537,15 @@ class Trader:
                 t = (el.window_text() or "").strip()
                 if not t or len(t) > 200:
                     continue
-                # 过滤 UI 标签
                 if t in _ui_labels:
                     continue
-                # 过滤纯数字/时间/位置等
                 if t in ("多", "少", "位置", "添加", "打开", "关闭",
                           "专业", "精简", "退出", "登录", "系统",
                           "最小化", "最大化", "分析", "风控", "条件",
-                          "双向", "报告问题", "买入", "卖出"):
+                          "双向", "零"):
+                    continue
+                # 过滤纯数字/时间戳（如 "00:00:22", "1/1", "1/2" 等分页信息）
+                if t.replace(":", "").replace("/", "").replace(".", "").isdigit():
                     continue
                 lines.append(t)
             except Exception:
@@ -587,15 +606,16 @@ class Trader:
         import win32con
 
         # 方案1: 点击标准 Windows 按钮（IDOK=1="确定", IDCANCEL=2="取消"）
-        for btn_id in (1, 2):
-            btn = self.window_service.find_element_in_window(window, btn_id, descendants=descendants)
-            if btn is not None:
-                try:
-                    btn.click_input()
-                    self.logger.info(f"已点击按钮 cid={btn_id} 关闭弹窗")
-                    return
-                except Exception:
-                    continue
+        # 一次遍历同时找两个按钮（find_element_in_window 支持批量 control_id）
+        buttons = self.window_service.find_element_in_window(
+            window, (1, 2), descendants=descendants)
+        for btn in (buttons or []):
+            try:
+                btn.click_input()
+                self.logger.info(f"已点击按钮 cid={btn.control_id()} 关闭弹窗")
+                return
+            except Exception:
+                continue
 
         # 方案2: keybd_event 直接发 ESC（不经过 send_key，免去前台窗口校验）
         self.logger.info("未找到标准按钮，用 keybd_event 发送 ESC 关闭弹窗")
