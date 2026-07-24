@@ -120,14 +120,19 @@ class Trader:
         # 5. 确保价格模式匹配（券商可能记住上次模式，输入代码后自动切换）
         with timed("切换价格模式", self.logger):
             want_market = (price_type == "market")
-            is_market = self._is_market_mode(window)
-            if want_market != is_market:
-                is_market = self._switch_price_type(window, want_market)
-            # 刷新 window 连接 + descendants（模式切换/代码输入后控件树已变化）
+            # 刷新窗口 + descendants 一次性完成，同时用于 _is_market_mode 检测
             window = self.window_service.get_trading_window()
             if window is None:
                 raise Exception("切换价格模式后窗口消失")
             _descendants = list(window.descendants())
+            is_market = self._is_market_mode(window, descendants=_descendants)
+            if want_market != is_market:
+                is_market = self._switch_price_type(window, want_market)
+                # 模式切换后重新刷新（控件树可能已变化）
+                window = self.window_service.get_trading_window()
+                if window is None:
+                    raise Exception("切换价格模式后窗口消失")
+                _descendants = list(window.descendants())
 
         # 6. 填写价格（仅限价，步骤 5 已确保处于限价模式）
         if price_type == "limit" and price:
@@ -330,16 +335,15 @@ class Trader:
                 time.sleep(0.3)  # 等待弹窗出现
                 window = self.window_service.get_trading_window_fast()
                 if window is not None:
-                    # 检查是否有新的提示弹窗（cid=1365 标题）
+                    # 一次 descendants 遍历：同时检查弹窗 + 提取文本
+                    _descendants = list(window.descendants())
                     title_el = self.window_service.find_element_in_window(
-                        window, CONFIRM_DIALOG_TITLE_ID
+                        window, CONFIRM_DIALOG_TITLE_ID, descendants=_descendants
                     )
                     if title_el is not None:
                         title_text = title_el.window_text() or ""
                         # 排除"委托确认"弹窗（正常流程中已处理）
                         if "委托确认" not in title_text:
-                            # 缓存 descendants 一次遍历，提取弹窗文本并分类
-                            _descendants = list(window.descendants())
                             _popup_text = self._extract_popup_error_text(_descendants)
                             _error_code, _message, _suggestion = self._classify_submit_error(_popup_text)
                             self.logger.warning(
