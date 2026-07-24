@@ -118,6 +118,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `CONTROL_NOT_FOUND` | 控件未找到 |
 | `MODE_SWITCH_FAILED` | 限价/市价切换失败 |
 | `ORDER_SUBMIT_FAILED` | 订单提交失败（券商返回错误，含弹窗原文） |
+| `SERVER_UNAVAILABLE` | 券商服务器不可用（维护中，弹窗已自动关闭） |
 | `OCR_FAILED` | 验证码识别失败 |
 | `INTERNAL_ERROR` | 未知异常 |
 | `QUEUE_TIMEOUT` | 任务排队超时 |
@@ -340,7 +341,7 @@ Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 间隔 0.15s)
 
 ### 弹窗分类处理
 
-下单/撤单过程中自动检测弹窗类型并分别处理：委托确认弹窗（点 Y/N）、警告弹窗（点 Y 关闭后继续等待）、纯错误弹窗（提取文本后报错）、"Begin failed!" 提示弹窗（点确定关闭）。弹窗关闭逻辑统一由 `WindowService.dismiss_blocking_popup()` 处理。
+下单/撤单过程中自动检测弹窗类型并分别处理：委托确认弹窗（点 Y/N）、警告弹窗（点 Y 关闭后继续等待）、纯错误弹窗（提取文本后报错）、服务器错误弹窗（如「事务处理机转发数据失败」「Begin failed!」— 点确定关闭后抛 `SERVER_UNAVAILABLE`）。弹窗关闭逻辑统一由 `WindowService.dismiss_blocking_popup()` 处理，关键词覆盖中英文（`"失败"` / `"failed"` / `"事务处理机"`），供 Trader、TradingService、PositionService 共同使用。
 
 ### 幂等与价格校验
 
@@ -367,11 +368,20 @@ Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 间隔 0.15s)
 
 ### 市价/限价切换
 
-点击"买入价格"标签（cid=1400）触发券商服务器请求（非本地下拉菜单）。超时 5s，3 次重试，失败抛 `MODE_SWITCH_FAILED`。`poll_until` 轮询标签文本中的 `"市价"` / `"最优"` 关键字判断切换结果。ESC×5 重置不改变价格模式，每次切换前先读标签判断当前状态。
+点击"买入价格"标签（cid=1400）触发券商服务器请求（非本地下拉菜单）。超时 5s，3 次重试。`poll_until` 轮询标签文本中的 `"市价"` / `"最优"` 关键字判断切换结果。ESC×5 重置不改变价格模式，每次切换前先读标签判断当前状态。若超时后检测到服务器错误弹窗（如「事务处理机转发数据失败」），直接抛 `SERVER_UNAVAILABLE` 不再重试（服务器不可用时重试无意义）。
 
-### Begin failed! 弹窗
+### 服务器错误弹窗防御
 
-所有标签页切换都触发服务器数据交换，可能弹出此提示。F4 查询面板、F3 撤单、F5 刷新等所有切换点后均调用 `WindowService.dismiss_blocking_popup()` 检测关闭。
+输入股票代码后券商自动查询价格、以及切换价格模式时点击 cid=1400 触发服务器请求，若券商服务器维护，可能弹出错误提示：
+
+| 弹窗内容 | 触发场景 | 处理 |
+|----------|----------|------|
+| 「事务处理机转发数据失败」 | 服务器维护时查询价格 | 自动关闭 → 抛 `SERVER_UNAVAILABLE` |
+| 「Begin failed!」 | 模拟账户/非交易时段 | 自动关闭 → 继续或报错 |
+
+以上弹窗只有「确定」键没有取消键，关键词统一在 `constants.py:SERVER_ERROR_POPUP_KEYWORDS` 中维护。`WindowService.dismiss_blocking_popup()` 默认关键词新增 `"失败"` 和 `"事务处理机"`，所有调用方（Trader 代码输入后、价格模式切换超时后、F4 查询面板、F3 撤单界面）共享同一套检测逻辑。
+
+所有标签页切换都触发服务器数据交换，也可能弹出此类提示。F4 查询面板、F3 撤单、F5 刷新等所有切换点后均调用 `WindowService.dismiss_blocking_popup()` 检测关闭。
 
 ### Logger 限制
 

@@ -16,7 +16,8 @@ from src.constants import (
     CONTROL_ID_SUBMIT, CONTROL_ID_PRICE_TYPE,
     CONFIRM_DIALOG_TITLE_ID, CONFIRM_YES_BUTTON_ID,
     CONFIRM_NO_BUTTON_ID, CONFIRM_DETAIL_TEXT_ID,
-    CANCEL_CONFIRM_TEXT_ID, T1_RESTRICTION_KEYWORDS
+    CANCEL_CONFIRM_TEXT_ID, T1_RESTRICTION_KEYWORDS,
+    SERVER_ERROR_POPUP_KEYWORDS
 )
 from src.core.validation import sanitize_price
 from src.exceptions import ApiError, ErrorCode
@@ -100,6 +101,16 @@ class Trader:
         with timed("填写股票代码", self.logger):
             self.window_service.input_text_to_element(window, CONTROL_ID_CODE, code)
             time.sleep(0.3)  # 等待券商自动填充价格完成
+
+        # 4.1 防御：输入代码后券商自动查询价格，若服务器维护会弹出错误弹窗
+        # （如 "事务处理机转发数据失败"、"Begin failed!" 等）
+        with timed("代码输入后弹窗防御", self.logger):
+            dismissed = self._dismiss_server_error_popup(window)
+            if dismissed:
+                # 弹窗关闭后重新获取窗口，因为弹窗可能改变了控件树
+                window = self.window_service.get_trading_window()
+                if window is None:
+                    raise Exception("关闭弹窗后窗口消失")
 
         # 5. 切换限价/市价模式（必须在填完代码之后，券商要求先有代码才能切换）
         with timed("切换价格模式", self.logger):
@@ -371,10 +382,26 @@ class Trader:
                     self.logger.warning(
                         f"尝试 {attempt + 1}/3 超时，标签未变化（网络可能异常）"
                     )
-                    # 重新获取窗口，下次循环再试
+                    # 重新获取窗口，检查是否有服务器错误弹窗阻塞
                     window = self.window_service.get_trading_window()
                     if window is None:
                         raise Exception("切换价格模式时窗口消失")
+
+                    # 防御：点击 1400 触发服务器请求，若服务器维护会弹出错误弹窗
+                    # （如 "事务处理机转发数据失败"、"Begin failed!" 等）
+                    if self._dismiss_server_error_popup(window):
+                        # 弹窗关闭后重新获取窗口
+                        window = self.window_service.get_trading_window()
+                        if window is None:
+                            raise Exception("关闭弹窗后窗口消失")
+                        # 服务器不可用，重试无意义，直接报错
+                        raise ApiError(
+                            ErrorCode.SERVER_UNAVAILABLE,
+                            "券商服务器不可用（切换价格模式时服务器返回错误）",
+                            suggestion="请确认券商服务器正常运行后重试。若为交易时段外，"
+                                       "请等待交易时段再操作；若怀疑服务器维护，请联系券商确认。",
+                            details={"phase": "switch_price_type", "attempt": attempt + 1}
+                        )
 
             raise ApiError(
                 ErrorCode.MODE_SWITCH_FAILED,
@@ -424,6 +451,28 @@ class Trader:
             or self.window_service.find_element_in_window(
                 window, CONFIRM_DETAIL_TEXT_ID
             ) is not None
+        )
+
+    def _dismiss_server_error_popup(self, window) -> bool:
+        """检测并关闭券商服务器错误弹窗（如服务器维护时的提示）
+
+        在输入股票代码后自动查询价格、或切换价格模式时，若券商服务器维护，
+        可能弹出"事务处理机转发数据失败"、"Begin failed!" 等错误弹窗。
+
+        此方法委托 window_service.dismiss_blocking_popup() 统一检测并关闭，
+        使用 SERVER_ERROR_POPUP_KEYWORDS 作为匹配关键词。
+
+        与 trading_service / position_service 的 _dismiss_blocking_popup /
+        _dismiss_popup_if_present 保持一致，统一走 WindowService 的 centralized 处理。
+
+        Args:
+            window: 交易窗口对象
+
+        Returns:
+            True=检测到并关闭了弹窗, False=无相关弹窗
+        """
+        return self.window_service.dismiss_blocking_popup(
+            window, popup_keywords=list(SERVER_ERROR_POPUP_KEYWORDS)
         )
 
     def confirm_order(self) -> dict:

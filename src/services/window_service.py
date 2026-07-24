@@ -258,7 +258,7 @@ class WindowService:
             是否关闭了弹窗
         """
         if popup_keywords is None:
-            popup_keywords = ["Begin failed", "failed", "提示"]
+            popup_keywords = ["Begin failed", "failed", "失败", "事务处理机"]
 
         if window is None:
             return False
