@@ -328,9 +328,10 @@ class Trader:
 
                 time.sleep(0.1)
 
-        # 确认后检测"提交失败"弹窗
-        # 点击"是(Y)"确认委托后（或快速交易模式直接提交后），券商可能返回"提交失败"弹窗
-        if confirmed or not confirm_dialog_detected:
+        # 检测"提交失败"弹窗：仅在未出现委托确认弹窗且未主动确认时检查。
+        # 弹窗确认后订单已由券商前端校验；快速交易模式无弹窗则订单已直接提交。
+        # 只有关闭过警告弹窗但委托确认未出现时，才可能存在提交失败风险。
+        if not confirm_dialog_detected and not confirmed and warning_dismissed:
             with timed("检测提交失败弹窗", self.logger):
                 time.sleep(0.3)  # 等待弹窗出现
                 window = self.window_service.get_trading_window_fast()
