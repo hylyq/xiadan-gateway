@@ -465,14 +465,18 @@ class Trader:
         window = self.window_service.get_trading_window_fast()
         if window is None:
             return False
-        return (
-            self.window_service.find_element_in_window(
-                window, CONFIRM_DIALOG_TITLE_ID
-            ) is not None
-            or self.window_service.find_element_in_window(
-                window, CONFIRM_DETAIL_TEXT_ID
-            ) is not None
-        )
+        # 一次 descendants 遍历同时检查两个 cid（原来分两次需要 2s）
+        try:
+            for el in window.descendants():
+                try:
+                    cid = el.control_id()
+                    if cid in (CONFIRM_DIALOG_TITLE_ID, CONFIRM_DETAIL_TEXT_ID):
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
 
     @staticmethod
     def _extract_popup_error_text(descendants) -> str:
