@@ -178,6 +178,9 @@ class Trader:
                     window = self.window_service.get_trading_window_fast()
                     continue
 
+                # 每轮重置弹窗文本（避免上一轮的旧值污染兜底逻辑）
+                order_detail_text = None
+
                 # A/B) 检查是否有标题图（cid=1365）
                 title_el = self.window_service.find_element_in_window(
                     window, CONFIRM_DIALOG_TITLE_ID
@@ -187,11 +190,17 @@ class Trader:
                     self.logger.info(f"检测到弹窗标题: {title_text}")
 
                     # 读取弹窗详情文本（cid=1040）
+                    # 弹窗刚出现时 detail text 控件可能尚未渲染，稍等再读
+                    time.sleep(0.1)
                     detail_el = self.window_service.find_element_in_window(
                         window, CONFIRM_DETAIL_TEXT_ID
                     )
                     if detail_el is not None:
                         order_detail_text = detail_el.window_text() or ""
+                    # 兜底：cid=1040 未找到或为空时，扫描所有可见文本
+                    if not order_detail_text:
+                        order_detail_text = self.window_service.get_all_visible_texts(window)
+                    if order_detail_text:
                         self.logger.info(f"弹窗详情: {order_detail_text[:200]}")
 
                     if "委托确认" in title_text:
@@ -215,20 +224,38 @@ class Trader:
                                 self.logger.warning(f"点击 '否(N)' 失败，尝试 ESC: {e}")
                         break  # 委托确认处理完毕，结束循环
                     else:
-                        # B) 警告/提示弹窗（如价格超限提醒）— 订单尚未提交
-                        #    点"是(Y)"关闭警告，继续等待后续"委托确认"弹窗
-                        self.logger.warning(
-                            f"检测到警告弹窗（非委托确认）: {title_text}，"
-                            f"点击 '是(Y)' 关闭后继续等待委托确认"
+                        # B) 非委托确认弹窗 — 需要区分"警告"和"错误"
+                        #    警告（如价格超限提醒）：点Y关闭后继续等待委托确认
+                        #    错误（如提交失败/清算中）：点Y关闭后立即跳出，由后续
+                        #    「提交失败检测」统一处理，避免反复重试浪费 30s+
+                        _error_keywords = ["提交失败", "清算中", "暂不支持"]
+                        _is_submit_error = (
+                            order_detail_text
+                            and any(kw in order_detail_text for kw in _error_keywords)
                         )
-                        try:
-                            self.window_service.click_element(window, CONFIRM_YES_BUTTON_ID)
-                        except Exception:
-                            self.window_service.send_key("Y")
-                        warning_dismissed = True
-                        time.sleep(0.2)
-                        window = self.window_service.get_trading_window_fast()  # 弹窗关闭后重新获取
-                        continue  # 继续检测后续弹窗
+                        if _is_submit_error:
+                            self.logger.warning(
+                                f"检测到提交错误弹窗（非警告）: title={title_text}, "
+                                f"detail={order_detail_text[:100]}，关闭后报错"
+                            )
+                            self._close_non_confirm_popup(window)
+                            DiagnosticUtil().snapshot("order_submit_error")
+                            raise ApiError(
+                                ErrorCode.ORDER_SUBMIT_FAILED,
+                                f"订单提交失败: {order_detail_text[:200]}",
+                                suggestion="请检查交易条件（余额、交易时间、涨跌停限制等）后重试",
+                                details={"popup_title": title_text, "popup_text": order_detail_text[:200]}
+                            )
+                        else:
+                            self.logger.warning(
+                                f"检测到警告弹窗（非委托确认）: {title_text}，"
+                                f"关闭后继续等待委托确认"
+                            )
+                            self._close_non_confirm_popup(window)
+                            warning_dismissed = True
+                            time.sleep(0.2)
+                            window = self.window_service.get_trading_window_fast()
+                            continue  # 继续检测后续弹窗
 
                 # C) 无标题图但有文本（cid=1040）+ 有"是(Y)"按钮 → 警告弹窗
                 text_el = self.window_service.find_element_in_window(
@@ -256,7 +283,7 @@ class Trader:
                     else:
                         # D) 纯错误弹窗（无Y/N按钮），关闭并报错
                         self.logger.warning(f"检测到错误弹窗: {dialog_text[:100]}")
-                        self.window_service.send_key("{ENTER}")
+                        self._close_non_confirm_popup(window)
 
                         DiagnosticUtil().snapshot("dialog_error")
 
@@ -300,11 +327,8 @@ class Trader:
                             self.logger.warning(
                                 f"检测到提交失败弹窗: {title_text}, 原因: {fail_reason[:200]}"
                             )
-                            # 关闭弹窗
-                            try:
-                                self.window_service.send_key("{ENTER}")
-                            except Exception:
-                                pass
+                            # 关闭弹窗（"提示"类弹窗只有确定键，点按钮关闭）
+                            self._close_non_confirm_popup(window)
                             DiagnosticUtil().snapshot("order_submit_failed", window)
                             raise ApiError(
                                 ErrorCode.ORDER_SUBMIT_FAILED,
@@ -452,6 +476,36 @@ class Trader:
                 window, CONFIRM_DETAIL_TEXT_ID
             ) is not None
         )
+
+    def _close_non_confirm_popup(self, window) -> None:
+        """关闭非委托确认类弹窗（"提示"等，只有"确定"键，无 Y/N 键）
+
+        尝试点击标准 Windows 对话框按钮（IDOK=1, IDCANCEL=2），
+        降级用 keybd_event 直接发 ESC（不经过 send_key，避免前台窗口校验失败）。
+
+        不能用 send_key("{ESC}") —— ESC 强制激活交易窗口到前台，
+        但模态弹窗遮盖了交易窗口导致激活失败。
+        """
+        import win32api
+        import win32con
+
+        # 方案1: 点击标准 Windows 按钮（IDOK=1="确定", IDCANCEL=2="取消"）
+        for btn_id in (1, 2):
+            btn = self.window_service.find_element_in_window(window, btn_id)
+            if btn is not None:
+                try:
+                    btn.click_input()
+                    self.logger.info(f"已点击按钮 cid={btn_id} 关闭弹窗")
+                    return
+                except Exception:
+                    continue
+
+        # 方案2: keybd_event 直接发 ESC（不经过 send_key，免去前台窗口校验）
+        self.logger.info("未找到标准按钮，用 keybd_event 发送 ESC 关闭弹窗")
+        win32api.keybd_event(win32con.VK_ESCAPE, 0, 0, 0)
+        time.sleep(0.05)
+        win32api.keybd_event(win32con.VK_ESCAPE, 0, win32con.KEYEVENTF_KEYUP, 0)
+        time.sleep(0.1)
 
     def _dismiss_server_error_popup(self, window) -> bool:
         """检测并关闭券商服务器错误弹窗（如服务器维护时的提示）
