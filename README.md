@@ -354,10 +354,12 @@ Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 间隔 0.15s)
 |-----------|-----------|------|
 | 清算 | `SERVER_CLEARING` | 等待清算结束后重试 |
 | 当前时间不允许委托 | `OUTSIDE_TRADING_HOURS` | 交易时段内操作 |
+| T+1 / 当日买入 / 未交收 | `T1_RESTRICTION` | 当日买入的股票需到下一个交易日方可卖出 |
+| 可卖数量 / 可用余额不足 | `INSUFFICIENT_SHARES` | 检查持仓可卖数量后调整 |
 | 事务处理机转发失败 | `SERVER_UNAVAILABLE` | 确认券商服务器正常 |
 | 其他 | `ORDER_SUBMIT_FAILED` | 通用建议 |
 
-`details.popup_text` 返回弹窗原文供调用方自行解析，`details.popup_title` 返回弹窗标题。
+`details.popup_text` 返回弹窗原文供调用方自行解析，`details.popup_title` 返回弹窗标题。买入和卖出共享同一套 `place_order()` 流程，仅 F1/F2 切换不同，所有分类逻辑对买卖双方均等生效。
 
 ### 幂等与价格校验
 
