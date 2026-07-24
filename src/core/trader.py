@@ -382,8 +382,10 @@ class Trader:
         """切换限价/市价模式
 
         F1 买入界面内，点击 control_id=1400（"买入价格"按钮）触发服务器请求，
-        网络正常时标签从"买入价格"变为"对手方最优"，网络异常时不变。
-        用 poll_until 轮询等待标签变化，最多重试 3 次。
+        网络正常时标签从"买入价格"变为"对手方最优"，服务器异常时不变或弹窗。
+
+        策略：点击后先用短超时检测弹窗（服务器拒绝时弹窗 <0.5s），
+        无弹窗再用长超时等待标签变化。
 
         Args:
             window: 当前窗口对象
@@ -397,55 +399,58 @@ class Trader:
             return is_market
 
         if want_market:
-            for attempt in range(3):
+            for attempt in range(2):
                 self.logger.info(
-                    f"尝试切换到市价模式（点击 1400, 尝试 {attempt + 1}/3）"
+                    f"尝试切换到市价模式（点击 1400, 尝试 {attempt + 1}/2）"
                 )
                 label = self.window_service.find_element_in_window(window, CONTROL_ID_PRICE_TYPE)
                 if label is None:
                     raise Exception(f"未找到价格类型控件 control_id={CONTROL_ID_PRICE_TYPE}")
                 label.click_input()
 
-                # 轮询等待标签变化（服务器响应）
+                # 第一步：短超时检测弹窗（服务器直接拒绝时弹窗立即出现）
+                time.sleep(0.3)
+                window = self.window_service.get_trading_window()
+                if window is not None and self._dismiss_server_error_popup(window):
+                    window = self.window_service.get_trading_window()
+                    # 提取弹窗文本，分类报错
+                    try:
+                        _desc = list(window.descendants()) if window else []
+                        _text = self._extract_popup_error_text(_desc)
+                    except Exception:
+                        _text = ""
+                    _code, _msg, _sug = self._classify_submit_error(_text)
+                    raise ApiError(
+                        _code,
+                        f"切换市价模式失败: {_msg}",
+                        suggestion=_sug + " 或改用限价模式（price_type=limit）。",
+                        details={"phase": "switch_price_type", "attempt": attempt + 1}
+                    )
+
+                # 第二步：等待标签变化（服务器正常但响应慢）
                 try:
                     poll_until(
                         lambda: self._is_market_mode(
                             self.window_service.get_trading_window()
                         ),
-                        timeout=5.0, interval=0.3,
-                        description=f"价格模式切换（尝试 {attempt + 1}/3）"
+                        timeout=3.0, interval=0.3,
+                        description=f"价格模式切换（尝试 {attempt + 1}/2）"
                     )
                     self.logger.info("市价模式切换成功")
                     return True
                 except PollTimeoutError:
                     self.logger.warning(
-                        f"尝试 {attempt + 1}/3 超时，标签未变化（网络可能异常）"
+                        f"尝试 {attempt + 1}/2 超时，标签未变化"
                     )
-                    # 重新获取窗口，检查是否有服务器错误弹窗阻塞
                     window = self.window_service.get_trading_window()
                     if window is None:
                         raise Exception("切换价格模式时窗口消失")
 
-                    # 防御：点击 1400 触发服务器请求，若服务器维护会弹出错误弹窗
-                    # （如 "事务处理机转发数据失败"、"Begin failed!" 等）
-                    if self._dismiss_server_error_popup(window):
-                        # 弹窗关闭后重新获取窗口
-                        window = self.window_service.get_trading_window()
-                        if window is None:
-                            raise Exception("关闭弹窗后窗口消失")
-                        # 服务器不可用，重试无意义，直接报错
-                        raise ApiError(
-                            ErrorCode.SERVER_UNAVAILABLE,
-                            "券商服务器不可用（切换价格模式时服务器返回错误）",
-                            suggestion="请确认券商服务器正常运行后重试。若为交易时段外，"
-                                       "请等待交易时段再操作；若怀疑服务器维护，请联系券商确认。",
-                            details={"phase": "switch_price_type", "attempt": attempt + 1}
-                        )
-
             raise ApiError(
                 ErrorCode.MODE_SWITCH_FAILED,
-                "切换市价模式失败（已重试 3 次，网络可能异常）",
-                suggestion="请检查网络连接后重试，或改用限价模式（price_type=limit）"
+                "切换市价模式失败（已重试 2 次）",
+                suggestion="可能原因：券商服务器异常/模拟账户不支持市价/网络问题。"
+                           "建议改用限价模式（price_type=limit）重试。"
             )
         else:
             # 切换到限价：F1 重置到默认限价模式

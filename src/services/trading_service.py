@@ -162,7 +162,12 @@ class TradingService:
                     time.sleep(0.3)
 
         if not confirm_dialog_shown:
-            self.logger.info("未出现撤单确认弹窗（可能无委托可撤）")
+            # 两种可能：快速交易模式（撤单确认=否）→ 撤单已直接提交；
+            #          或无委托可撤 → 撤单按钮点下后无反应
+            self.logger.info(
+                "未出现撤单确认弹窗（快速交易模式撤单已直接提交，"
+                "或当前无可撤委托）"
+            )
 
         self.logger.info(
             f"{operation_name} 操作完成, 撤单数量: {cancelled_count}, "
