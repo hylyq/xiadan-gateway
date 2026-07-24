@@ -103,7 +103,7 @@ class Trader:
         # 4. 填写股票代码（必须先填代码，否则价格模式切换可能被禁用）
         with timed("填写股票代码", self.logger):
             self.window_service.input_text_to_element(
-                window, CONTROL_ID_CODE, code, descendants=_descendants)
+                window, CONTROL_ID_CODE, code, descendants=_descendants, delay=0.1)
             time.sleep(0.3)  # 等待券商自动填充价格完成
 
         # 4.1 防御：输入代码后券商自动查询价格，若服务器维护会弹出错误弹窗
@@ -132,15 +132,15 @@ class Trader:
         if price_type == "limit" and price:
             with timed("填写价格", self.logger):
                 self.window_service.input_text_to_element(
-                    window, CONTROL_ID_PRICE, price, descendants=_descendants)
-                time.sleep(0.1)
+                    window, CONTROL_ID_PRICE, price, descendants=_descendants, delay=0.05)
+                time.sleep(0.05)
 
         # 7. 填写数量
         if amount:
             with timed("填写数量", self.logger):
                 self.window_service.input_text_to_element(
-                    window, CONTROL_ID_AMOUNT, amount, descendants=_descendants)
-                time.sleep(0.1)
+                    window, CONTROL_ID_AMOUNT, amount, descendants=_descendants, delay=0.05)
+                time.sleep(0.05)
 
         # 8. 点击下单按钮并处理弹窗
         with timed("点击下单按钮", self.logger):
