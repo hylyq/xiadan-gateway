@@ -10,8 +10,9 @@ import hmac
 
 from flask import Flask, request
 
+from src.exceptions import ErrorCode
 from src.api.response import (
-    ErrorCode, generate_request_id,
+    generate_request_id,
     success_response, error_response
 )
 from src.api.task_queue import TaskQueue

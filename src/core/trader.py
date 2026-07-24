@@ -18,7 +18,8 @@ from src.constants import (
     CONFIRM_NO_BUTTON_ID, CONFIRM_DETAIL_TEXT_ID,
     CANCEL_CONFIRM_TEXT_ID, T1_RESTRICTION_KEYWORDS
 )
-from src.api.response import ApiError, ErrorCode
+from src.core.validation import sanitize_price
+from src.exceptions import ApiError, ErrorCode
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
 from src.utils.diagnostic import DiagnosticUtil
@@ -33,23 +34,6 @@ class Trader:
         self.window_service = window_service
         self.config = AppConfig()
         self.logger = Logger.get_instance()
-
-    @staticmethod
-    def _sanitize_price(price: str) -> str:
-        """对 A 股价格做格式校验，限制 2 位小数
-
-        Args:
-            price: 原始价格字符串
-
-        Returns:
-            格式化的价格字符串（最多 2 位小数）
-        """
-        try:
-            price_float = float(price)
-            sanitized = f"{price_float:.2f}"
-            return sanitized
-        except ValueError:
-            raise Exception(f"价格格式无效: {price}")
 
     def place_order(
         self,
@@ -87,7 +71,7 @@ class Trader:
 
         # 0. 价格格式校验（A 股限 2 位小数）
         if price_type == "limit" and price:
-            sanitized_price = self._sanitize_price(price)
+            sanitized_price = sanitize_price(price)
             if sanitized_price != price:
                 self.logger.warning(
                     f"价格 {price} 已自动修正为 {sanitized_price}（A股限 2 位小数）"

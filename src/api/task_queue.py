@@ -17,7 +17,7 @@ import time
 from collections import deque
 from typing import Callable, Any, Optional, List
 
-from src.api.response import TaskTimeoutError
+from src.exceptions import TaskTimeoutError, ApiError, ErrorCode
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
 from src.utils.diagnostic import DiagnosticUtil
@@ -60,8 +60,10 @@ class TaskQueue(Singleton):
         self.logger = Logger.get_instance()
         self.config = AppConfig()
         self.window_service = WindowService()
+
+        logging_cfg = self.config.get_logging_config()
         self.screenshot_util = ScreenshotUtil(
-            self.config.get_logging_config().get("screenshot_dir", "logs/screenshots")
+            logging_cfg.get("screenshot_dir", "logs/screenshots")
         )
 
         queue_config = self.config.get_task_queue_config()
@@ -106,7 +108,6 @@ class TaskQueue(Singleton):
         try:
             self._queue.put_nowait(task)
         except queue.Full:
-            from src.api.response import ApiError, ErrorCode
             raise ApiError(
                 error_code=ErrorCode.QUEUE_FULL,
                 message=f"任务队列已满（最大 {self._max_size}），请稍后重试",
@@ -118,7 +119,6 @@ class TaskQueue(Singleton):
         # 推荐调用方 timeout = watchdog_timeout + 10
         if not task.event.wait(timeout=timeout + 10):
             # 极端情况：连看门狗都没触发（不应该发生）
-            from src.api.response import ApiError, ErrorCode
             raise ApiError(
                 error_code=ErrorCode.QUEUE_TIMEOUT,
                 message="任务排队或执行超时（看门狗未触发）",

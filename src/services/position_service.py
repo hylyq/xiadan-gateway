@@ -7,7 +7,7 @@ import os
 import time
 from typing import Optional
 
-from src.utils.poll import poll_until, poll_until_not, timed, PollTimeoutError
+from src.utils.poll import poll_until, timed, PollTimeoutError
 from src.constants import (
     BALANCE_FIELDS,
     CAPTCHA_IMAGE_ID, CAPTCHA_INPUT_ID, CAPTCHA_OK_BUTTON_ID,
@@ -237,76 +237,9 @@ class PositionService:
         self.logger.info("未检测到验证码弹窗（control_id 和文本匹配均未命中）")
         return False
 
-    def _has_popup_text(self, popup_keywords: list) -> bool:
-        """检查窗口中是否存在弹窗特征文本（用于 poll_until_not）
-        
-        Returns:
-            True=弹窗仍存在, False=弹窗已关闭或窗口不可用
-        """
-        window = self.window_service.get_trading_window()
-        if window is None:
-            return False
-        try:
-            for ctrl in window.descendants():
-                text = ctrl.window_text() or ""
-                if any(kw in text for kw in popup_keywords):
-                    return True
-        except Exception:
-            pass
-        return False
-
     def _dismiss_popup_if_present(self, window) -> bool:
-        """检测并关闭常见提示弹窗（如非交易时段的 'Begin failed!' 提示）
-
-        同花顺在非交易时段查询时可能弹出提示窗（标题"提示"，内容如 "Begin failed!"），
-        阻挡表格数据的复制。此方法检测并关闭这类弹窗。
-
-        Returns:
-            是否关闭了弹窗
-        """
-        if window is None:
-            return False
-
-        popup_keywords = ["Begin failed", "failed", "提示"]
-        try:
-            # 检测弹窗特征：查找"确定"按钮（标准对话框 cid=1 或 cid=2）
-            for ctrl in window.descendants():
-                try:
-                    text = ctrl.window_text() or ""
-                    if any(kw in text for kw in popup_keywords):
-                        self.logger.info(f"检测到提示弹窗: {text[:80]}，尝试关闭")
-                        # 尝试点击"确定"按钮
-                        for btn_id in (1, 2):  # IDOK=1, IDCANCEL=2
-                            btn = self.window_service.find_element_in_window(window, btn_id)
-                            if btn is not None:
-                                btn.click_input()
-                                self.logger.info(f"已点击按钮 cid={btn_id} 关闭弹窗")
-                                # 轮询等待弹窗消失（替代固定 sleep(0.5)）
-                                try:
-                                    poll_until_not(
-                                        lambda: self._has_popup_text(popup_keywords),
-                                        timeout=2.0, interval=0.1,
-                                        description="弹窗关闭"
-                                    )
-                                except (PollTimeoutError, Exception):
-                                    pass
-                                return True
-                        # 找不到按钮则用 ENTER 关闭
-                        self.window_service.send_key("{ENTER}")
-                        try:
-                            poll_until_not(
-                                lambda: self._has_popup_text(popup_keywords),
-                                timeout=2.0, interval=0.1,
-                                description="弹窗关闭(ENTER)"
-                            )
-                        except (PollTimeoutError, Exception):
-                            pass
-                        return True
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        return False
+        """检测并关闭常见提示弹窗（委托给 WindowService 统一处理）"""
+        return self.window_service.dismiss_blocking_popup(window)
 
     # ------------------------------------------------------------
     # 查询面板准备（所有查询的公共前置步骤）
@@ -447,7 +380,7 @@ class PositionService:
 
         # 保存验证码图片
         with timed("验证码截图保存", self.logger):
-            cache_dir = "logs/screenshots"
+            cache_dir = self.config.get_logging_config().get("screenshot_dir", "logs/screenshots")
             os.makedirs(cache_dir, exist_ok=True)
             image_path = os.path.join(cache_dir, "captcha.png")
             image_element.capture_as_image().save(image_path)

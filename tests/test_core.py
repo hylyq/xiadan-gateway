@@ -8,7 +8,7 @@
 """
 import pytest
 
-from src.core.trader import Trader
+from src.core.validation import sanitize_price
 from src.services.position_service import PositionService
 from src.services.trading_service import TradingService
 
@@ -18,29 +18,29 @@ class TestPriceSanitization:
 
     def test_normal_price(self):
         """正常价格不变"""
-        assert Trader._sanitize_price("10.50") == "10.50"
+        assert sanitize_price("10.50") == "10.50"
 
     def test_integer_price(self):
         """整数价格补零"""
-        assert Trader._sanitize_price("10") == "10.00"
+        assert sanitize_price("10") == "10.00"
 
     def test_one_decimal(self):
         """一位小数补零"""
-        assert Trader._sanitize_price("10.5") == "10.50"
+        assert sanitize_price("10.5") == "10.50"
 
     def test_two_decimals(self):
         """两位小数不变"""
-        assert Trader._sanitize_price("10.55") == "10.55"
+        assert sanitize_price("10.55") == "10.55"
 
     def test_three_decimals_rounded(self):
         """三位小数四舍五入"""
         # 10.556 -> 10.56 (10.555 因浮点表示可能为 10.55)
-        assert Trader._sanitize_price("10.556") == "10.56"
+        assert sanitize_price("10.556") == "10.56"
 
     def test_invalid_price(self):
         """无效价格抛异常"""
         with pytest.raises(Exception, match="价格格式无效"):
-            Trader._sanitize_price("abc")
+            sanitize_price("abc")
 
 
 class TestTableDataFormatting:

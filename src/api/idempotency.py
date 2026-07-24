@@ -7,7 +7,7 @@ import time
 from threading import Lock
 from typing import Optional
 
-from src.api.response import ApiError, ErrorCode
+from src.exceptions import ApiError, ErrorCode
 from src.models.config import AppConfig
 from src.utils.logger import Logger
 from src.utils.singleton import Singleton

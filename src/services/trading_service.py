@@ -21,7 +21,7 @@ from src.constants import (
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
 from src.utils.logger import Logger
-from src.utils.poll import poll_until, poll_until_not, timed, PollTimeoutError
+from src.utils.poll import poll_until, timed, PollTimeoutError
 
 
 class TradingService:
@@ -180,73 +180,8 @@ class TradingService:
         }
 
     def _dismiss_blocking_popup(self, window) -> bool:
-        """检测并关闭阻塞型提示弹窗（如非交易时段的 "Begin failed!"）
-
-        同花顺在非交易时段进入撤单界面时可能弹出提示窗（标题"提示"，
-        内容如 "Begin failed!"），阻挡撤单按钮。此方法检测并关闭这类弹窗。
-
-        Returns:
-            是否关闭了弹窗
-        """
-        if window is None:
-            return False
-        popup_keywords = ["Begin failed", "failed", "提示"]
-        try:
-            for ctrl in window.descendants():
-                try:
-                    text = ctrl.window_text() or ""
-                    if any(kw in text for kw in popup_keywords):
-                        self.logger.info(f"检测到提示弹窗: {text[:80]}，尝试关闭")
-                        # 尝试点击"确定"按钮（标准对话框 IDOK=1, IDCANCEL=2）
-                        for btn_id in (1, 2):
-                            btn = self.window_service.find_element_in_window(window, btn_id)
-                            if btn is not None:
-                                btn.click_input()
-                                self.logger.info(f"已点击按钮 cid={btn_id} 关闭弹窗")
-                                # 轮询等待弹窗消失（替代固定 sleep(0.5)）
-                                try:
-                                    poll_until_not(
-                                        lambda: self._has_popup_text(popup_keywords),
-                                        timeout=2.0, interval=0.1,
-                                        description="弹窗关闭"
-                                    )
-                                except (PollTimeoutError, Exception):
-                                    pass
-                                return True
-                        # 找不到按钮则用 ENTER 关闭
-                        self.window_service.send_key("{ENTER}")
-                        try:
-                            poll_until_not(
-                                lambda: self._has_popup_text(popup_keywords),
-                                timeout=2.0, interval=0.1,
-                                description="弹窗关闭(ENTER)"
-                            )
-                        except (PollTimeoutError, Exception):
-                            pass
-                        return True
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        return False
-
-    def _has_popup_text(self, popup_keywords: list) -> bool:
-        """检查窗口中是否存在弹窗特征文本（用于 poll_until_not）
-        
-        Returns:
-            True=弹窗仍存在, False=弹窗已关闭或窗口不可用
-        """
-        window = self.window_service.get_trading_window()
-        if window is None:
-            return False
-        try:
-            for ctrl in window.descendants():
-                text = ctrl.window_text() or ""
-                if any(kw in text for kw in popup_keywords):
-                    return True
-        except Exception:
-            pass
-        return False
+        """检测并关闭阻塞型提示弹窗（委托给 WindowService 统一处理）"""
+        return self.window_service.dismiss_blocking_popup(window)
 
     @staticmethod
     def _parse_cancelled_count(text: str):

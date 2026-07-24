@@ -84,8 +84,9 @@ def main():
 
         # 5.5 清理过期截图
         from src.utils.screenshot import ScreenshotUtil
+        logging_cfg = config.get_logging_config()
         screenshot_util = ScreenshotUtil(
-            config.get_logging_config().get("screenshot_dir", "logs/screenshots")
+            logging_cfg.get("screenshot_dir", "logs/screenshots")
         )
         screenshot_util.cleanup_old_screenshots()
 

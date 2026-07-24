@@ -8,24 +8,17 @@ from typing import Optional
 import pyautogui
 from flask import Blueprint, request
 
+from src.api.helpers import get_param
 from src.api.response import (
-    ErrorCode, generate_request_id,
+    generate_request_id,
     success_response, error_response, error_response_from_exception
 )
 from src.api.task_queue import TaskQueue
+from src.exceptions import ErrorCode
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
 
 action_bp = Blueprint("action", __name__)
-
-
-def _get_param(name: str, default: Optional[str] = None) -> Optional[str]:
-    """统一参数获取：优先 JSON body，回退 query string"""
-    body = request.get_json(silent=True)
-    if isinstance(body, dict) and name in body:
-        val = body.get(name)
-        return val if val is None else str(val)
-    return request.args.get(name, default)
 
 
 @action_bp.route("/actions/send-key", methods=["POST"])
@@ -44,7 +37,7 @@ def send_key():
     task_queue = TaskQueue.get_instance()
     window_service = WindowService()
 
-    key = _get_param("key")
+    key = get_param("key")
     if not key:
         return error_response(
             ErrorCode.VALIDATION_ERROR, "key 参数不能为空", request_id,
@@ -80,8 +73,8 @@ def click():
     config = AppConfig()
     task_queue = TaskQueue.get_instance()
 
-    x = _get_param("x")
-    y = _get_param("y")
+    x = get_param("x")
+    y = get_param("y")
 
     if x is None or y is None:
         return error_response(
@@ -129,7 +122,7 @@ def close_dialog():
     task_queue = TaskQueue.get_instance()
     window_service = WindowService()
 
-    title = _get_param("title") or ""
+    title = get_param("title") or ""
 
     _start = time.time()
     try:

@@ -7,27 +7,20 @@ from typing import Optional
 
 from flask import Blueprint, request
 
+from src.api.helpers import get_param
 from src.api.idempotency import IdempotencyChecker
 from src.api.response import (
-    ApiError, ErrorCode, generate_request_id,
+    generate_request_id,
     success_response, error_response, error_response_from_exception
 )
 from src.api.task_queue import TaskQueue
 from src.core.trader import Trader
+from src.exceptions import ApiError, ErrorCode, TaskTimeoutError
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
 from src.utils.logger import Logger
 
 order_bp = Blueprint("order", __name__)
-
-
-def _get_param(name: str, default: Optional[str] = None) -> Optional[str]:
-    """统一参数获取：优先 JSON body，回退 query string"""
-    body = request.get_json(silent=True)
-    if isinstance(body, dict) and name in body:
-        val = body.get(name)
-        return val if val is None else str(val)
-    return request.args.get(name, default)
 
 
 def _get_trader() -> Trader:
@@ -62,12 +55,12 @@ def xiadan():
     idempotency = IdempotencyChecker.get_instance()
 
     # 参数提取
-    code = _get_param("code")
-    status = _get_param("status")
-    amount = _get_param("amount")
-    price = _get_param("price")
-    price_type = (_get_param("price_type") or "limit").lower()
-    confirm_str = (_get_param("confirm") or "true").lower()
+    code = get_param("code")
+    status = get_param("status")
+    amount = get_param("amount")
+    price = get_param("price")
+    price_type = (get_param("price_type") or "limit").lower()
+    confirm_str = (get_param("confirm") or "true").lower()
 
     # 参数校验
     if not code:
@@ -143,7 +136,6 @@ def xiadan():
         )
         return success_response(result, request_id, duration_ms=(time.time() - _start) * 1000)
     except Exception as e:
-        from src.api.response import TaskTimeoutError
         if not isinstance(e, TaskTimeoutError):
             idempotency.clear_record(code, status, amount, price, price_type)
         return error_response_from_exception(e, request_id)
@@ -166,8 +158,8 @@ def sell_all():
     idempotency = IdempotencyChecker.get_instance()
     logger = Logger.get_instance()
 
-    code = _get_param("code")
-    confirm_str = (_get_param("confirm") or "true").lower()
+    code = get_param("code")
+    confirm_str = (get_param("confirm") or "true").lower()
 
     if not code:
         return error_response(
@@ -247,7 +239,6 @@ def sell_all():
         result["available_qty"] = available_qty_int
         return success_response(result, request_id, duration_ms=(time.time() - _start) * 1000)
     except Exception as e:
-        from src.api.response import TaskTimeoutError
         if not isinstance(e, TaskTimeoutError):
             idempotency.clear_record(code, "2", str(available_qty_int), None, "market")
         return error_response_from_exception(e, request_id)
@@ -270,7 +261,7 @@ def cancel_all_orders():
     request_id = generate_request_id()
     config = AppConfig()
     task_queue = TaskQueue.get_instance()
-    cancel_type = _get_param("type") or "A"
+    cancel_type = get_param("type") or "A"
 
     _start = time.time()
     try:
