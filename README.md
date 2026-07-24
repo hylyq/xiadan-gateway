@@ -343,7 +343,18 @@ Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 间隔 0.15s)
 
 ### 弹窗分类处理
 
-下单/撤单过程中自动检测弹窗类型并分别处理：委托确认弹窗（点 Y/N）、警告弹窗（点 Y 关闭后继续等待）、纯错误弹窗（提取文本后报错）、服务器错误弹窗（如「事务处理机转发数据失败」「Begin failed!」— 点确定关闭后抛 `SERVER_UNAVAILABLE`）。弹窗关闭逻辑统一由 `WindowService.dismiss_blocking_popup()` 处理，关键词覆盖中英文（`"失败"` / `"failed"` / `"事务处理机"`），供 Trader、TradingService、PositionService 共同使用。
+下单/撤单过程中自动检测弹窗类型并分别处理：委托确认弹窗（点 Y/N）、警告弹窗（点 ESC 关闭后继续等待）、纯错误弹窗（提取文本后报错）。弹窗关闭逻辑统一由 `WindowService.dismiss_blocking_popup()` 处理，关键词覆盖中英文（`"失败"` / `"failed"` / `"事务处理机"`）。
+
+**提交失败弹窗的精细分类**：点击买入后若券商返回「提示」弹窗（只有确定键），`_extract_popup_error_text()` 从控件树中提取干净弹窗文本，`_classify_submit_error()` 根据关键词返回精确错误码和针对性建议：
+
+| 弹窗关键词 | error_code | 建议 |
+|-----------|-----------|------|
+| 清算 | `SERVER_CLEARING` | 等待清算结束后重试 |
+| 当前时间不允许委托 | `OUTSIDE_TRADING_HOURS` | 交易时段内操作 |
+| 事务处理机转发失败 | `SERVER_UNAVAILABLE` | 确认券商服务器正常 |
+| 其他 | `ORDER_SUBMIT_FAILED` | 通用建议 |
+
+`details.popup_text` 返回弹窗原文供调用方自行解析，`details.popup_title` 返回弹窗标题。
 
 ### 幂等与价格校验
 
@@ -366,7 +377,7 @@ Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 间隔 0.15s)
 
 ### 控件树缓存
 
-`pywinauto` 的 `descendants()` 缓存控件树，界面变化后必须重新 `get_trading_window()` 获取新引用。
+`pywinauto` 的 `descendants()` 缓存控件树，界面变化后必须重新 `get_trading_window()` 获取新引用。每次 `descendants()` 遍历 UIA 树耗时约 1s（交易窗口包含数百个控件）。弹窗处理循环每轮在顶部调用一次并缓存，后续 `find_element_in_window` / `get_all_visible_texts` / `_close_non_confirm_popup` 全部复用同一份列表，将 5 次遍历合并为 1 次，单轮弹窗处理从 5s 降至 1.4s。
 
 ### 市价/限价切换
 
@@ -374,16 +385,17 @@ Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 间隔 0.15s)
 
 ### 服务器错误弹窗防御
 
-输入股票代码后券商自动查询价格、以及切换价格模式时点击 cid=1400 触发服务器请求，若券商服务器维护，可能弹出错误提示：
+与券商服务器交互时（输入代码查询价格、切换价格模式、点击买入/卖出按钮），若服务器不可用或处于非交易时段，可能弹出「提示」弹窗。弹窗只有「确定」键，无法用 Y/N 键操作，统一用按钮点击（cid=1/2）或 ESC 关闭。
 
-| 弹窗内容 | 触发场景 | 处理 |
-|----------|----------|------|
-| 「事务处理机转发数据失败」 | 服务器维护时查询价格 | 自动关闭 → 抛 `SERVER_UNAVAILABLE` |
-| 「Begin failed!」 | 模拟账户/非交易时段 | 自动关闭 → 继续或报错 |
+**防御覆盖点**：
 
-以上弹窗只有「确定」键没有取消键，关键词统一在 `constants.py:SERVER_ERROR_POPUP_KEYWORDS` 中维护。`WindowService.dismiss_blocking_popup()` 默认关键词新增 `"失败"` 和 `"事务处理机"`，所有调用方（Trader 代码输入后、价格模式切换超时后、F4 查询面板、F3 撤单界面）共享同一套检测逻辑。
+| 触发阶段 | 弹窗内容示例 | 处理 |
+|----------|------------|------|
+| 输入股票代码后 | 事务处理机转发数据失败 / Begin failed! | `_dismiss_server_error_popup()` 关闭 |
+| 切换价格模式 | 同上（服务器无响应） | 超时后检测弹窗 → `SERVER_UNAVAILABLE` |
+| 点击买入/卖出按钮 | 提交失败：清算中 / 当前时间不允许委托 / … | 提取文本 → 分类报错 |
 
-所有标签页切换都触发服务器数据交换，也可能弹出此类提示。F4 查询面板、F3 撤单、F5 刷新等所有切换点后均调用 `WindowService.dismiss_blocking_popup()` 检测关闭。
+关键词统一在 `constants.py:SERVER_ERROR_POPUP_KEYWORDS` 中维护。`WindowService.dismiss_blocking_popup()` 默认关键词覆盖中英文（`"失败"` / `"failed"` / `"事务处理机"`），所有调用方（Trader 代码输入后、价格模式切换超时后、F4 查询面板、F3 撤单界面）共享同一套检测逻辑。
 
 ### Logger 限制
 
