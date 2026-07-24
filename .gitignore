@@ -27,6 +27,9 @@ logs/screenshots/*.png
 # 配置覆盖
 config/app_config.local.json
 
+# 测试报告（自动生成，含账户敏感数据）
+tests/test_report_with_ocr.json
+
 # 用户本地配置（含个人路径，不提交）
 config/app_config.json
 
