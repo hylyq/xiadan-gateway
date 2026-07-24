@@ -88,9 +88,10 @@ class Trader:
             self.window_service.activate_window(trading_paths)
             time.sleep(0.2)
 
-        # 2. F1/F2 切换买卖界面
+        # 2. F1/F2 切换买卖界面（步骤 1 已激活窗口，用 background 跳过冗余激活）
         with timed("F1/F2 切换买卖界面", self.logger):
-            self.window_service.send_key("F1" if status == "1" else "F2")
+            self.window_service.send_key(
+                "F1" if status == "1" else "F2", background=True)
             time.sleep(0.1)
 
         # 3. 获取交易窗口 + 缓存 descendants（下单流程中 input/click 共用）
