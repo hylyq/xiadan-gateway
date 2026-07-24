@@ -22,7 +22,9 @@ class ErrorCode:
     WINDOW_NOT_FOUND = "WINDOW_NOT_FOUND"           # 交易窗口未找到
     CONTROL_NOT_FOUND = "CONTROL_NOT_FOUND"         # 控件未找到
     MODE_SWITCH_FAILED = "MODE_SWITCH_FAILED"       # 限价/市价切换失败
-    ORDER_SUBMIT_FAILED = "ORDER_SUBMIT_FAILED"     # 订单提交失败（券商返回错误）
+    ORDER_SUBMIT_FAILED = "ORDER_SUBMIT_FAILED"     # 订单提交失败（券商返回错误，通用）
+    SERVER_CLEARING = "SERVER_CLEARING"             # 券商系统清算中
+    OUTSIDE_TRADING_HOURS = "OUTSIDE_TRADING_HOURS" # 非交易时段
     SERVER_UNAVAILABLE = "SERVER_UNAVAILABLE"       # 券商服务器不可用（维护中）
     OCR_FAILED = "OCR_FAILED"                       # 验证码识别失败
     INTERNAL_ERROR = "INTERNAL_ERROR"               # 未知异常
@@ -46,6 +48,8 @@ HTTP_STATUS = {
     ErrorCode.CONTROL_NOT_FOUND: 500,
     ErrorCode.MODE_SWITCH_FAILED: 500,
     ErrorCode.ORDER_SUBMIT_FAILED: 500,
+    ErrorCode.SERVER_CLEARING: 503,
+    ErrorCode.OUTSIDE_TRADING_HOURS: 400,
     ErrorCode.SERVER_UNAVAILABLE: 503,
     ErrorCode.OCR_FAILED: 500,
     ErrorCode.INTERNAL_ERROR: 500,

@@ -241,16 +241,17 @@ class Trader:
                             and any(kw in order_detail_text for kw in _error_keywords)
                         )
                         if _is_submit_error:
+                            # 提取干净的弹窗文本（过滤 UI 标签），分类报错
+                            _popup_text = self._extract_popup_error_text(_descendants)
+                            _error_code, _message, _suggestion = self._classify_submit_error(_popup_text)
                             self.logger.warning(
-                                f"检测到提交错误弹窗（非警告）: title={title_text}, "
-                                f"detail={order_detail_text[:100]}，关闭后报错"
+                                f"检测到提交错误弹窗: title={title_text}, "
+                                f"error_code={_error_code}, text={_popup_text[:100]}"
                             )
                             self._close_non_confirm_popup(window, descendants=_descendants)
                             raise ApiError(
-                                ErrorCode.ORDER_SUBMIT_FAILED,
-                                f"订单提交失败: {order_detail_text[:200]}",
-                                suggestion="请检查交易条件（余额、交易时间、涨跌停限制等）后重试",
-                                details={"popup_title": title_text, "popup_text": order_detail_text[:200]}
+                                _error_code, _message, suggestion=_suggestion,
+                                details={"popup_title": title_text, "popup_text": _popup_text}
                             )
                         else:
                             self.logger.warning(
@@ -318,29 +319,19 @@ class Trader:
                         title_text = title_el.window_text() or ""
                         # 排除"委托确认"弹窗（正常流程中已处理）
                         if "委托确认" not in title_text:
-                            # cid=1040 可能在提交失败弹窗中为空，用全量文本扫描兜底
-                            detail_el = self.window_service.find_element_in_window(
-                                window, CONFIRM_DETAIL_TEXT_ID
-                            )
-                            fail_reason = detail_el.window_text() if detail_el else ""
-                            if not fail_reason.strip():
-                                # 兜底：扫描所有控件文本，提取"提交失败"相关内容
-                                all_texts = self.window_service.get_all_visible_texts(window)
-                                for line in all_texts.split("\n"):
-                                    if "提交失败" in line or "失败" in line:
-                                        fail_reason = line.strip()
-                                        break
+                            # 缓存 descendants 一次遍历，提取弹窗文本并分类
+                            _descendants = list(window.descendants())
+                            _popup_text = self._extract_popup_error_text(_descendants)
+                            _error_code, _message, _suggestion = self._classify_submit_error(_popup_text)
                             self.logger.warning(
-                                f"检测到提交失败弹窗: {title_text}, 原因: {fail_reason[:200]}"
+                                f"检测到提交失败弹窗: {title_text}, "
+                                f"error_code={_error_code}, text={_popup_text[:200]}"
                             )
-                            # 关闭弹窗（"提示"类弹窗只有确定键，点按钮关闭）
-                            self._close_non_confirm_popup(window)
+                            self._close_non_confirm_popup(window, descendants=_descendants)
                             DiagnosticUtil().snapshot("order_submit_failed", window)
                             raise ApiError(
-                                ErrorCode.ORDER_SUBMIT_FAILED,
-                                f"订单提交失败: {fail_reason[:200]}" if fail_reason else "订单提交失败（券商返回错误）",
-                                suggestion="请检查交易条件（余额、交易时间、涨跌停限制等）后重试",
-                                details={"popup_title": title_text, "popup_text": fail_reason}
+                                _error_code, _message, suggestion=_suggestion,
+                                details={"popup_title": title_text, "popup_text": _popup_text}
                             )
 
         # 结果判定
@@ -481,6 +472,71 @@ class Trader:
             or self.window_service.find_element_in_window(
                 window, CONFIRM_DETAIL_TEXT_ID
             ) is not None
+        )
+
+    @staticmethod
+    def _extract_popup_error_text(descendants) -> str:
+        """从 descendants 列表中提取弹窗内的错误文本（过滤窗口 UI 标签）
+
+        弹窗文本通常只有几行（标题 + 错误内容 + 按钮文字），
+        过滤掉交易窗口的大量 UI 标签（证券代码、买入价格 等）。
+        """
+        # 交易窗口 UI 标签（不应出现在弹窗文本中）
+        _ui_labels = {
+            "证券代码", "证券名称", "买入价格", "卖出价格", "买入数量",
+            "卖出数量", "可买(股)", "可卖(股)", "买入股票", "卖出股票",
+            "市价买入", "市价卖出", "对手方最优", "HexinScrollWnd",
+            "Custom1", "Custom2", "Spin2", "HK$", "价格跟随",
+            "全撤", "撤买", "撤卖", "撤最后", "水平滚动条", "垂直滚动条",
+            "左移一列", "右移一列", "上一行", "下一行",
+            "向上翻页", "向下翻页", "向左翻页", "向右翻页",
+            "买入[F1]", "卖出[F2]", "撤单[F3]", "查询[F4]",
+        }
+        lines = []
+        for el in descendants:
+            try:
+                t = (el.window_text() or "").strip()
+                if not t or len(t) > 200:
+                    continue
+                # 过滤 UI 标签
+                if t in _ui_labels:
+                    continue
+                # 过滤纯数字/时间/位置等
+                if t in ("多", "少", "位置", "添加", "打开", "关闭",
+                          "专业", "精简", "退出", "登录", "系统",
+                          "最小化", "最大化", "分析", "风控", "条件",
+                          "双向", "报告问题", "买入", "卖出"):
+                    continue
+                lines.append(t)
+            except Exception:
+                pass
+        return "\n".join(lines)
+
+    @staticmethod
+    def _classify_submit_error(error_text: str):
+        """根据弹窗文本分类提交错误，返回 (error_code, message, suggestion)"""
+        if "清算" in error_text:
+            return (
+                ErrorCode.SERVER_CLEARING,
+                f"券商系统清算中: {error_text[:150]}",
+                "请等待券商清算结束后重试（通常交易日 15:30-次日 9:00）。"
+            )
+        if "当前时间不允许委托" in error_text or "非交易" in error_text:
+            return (
+                ErrorCode.OUTSIDE_TRADING_HOURS,
+                f"非交易时段: {error_text[:150]}",
+                "请在交易时段内操作（工作日 9:30-11:30, 13:00-15:00）。"
+            )
+        if "事务处理机" in error_text or "转发数据失败" in error_text:
+            return (
+                ErrorCode.SERVER_UNAVAILABLE,
+                f"券商服务器不可用: {error_text[:150]}",
+                "请确认券商服务器正常运行后重试。若为交易时段外，请等待交易时段再操作。"
+            )
+        return (
+            ErrorCode.ORDER_SUBMIT_FAILED,
+            f"订单提交失败: {error_text[:150]}",
+            "请检查交易条件（余额、交易时间、涨跌停限制等）后重试"
         )
 
     def _close_non_confirm_popup(self, window, descendants=None) -> None:

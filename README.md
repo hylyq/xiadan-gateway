@@ -117,8 +117,10 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `WINDOW_NOT_FOUND` | 交易窗口未找到 |
 | `CONTROL_NOT_FOUND` | 控件未找到 |
 | `MODE_SWITCH_FAILED` | 限价/市价切换失败 |
-| `ORDER_SUBMIT_FAILED` | 订单提交失败（券商返回错误，含弹窗原文） |
-| `SERVER_UNAVAILABLE` | 券商服务器不可用（维护中，弹窗已自动关闭） |
+| `ORDER_SUBMIT_FAILED` | 订单提交失败（通用，含弹窗原文） |
+| `SERVER_CLEARING` | 券商系统清算中 |
+| `OUTSIDE_TRADING_HOURS` | 非交易时段 |
+| `SERVER_UNAVAILABLE` | 券商服务器不可用（事务处理机转发失败等） |
 | `OCR_FAILED` | 验证码识别失败 |
 | `INTERNAL_ERROR` | 未知异常 |
 | `QUEUE_TIMEOUT` | 任务排队超时 |
