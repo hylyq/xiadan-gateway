@@ -256,8 +256,9 @@ class Trader:
                                     window, CONFIRM_NO_BUTTON_ID, descendants=_descendants)
                                 self.logger.info("已点击 '否(N)' 取消委托（预览模式）")
                             except Exception as e:
-                                self.window_service.send_key("{ESC}")
-                                self.logger.warning(f"点击 '否(N)' 失败，尝试 ESC: {e}")
+                                # ESC 不能走 send_key（会触发前台窗口校验，模态弹窗导致失败）
+                                self._close_non_confirm_popup(window, descendants=_descendants)
+                                self.logger.warning(f"点击 '否(N)' 失败，降级关闭弹窗: {e}")
                         break  # 委托确认处理完毕，结束循环
                     else:
                         # B) 非委托确认弹窗 — 需要区分"警告"和"错误"
@@ -647,8 +648,15 @@ class Trader:
         )
 
     def confirm_order(self) -> dict:
-        """单独发送 Y 键确认委托（用于 confirm=false 的下单后续确认）"""
+        """单独发送 Y 键确认委托（用于 confirm=false 的下单后续确认）
+
+        注意：仅当委托确认弹窗确实存在时才发送 Y 键，
+        避免快速交易模式下 Y 键泄漏到其他窗口。
+        """
         self.logger.info("发送 Y 键确认委托")
+        if not self._has_any_dialog():
+            self.logger.warning("未检测到委托确认弹窗，跳过 Y 键发送")
+            return {"confirmed": False}
         self.window_service.send_key("Y")
         time.sleep(0.5)
         return {"confirmed": True}

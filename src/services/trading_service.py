@@ -90,9 +90,14 @@ class TradingService:
                 _descendants = list(window.descendants())
 
                 # 关闭可能出现的阻塞型提示弹窗（如非交易时段的 "Begin failed!"）
-                self._dismiss_blocking_popup(window)
+                if self._dismiss_blocking_popup(window):
+                    # 弹窗关闭后控件树已变化，刷新 descendants
+                    window = self.window_service.get_trading_window()
+                    if window is None:
+                        raise Exception("弹窗关闭后窗口消失")
+                    _descendants = list(window.descendants())
 
-                # 从缓存 descendants 检查撤单按钮是否存在
+                # 从 descendants 检查撤单按钮是否存在
                 btn = self.window_service.find_element_in_window(
                     window, control_id, descendants=_descendants)
                 if btn is not None:
