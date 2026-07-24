@@ -318,10 +318,11 @@ xiadan-gateway/
 
 | 方式 | 依赖前台 | 适用场景 |
 |------|:---:|------|
+| `keybd_event` + `background=True` | ✗ | 已确认窗口在前台时的功能键（跳过冗余激活） |
 | `keybd_event` | ✓ | 功能键 F1-F12、Ctrl+C 组合键 |
 | `PostMessage` | ✗ | 字母键 Y/N、ENTER（后台不抢焦点） |
 
-功能键必须前台发送（`PostMessage` 无法触发窗口快捷键），发送前用 `click_input()` + `GetForegroundWindow()` 句柄校验确保窗口在前台，失败则抛异常阻止发送，防止按键泄漏到桌面/IDE。
+功能键默认走前台发送（`PostMessage` 无法触发窗口快捷键），发送前用 `click_input()` + `GetForegroundWindow()` 句柄校验确保窗口在前台。若调用方已自行激活窗口（如 `place_order()` 步骤 1），可传 `background=True` 跳过冗余激活，省去 `click_input()` + `sleep(0.3s)` ×2 的开销（~0.6s）。
 
 ### Ctrl+C 双发机制
 
@@ -375,9 +376,27 @@ Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 间隔 0.15s)
 
 不要用 ALT+F4（关闭整个程序）或 ESC（子面板不是独立对话框，无效）。正确方式：发送 F4 切换到查询视图。`/actions/close-dialog` 接口封装此逻辑。
 
-### 控件树缓存
+### 控件树缓存与性能优化
 
-`pywinauto` 的 `descendants()` 缓存控件树，界面变化后必须重新 `get_trading_window()` 获取新引用。每次 `descendants()` 遍历 UIA 树耗时约 1s（交易窗口包含数百个控件）。弹窗处理循环每轮在顶部调用一次并缓存，后续 `find_element_in_window` / `get_all_visible_texts` / `_close_non_confirm_popup` 全部复用同一份列表，将 5 次遍历合并为 1 次，单轮弹窗处理从 5s 降至 1.4s。
+`pywinauto` 的 `descendants()` 遍历 UIA 树耗时约 1s（交易窗口包含数百个控件），原始下单流程中多次独立调用导致累积延迟严重。通过三级缓存策略消除冗余遍历：
+
+**全流程共享**：`place_order()` 在获取窗口后调用一次 `descendants()`，将列表传递给 `input_text_to_element`（代码/价格/数量）和 `click_element`（下单按钮），各自省去内部的 `find_element_in_window` 遍历。
+
+**轮询复用**：`_has_any_dialog()` 检测弹窗时缓存遍历结果，后续弹窗处理循环直接复用，省去第二次遍历。
+
+**单次合并**：`_has_any_dialog()` 原来分别查 cid=1365 和 cid=1040（两次遍历），改为一次遍历同时检查。
+
+| 优化项 | 原始 | 优化后 |
+|--------|------|--------|
+| 填写股票代码 | 2.09s | 1.22s |
+| 填写数量 | 1.76s | 0.87s |
+| 点击下单按钮 | 1.05s | 0.57s |
+| F1/F2 切换（跳过冗余激活） | 1.10s | 0.16s |
+| 等待下单弹窗（合并两次遍历） | 2.20s | 1.10s |
+| 弹窗处理循环（缓存复用） | 33.60s | 0.62s |
+| **总响应** | **~51s** | **~14s** |
+
+`input_text_to_element` / `click_element` / `find_element_in_window` / `get_all_visible_texts` 均支持可选 `descendants` 参数，调用方可在循环或连续操作中提前缓存。
 
 ### 市价/限价切换
 
