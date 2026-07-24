@@ -93,14 +93,16 @@ class Trader:
             self.window_service.send_key("F1" if status == "1" else "F2")
             time.sleep(0.1)
 
-        # 3. 获取交易窗口
+        # 3. 获取交易窗口 + 缓存 descendants（下单流程中 input/click 共用）
         window = self.window_service.get_trading_window()
         if window is None:
             raise Exception("未找到交易窗口 '网上股票交易系统5.0'")
+        _descendants = list(window.descendants())
 
         # 4. 填写股票代码（必须先填代码，否则价格模式切换可能被禁用）
         with timed("填写股票代码", self.logger):
-            self.window_service.input_text_to_element(window, CONTROL_ID_CODE, code)
+            self.window_service.input_text_to_element(
+                window, CONTROL_ID_CODE, code, descendants=_descendants)
             time.sleep(0.3)  # 等待券商自动填充价格完成
 
         # 4.1 防御：输入代码后券商自动查询价格，若服务器维护会弹出错误弹窗
@@ -112,6 +114,7 @@ class Trader:
                 window = self.window_service.get_trading_window()
                 if window is None:
                     raise Exception("关闭弹窗后窗口消失")
+                _descendants = list(window.descendants())
 
         # 5. 切换限价/市价模式（必须在填完代码之后，券商要求先有代码才能切换）
         with timed("切换价格模式", self.logger):
@@ -121,22 +124,27 @@ class Trader:
             window = self.window_service.get_trading_window()
             if window is None:
                 raise Exception("切换价格模式后窗口消失")
+            # 价格切换只改标签文本，控件树结构不变，仅在弹窗关闭触发了
+            # window 重建时才重取 _descendants（已在步骤 4.1 处理）
 
         # 6. 填写价格（仅限价）
         if price_type == "limit" and price:
             with timed("填写价格", self.logger):
-                self.window_service.input_text_to_element(window, CONTROL_ID_PRICE, price)
+                self.window_service.input_text_to_element(
+                    window, CONTROL_ID_PRICE, price, descendants=_descendants)
                 time.sleep(0.1)
 
         # 7. 填写数量
         if amount:
             with timed("填写数量", self.logger):
-                self.window_service.input_text_to_element(window, CONTROL_ID_AMOUNT, amount)
+                self.window_service.input_text_to_element(
+                    window, CONTROL_ID_AMOUNT, amount, descendants=_descendants)
                 time.sleep(0.1)
 
         # 8. 点击下单按钮并处理弹窗
         with timed("点击下单按钮", self.logger):
-            self.window_service.click_element(window, CONTROL_ID_SUBMIT)
+            self.window_service.click_element(
+                window, CONTROL_ID_SUBMIT, descendants=_descendants)
             self.logger.info("已点击下单按钮，等待弹窗")
 
         # 轮询等待弹窗出现（替代固定 sleep(0.5)），超时则走后续无弹窗逻辑。

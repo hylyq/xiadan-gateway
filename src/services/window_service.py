@@ -466,11 +466,12 @@ class WindowService:
     # 控件操作
     # ------------------------------------------------------------
 
-    def click_element(self, window, control_id, retries: int = 3, delay: float = 0.5) -> None:
+    def click_element(self, window, control_id, retries: int = 3, delay: float = 0.5,
+                      descendants=None) -> None:
         """点击控件"""
         for i in range(retries):
             try:
-                element = self.find_element_in_window(window, control_id)
+                element = self.find_element_in_window(window, control_id, descendants=descendants)
                 if element is None:
                     raise Exception(f"未找到 control_id={control_id} 的控件")
                 element.click_input()
@@ -480,10 +481,11 @@ class WindowService:
                     raise Exception(f"点击控件失败 control_id={control_id}: {str(e)}")
                 time.sleep(delay)
 
-    def input_text_to_element(self, window, control_id, text: str, delay: float = 0.3) -> bool:
+    def input_text_to_element(self, window, control_id, text: str, delay: float = 0.3,
+                              descendants=None) -> bool:
         """向输入框输入文本（先清空已有内容，再输入新内容）"""
         try:
-            element = self.find_element_in_window(window, control_id)
+            element = self.find_element_in_window(window, control_id, descendants=descendants)
             if element is None:
                 raise Exception(f"未找到 control_id={control_id} 的输入框")
             element.set_focus()
