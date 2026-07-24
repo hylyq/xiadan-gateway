@@ -35,6 +35,7 @@ class Trader:
         self.window_service = window_service
         self.config = AppConfig()
         self.logger = Logger.get_instance()
+        self._cached_descendants = None  # _has_any_dialog 找到弹窗时缓存，供循环复用
 
     def place_order(
         self,
@@ -182,9 +183,12 @@ class Trader:
                 order_detail_text = None
 
                 # 缓存 descendants 一次遍历供本轮所有查找复用
-                # （每次 window.descendants() 遍历 UIA 控件树 ~1s，
-                #   错误路径需要 5 次查找，缓存后降至 1 次）
-                _descendants = list(window.descendants())
+                # 优先复用 _has_any_dialog 找到弹窗时缓存的列表，避免第二次 UIA 遍历
+                if self._cached_descendants is not None:
+                    _descendants = self._cached_descendants
+                    self._cached_descendants = None  # 用完即清，防止复用脏数据
+                else:
+                    _descendants = list(window.descendants())
 
                 # A/B) 检查是否有标题图（cid=1365）
                 title_el = self.window_service.find_element_in_window(
@@ -466,11 +470,14 @@ class Trader:
         if window is None:
             return False
         # 一次 descendants 遍历同时检查两个 cid（原来分两次需要 2s）
+        # 找到弹窗时缓存列表，供后续弹窗处理循环复用，省去第二次遍历
         try:
-            for el in window.descendants():
+            _descendants = list(window.descendants())
+            for el in _descendants:
                 try:
                     cid = el.control_id()
                     if cid in (CONFIRM_DIALOG_TITLE_ID, CONFIRM_DETAIL_TEXT_ID):
+                        self._cached_descendants = _descendants
                         return True
                 except Exception:
                     continue
