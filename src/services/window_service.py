@@ -322,11 +322,13 @@ class WindowService:
             pass
         return False
 
-    def get_all_visible_texts(self, window) -> str:
+    def get_all_visible_texts(self, window, descendants=None) -> str:
         """获取窗口中所有控件的可见文本（用于诊断和弹窗文本提取）"""
+        if descendants is None:
+            descendants = window.descendants()
         try:
             texts = []
-            for c in window.descendants():
+            for c in descendants:
                 try:
                     t = c.window_text()
                     if t and t.strip():
@@ -341,7 +343,8 @@ class WindowService:
     # 控件查找（支持单个 / 批量）
     # ------------------------------------------------------------
 
-    def find_element_in_window(self, window, control_id: Union[int, str, List, tuple]):
+    def find_element_in_window(self, window, control_id: Union[int, str, List, tuple],
+                               descendants=None):
         """在窗口中查找控件
 
         注意: window.descendants() 会缓存控件树。界面变化后必须重新 get_target_window。
@@ -349,12 +352,14 @@ class WindowService:
         Args:
             window: 目标窗口对象
             control_id: 单个 control_id（int/str）或 control_id 列表（list/tuple）
+            descendants: 可选，预获取的 descendants 列表（避免重复 UIA 遍历）
 
         Returns:
             单个 id 返回元素或 None；
             多个 id 返回元素列表（按找到顺序）
         """
-        descendants = window.descendants()
+        if descendants is None:
+            descendants = window.descendants()
 
         if isinstance(control_id, (int, str)):
             for element in descendants:

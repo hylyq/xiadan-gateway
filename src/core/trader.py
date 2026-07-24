@@ -181,9 +181,14 @@ class Trader:
                 # 每轮重置弹窗文本（避免上一轮的旧值污染兜底逻辑）
                 order_detail_text = None
 
+                # 缓存 descendants 一次遍历供本轮所有查找复用
+                # （每次 window.descendants() 遍历 UIA 控件树 ~1s，
+                #   错误路径需要 5 次查找，缓存后降至 1 次）
+                _descendants = list(window.descendants())
+
                 # A/B) 检查是否有标题图（cid=1365）
                 title_el = self.window_service.find_element_in_window(
-                    window, CONFIRM_DIALOG_TITLE_ID
+                    window, CONFIRM_DIALOG_TITLE_ID, descendants=_descendants
                 )
                 if title_el is not None:
                     title_text = title_el.window_text() or ""
@@ -193,13 +198,15 @@ class Trader:
                     # 弹窗刚出现时 detail text 控件可能尚未渲染，稍等再读
                     time.sleep(0.1)
                     detail_el = self.window_service.find_element_in_window(
-                        window, CONFIRM_DETAIL_TEXT_ID
+                        window, CONFIRM_DETAIL_TEXT_ID, descendants=_descendants
                     )
                     if detail_el is not None:
                         order_detail_text = detail_el.window_text() or ""
                     # 兜底：cid=1040 未找到或为空时，扫描所有可见文本
                     if not order_detail_text:
-                        order_detail_text = self.window_service.get_all_visible_texts(window)
+                        order_detail_text = self.window_service.get_all_visible_texts(
+                            window, descendants=_descendants
+                        )
                     if order_detail_text:
                         self.logger.info(f"弹窗详情: {order_detail_text[:200]}")
 
@@ -238,7 +245,7 @@ class Trader:
                                 f"检测到提交错误弹窗（非警告）: title={title_text}, "
                                 f"detail={order_detail_text[:100]}，关闭后报错"
                             )
-                            self._close_non_confirm_popup(window)
+                            self._close_non_confirm_popup(window, descendants=_descendants)
                             raise ApiError(
                                 ErrorCode.ORDER_SUBMIT_FAILED,
                                 f"订单提交失败: {order_detail_text[:200]}",
@@ -250,7 +257,7 @@ class Trader:
                                 f"检测到警告弹窗（非委托确认）: {title_text}，"
                                 f"关闭后继续等待委托确认"
                             )
-                            self._close_non_confirm_popup(window)
+                            self._close_non_confirm_popup(window, descendants=_descendants)
                             warning_dismissed = True
                             time.sleep(0.2)
                             window = self.window_service.get_trading_window_fast()
@@ -258,7 +265,7 @@ class Trader:
 
                 # C) 无标题图但有文本（cid=1040）+ 有"是(Y)"按钮 → 警告弹窗
                 text_el = self.window_service.find_element_in_window(
-                    window, CONFIRM_DETAIL_TEXT_ID
+                    window, CONFIRM_DETAIL_TEXT_ID, descendants=_descendants
                 )
                 if text_el is not None:
                     dialog_text = text_el.window_text() or ""
@@ -267,7 +274,7 @@ class Trader:
                         continue
 
                     yes_btn = self.window_service.find_element_in_window(
-                        window, CONFIRM_YES_BUTTON_ID
+                        window, CONFIRM_YES_BUTTON_ID, descendants=_descendants
                     )
                     if yes_btn is not None:
                         # C) 警告弹窗（含Y/N按钮，无标题图）
@@ -282,7 +289,7 @@ class Trader:
                     else:
                         # D) 纯错误弹窗（无Y/N按钮），关闭并报错
                         self.logger.warning(f"检测到错误弹窗: {dialog_text[:100]}")
-                        self._close_non_confirm_popup(window)
+                        self._close_non_confirm_popup(window, descendants=_descendants)
 
                         DiagnosticUtil().snapshot("dialog_error")
 
@@ -476,7 +483,7 @@ class Trader:
             ) is not None
         )
 
-    def _close_non_confirm_popup(self, window) -> None:
+    def _close_non_confirm_popup(self, window, descendants=None) -> None:
         """关闭非委托确认类弹窗（"提示"等，只有"确定"键，无 Y/N 键）
 
         尝试点击标准 Windows 对话框按钮（IDOK=1, IDCANCEL=2），
@@ -490,7 +497,7 @@ class Trader:
 
         # 方案1: 点击标准 Windows 按钮（IDOK=1="确定", IDCANCEL=2="取消"）
         for btn_id in (1, 2):
-            btn = self.window_service.find_element_in_window(window, btn_id)
+            btn = self.window_service.find_element_in_window(window, btn_id, descendants=descendants)
             if btn is not None:
                 try:
                     btn.click_input()
