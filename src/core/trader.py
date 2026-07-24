@@ -239,7 +239,6 @@ class Trader:
                                 f"detail={order_detail_text[:100]}，关闭后报错"
                             )
                             self._close_non_confirm_popup(window)
-                            DiagnosticUtil().snapshot("order_submit_error")
                             raise ApiError(
                                 ErrorCode.ORDER_SUBMIT_FAILED,
                                 f"订单提交失败: {order_detail_text[:200]}",
