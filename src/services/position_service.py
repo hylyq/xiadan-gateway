@@ -533,60 +533,74 @@ class PositionService:
     # ------------------------------------------------------------
 
     def _navigate_to_query_page(self, window, page_name: str) -> None:
-        """导航到查询页面（树形菜单 + 兜底）
+        """导航到查询页面
 
-        流程:
-        1. 树形菜单文本导航（find_element_by_tree_path）
-        2. 兜底: 全量扫描 TreeItem 按文本匹配（不依赖父节点）
-
-        所有标签页切换都会触发服务器数据交换，可能弹"Begin failed!"提示弹窗，
-        因此每个策略成功后都调用 _dismiss_popup_if_present 检测并关闭弹窗。
-
-        Args:
-            window: 交易窗口
-            page_name: 目标页面名称，如 "当日成交"、"当日委托"
-
-        Raises:
-            Exception: 所有策略均失败
+        一次 descendants 遍历同时用于 Tree 查找 + 弹窗检测（省去两次分
+        别遍历的 ~2s 开销）。TreeItem 兜底复用同一次遍历。
         """
         parent_name = "查询[F4]"
 
-        with timed(f"树形菜单导航 → {page_name}", self.logger):
-            # 策略1: 树形菜单文本导航
-            button = self.window_service.find_element_by_tree_path(
-                window, ('control_type', 'Tree'), [parent_name, page_name]
-            )
-            if button is not None:
-                button.click_input()
-                self.logger.info(f"已通过树形路径点击 '{page_name}'")
-                time.sleep(0.3)
-                with timed("弹窗防御", self.logger):
-                    self._dismiss_popup_if_present(window)
-                return
+        with timed(f"导航到 {page_name}", self.logger):
+            _descendants = list(window.descendants())  # 唯一一次遍历
 
-        self.logger.warning(f"树形路径导航失败，尝试扫描 TreeItem 文本匹配: {page_name}")
+            # 策略1: 树形路径导航
+            tree_root = None
+            for el in _descendants:
+                try:
+                    if el.element_info.control_type == "Tree":
+                        tree_root = el
+                        break
+                except Exception:
+                    continue
 
-        with timed(f"TreeItem 全量扫描 → {page_name}", self.logger):
-            # 策略2: 全量扫描 TreeItem 按文本匹配
-            try:
-                for el in window.descendants():
-                    try:
-                        if el.element_info.control_type == "TreeItem":
-                            text = el.window_text() or ""
-                            if page_name in text:
-                                el.click_input()
-                                self.logger.info(f"已通过 TreeItem 文本匹配点击 '{page_name}'")
-                                time.sleep(0.3)
-                                self._dismiss_popup_if_present(window)
-                                return
-                    except Exception:
-                        continue
-            except Exception as e:
-                self.logger.warning(f"TreeItem 扫描失败: {str(e)}")
+            if tree_root is not None:
+                current = tree_root
+                for name in [parent_name, page_name]:
+                    found = None
+                    for child in current.children():
+                        if name in (child.window_text() or ""):
+                            found = child
+                            break
+                    if found is None:
+                        break
+                    current = found
+
+                if found is not None and page_name in (found.window_text() or ""):
+                    found.click_input()
+                    self.logger.info(f"已通过树形路径点击 '{page_name}'")
+                    time.sleep(0.15)
+                    self._check_blocking_popup(_descendants, window)
+                    return
+
+            # 策略2: TreeItem 文本扫描（复用 _descendants）
+            self.logger.info(f"树形路径未匹配，TreeItem 扫描: {page_name}")
+            for el in _descendants:
+                try:
+                    if el.element_info.control_type == "TreeItem":
+                        if page_name in (el.window_text() or ""):
+                            el.click_input()
+                            self.logger.info(f"已通过 TreeItem 匹配点击 '{page_name}'")
+                            time.sleep(0.15)
+                            self._check_blocking_popup(_descendants, window)
+                            return
+                except Exception:
+                    continue
 
         raise Exception(
             f"导航到 '{page_name}' 失败：树形路径和 TreeItem 扫描均未找到目标页面"
         )
+
+    def _check_blocking_popup(self, descendants, window) -> None:
+        """用缓存的 descendants 检测阻塞弹窗，命中才走完整关闭流程"""
+        popup_keywords = ["Begin failed", "failed", "失败", "事务处理机"]
+        for el in descendants:
+            try:
+                text = el.window_text() or ""
+                if any(kw in text for kw in popup_keywords):
+                    self._dismiss_popup_if_present(window)
+                    return
+            except Exception:
+                continue
 
     def _format_table_data(self, table_data: Optional[str]) -> list:
         """将 tab 分隔的表格文本转为 JSON 列表
