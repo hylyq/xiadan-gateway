@@ -222,17 +222,10 @@ class PositionService:
             pass
 
         for w in windows_to_search:
-            # 方法1: control_id=2405 检测
+            # 方法1: control_id=2405 检测（验证码弹窗是主窗口子窗口，标题相同）
             try:
                 image = self.window_service.find_element_in_window(w, CAPTCHA_IMAGE_ID)
                 if image is not None:
-                    # 排除主窗口误报（验证码控件可能残留在主窗口 UIA 树中）
-                    win_text = self._safe_window_text(w)
-                    if MAIN_WINDOW_TITLE_KEYWORD in win_text:
-                        self.logger.debug(
-                            f"control_id=2405 命中但窗口为主窗口（title='{win_text}'），跳过"
-                        )
-                        continue
                     self.logger.info("通过 control_id=2405 检测到验证码弹窗")
                     self._captcha_window = w
                     return True
@@ -402,17 +395,13 @@ class PositionService:
             self.logger.error("窗口为 None，无法处理验证码")
             raise ApiError(ErrorCode.OCR_FAILED, "窗口为 None，无法处理验证码")
 
-        # 查找验证码图片控件
+        # 查找验证码图片控件（仅精确 control_id 匹配）
+        # 注意: 不降级到文本匹配——主窗口文本可能包含"验证码"关键词导致误截主窗口画面
         image_element = self.window_service.find_element_in_window(window, CAPTCHA_IMAGE_ID)
         if image_element is None:
-            matches = self.window_service.find_element_by_text(window, CAPTCHA_TEXT_KEYWORDS)
-            if matches:
-                self.logger.info(f"通过文本匹配找到验证码控件（{len(matches)} 个）")
-                image_element = matches[0]
-            else:
-                self.logger.error("验证码图片元素未找到")
-                raise ApiError(ErrorCode.OCR_FAILED, "验证码图片元素未找到",
-                               suggestion="请确认交易窗口是否正常显示验证码弹窗")
+            self.logger.error("验证码图片元素未找到（control_id=2405）")
+            raise ApiError(ErrorCode.OCR_FAILED, "验证码图片元素未找到",
+                           suggestion="请确认交易窗口是否正常显示验证码弹窗")
 
         # 保存验证码图片
         with timed("验证码截图保存", self.logger):
