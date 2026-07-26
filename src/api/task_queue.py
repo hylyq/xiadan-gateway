@@ -160,8 +160,9 @@ class TaskQueue(Singleton):
             finally:
                 watchdog.cancel()
 
-                # 自动诊断：任务结束后记录界面状态（无论成功失败）
-                self._auto_diagnostic(task)
+                # 自动诊断：仅在任务失败时记录界面状态（成功时界面符合预期，无诊断价值）
+                if task.error is not None:
+                    self._auto_diagnostic(task)
 
                 with self._lock:
                     self._current_task = None
@@ -220,9 +221,6 @@ class TaskQueue(Singleton):
             task.screenshot = screenshot_path
         except Exception as e:
             self.logger.error(f"超时截图失败: {str(e)}")
-
-        # 诊断：OCR 识别截图内容，帮助定位超时原因
-        DiagnosticUtil().snapshot(f"timeout_{task.name}")
 
         # 步骤 2: 重新激活 xiadan.exe 窗口（恢复最小化 + 置前，确保 ESC 发到目标窗口）
         try:

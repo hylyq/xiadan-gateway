@@ -58,19 +58,6 @@ class ScreenshotUtil:
             self.logger.error(f"全屏截图也失败: {str(e)}")
             return None
 
-    def capture_full_screen(self, prefix: str = "fullscreen") -> Optional[str]:
-        """全屏截图"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{prefix}_{timestamp}.png"
-        filepath = os.path.join(self.screenshot_dir, filename)
-
-        try:
-            pyautogui.screenshot(filepath)
-            return filepath
-        except Exception as e:
-            self.logger.error(f"全屏截图失败: {str(e)}")
-            return None
-
     def cleanup_old_screenshots(self) -> int:
         """清理过期截图（保留最近 MAX_SCREENSHOTS 张且不超过 MAX_AGE_DAYS 天）
 

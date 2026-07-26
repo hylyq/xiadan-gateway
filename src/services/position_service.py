@@ -12,7 +12,7 @@ from src.constants import (
     BALANCE_FIELDS,
     CAPTCHA_IMAGE_ID, CAPTCHA_INPUT_ID, CAPTCHA_OK_BUTTON_ID,
     CAPTCHA_CANCEL_BUTTON_ID, CAPTCHA_VERIFY_ID,
-    CAPTCHA_DIALOG_TITLE, CAPTCHA_TEXT_KEYWORDS,
+    CAPTCHA_TEXT_KEYWORDS,
     MAIN_WINDOW_TITLE_KEYWORD
 )
 from src.exceptions import ApiError, ErrorCode
@@ -128,10 +128,12 @@ class PositionService:
     def _copy_table_via_clipboard(self) -> list:
         """通过剪贴板读取表格数据（含验证码处理）
 
-        流程：Ctrl+C → 验证码弹窗 → OCR 识别 → 读剪贴板，最多 3 次。
+        流程：Ctrl+C → 验证码弹窗 → OCR 识别 → 读剪贴板，最多 2 次
+        （内层 _solve_captcha 已有 max_retry 次 OCR 重试，外层无需 3 次）。
         """
-        for attempt in range(3):
-            self.logger.info(f"第 {attempt + 1}/3 次尝试 Ctrl+C 读取表格数据")
+        max_attempts = 2
+        for attempt in range(max_attempts):
+            self.logger.info(f"第 {attempt + 1}/{max_attempts} 次尝试 Ctrl+C 读取表格数据")
 
             with timed("Ctrl+C 发送", self.logger):
                 self._send_ctrl_c()
@@ -143,7 +145,7 @@ class PositionService:
                         lambda: self._detect_captcha(
                             self.window_service.get_trading_window()
                         ),
-                        timeout=3.0, interval=0.1,
+                        timeout=1.5, interval=0.1,
                         description="Ctrl+C 后验证码弹窗"
                     )
                 except PollTimeoutError:
@@ -397,15 +399,10 @@ class PositionService:
             self.logger.error("窗口为 None，无法处理验证码")
             raise ApiError(ErrorCode.OCR_FAILED, "窗口为 None，无法处理验证码")
 
-        # 查找验证码图片控件（仅精确 control_id 匹配，须可见）
-        # 注意: 主窗口可能存在多个 2405（隐藏残留 + 真实弹窗），
-        # find_element_in_window 返回第一个，必须过滤隐藏元素
+        # 查找验证码图片控件（精确 control_id=2405 匹配）
         image_element = self.window_service.find_element_in_window(window, CAPTCHA_IMAGE_ID)
-        if image_element is not None and not self._is_element_visible(image_element):
-            self.logger.warning("找到 control_id=2405 但不可见（疑似主窗口残留控件），视为未找到")
-            image_element = None
         if image_element is None:
-            self.logger.error("验证码图片元素未找到（control_id=2405 可见）")
+            self.logger.error("验证码图片元素未找到（control_id=2405）")
             raise ApiError(ErrorCode.OCR_FAILED, "验证码图片元素未找到",
                            suggestion="请确认交易窗口是否正常显示验证码弹窗")
 
@@ -443,24 +440,21 @@ class PositionService:
                     self.logger.warning("未找到验证码确定按钮")
                     continue
 
-                # 轮询等待验证结果
+                # 轮询等待验证结果（服务器通常即时响应，1s足够）
                 with timed("等待验证码确认", self.logger):
                     try:
                         poll_until(
                             lambda: self._verify_captcha_success(
                                 self.window_service.get_trading_window()
                             ),
-                            timeout=2.0, interval=0.1,
+                            timeout=1.0, interval=0.15,
                             description="验证码验证结果"
                         )
                         self.logger.info("验证码验证成功")
                         return True
                     except PollTimeoutError:
-                        self._refresh_window_ref()
-                        window = self._cached_window
-                        if self._verify_captcha_success(window):
-                            self.logger.info("验证码验证成功")
-                            return True
+                        # poll_until 已轮询 ~7次都失败，无需再查
+                        pass
 
                 # 失败：点击取消，重新触发验证码
                 self.logger.warning(f"验证码错误（尝试 {attempt + 1}/{max_retry}）")
@@ -474,6 +468,7 @@ class PositionService:
                     image_element = self.window_service.find_element_in_window(
                         window, CAPTCHA_IMAGE_ID)
                     if image_element is None:
+                        self.logger.info("验证码弹窗已消失（image_element=None），视为处理成功")
                         return True
                     image_element.capture_as_image().save(image_path)
                 else:
@@ -494,14 +489,6 @@ class PositionService:
             f"验证码识别失败，已重试 {max_retry} 次",
             suggestion="可稍后重试查询，或检查交易窗口是否被遮挡"
         )
-
-    @staticmethod
-    def _is_element_visible(element) -> bool:
-        """检查 UIA 元素是否可见（非隐藏/非残留控件）"""
-        try:
-            return element.is_visible()
-        except Exception:
-            return True  # 无法判断时假定可见
 
     @staticmethod
     def _is_captcha_image_valid(image_path: str, max_bytes: int = 5000) -> bool:
