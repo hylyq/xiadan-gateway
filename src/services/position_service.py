@@ -11,7 +11,8 @@ from src.utils.poll import poll_until, timed, PollTimeoutError
 from src.constants import (
     BALANCE_FIELDS,
     CAPTCHA_IMAGE_ID, CAPTCHA_INPUT_ID, CAPTCHA_OK_BUTTON_ID,
-    CAPTCHA_CANCEL_BUTTON_ID, CAPTCHA_VERIFY_ID, CAPTCHA_TEXT_KEYWORDS,
+    CAPTCHA_CANCEL_BUTTON_ID, CAPTCHA_VERIFY_ID,
+    CAPTCHA_DIALOG_TITLE, CAPTCHA_TEXT_KEYWORDS,
     MAIN_WINDOW_TITLE_KEYWORD
 )
 from src.exceptions import ApiError, ErrorCode
@@ -211,42 +212,53 @@ class PositionService:
         if window is None:
             return False
 
-        # 搜集所有需要搜索的窗口：主窗口 + 所有可见 Desktop 窗口
-        windows_to_search = [window]
+        # 构建搜索列表: 优先独立弹窗(验证码弹窗标题"提示"),再主窗口
+        popups = []
         try:
             from pywinauto import Desktop
             for w in Desktop(backend="uia").windows(visible_only=True):
                 if w.handle != window.handle:
-                    windows_to_search.append(w)
+                    popups.append(w)
         except Exception:
             pass
+        windows_to_search = popups + [window]
 
         for w in windows_to_search:
-            # 方法1: control_id=2405 检测（验证码弹窗是主窗口子窗口，标题相同）
+            win_text = self._safe_window_text(w)
+            is_main_window = MAIN_WINDOW_TITLE_KEYWORD in win_text
+
+            # 方法1: control_id=2405 检测
             try:
                 image = self.window_service.find_element_in_window(w, CAPTCHA_IMAGE_ID)
                 if image is not None:
-                    self.logger.info("通过 control_id=2405 检测到验证码弹窗")
+                    # 主窗口中可能残留隐藏的 2405 控件，跳过
+                    if is_main_window:
+                        self.logger.debug(
+                            f"control_id=2405 命中主窗口（疑似残留控件），跳过"
+                        )
+                        continue
+                    self.logger.info(
+                        f"通过 control_id=2405 检测到验证码弹窗（title='{win_text}'）"
+                    )
                     self._captcha_window = w
                     return True
             except Exception:
                 pass
 
-            # 方法2: 文本匹配（需排除主窗口误报）
+            # 方法2: 文本匹配（精确关键词，"检测到您正在拷贝数据"）
             try:
                 matches = self.window_service.find_element_by_text(
                     w, CAPTCHA_TEXT_KEYWORDS
                 )
                 if matches:
-                    # 排除主窗口误报: 验证码文字可能出现在主窗口状态栏
-                    win_text = self._safe_window_text(w)
-                    if MAIN_WINDOW_TITLE_KEYWORD in win_text:
+                    # 排除主窗口误报
+                    if is_main_window:
                         self.logger.debug(
-                            f"文本匹配命中但窗口为主窗口（title='{win_text}'），跳过"
+                            f"文本匹配命中主窗口（title='{win_text}'），跳过"
                         )
                         continue
                     self.logger.info(
-                        f"通过文本匹配检测到验证码弹窗（{len(matches)} 个匹配控件, "
+                        f"通过文本匹配检测到验证码弹窗（{len(matches)} 个匹配, "
                         f"title='{win_text}'）"
                     )
                     self._captcha_window = w

@@ -57,7 +57,8 @@ CAPTCHA_CANCEL_BUTTON_ID = 2    # 验证码取消按钮
 CAPTCHA_VERIFY_ID = 2406        # 验证码验证状态控件（消失=成功）
 
 # 验证码文本检测关键词
-CAPTCHA_TEXT_KEYWORDS = ["验证码", "检测到您正在拷贝"]
+CAPTCHA_DIALOG_TITLE = "提示"     # 验证码弹窗标题（与主窗口标题不同）
+CAPTCHA_TEXT_KEYWORDS = ["检测到您正在拷贝数据", "请先输入验证码"]
 
 # ============================================================
 # 撤单界面控件 (TradingService)
