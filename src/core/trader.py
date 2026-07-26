@@ -151,34 +151,47 @@ class Trader:
                         raise Exception("关闭弹窗后窗口消失")
                     _descendants = list(window.descendants())
 
-        # 5. 确保价格模式匹配（先用已有 descendants 检测，匹配时跳过重遍历）
+        # 5. 确保价格模式匹配
+        # 策略：模式不匹配时先点击切换按钮（不等待），立即进入填数量——数量填充的
+        # ~0.7s 与模式切换的 <0.2s 重叠，之后验证时已自然就绪，无需额外等待。
         with timed("切换价格模式", self.logger):
             want_market = (price_type == "market")
-            # 先用步骤 3/4.1 缓存检测模式，F1 默认限价 → 限价单 100% 跳过重遍历
             is_market = self._is_market_mode(window, descendants=_descendants)
+            _mode_switch_pending = False
             if want_market != is_market:
-                # 传入已有 _descendants 省去 _switch_price_type 内部的首次遍历（省 ~1s）
-                # 无需 caller 提前 get_trading_window（_switch_price_type 内部自己处理）
-                is_market = self._switch_price_type(
-                    window, want_market, descendants=_descendants)
-                # 模式切换后刷新控件树（价格/数量字段可见性可能已变化）
-                window = self.window_service.get_trading_window()
-                if window is None:
-                    raise Exception("切换价格模式后窗口消失")
-                _descendants = list(window.descendants())
+                # 阶段 1/2：点击切换按钮（立即返回）
+                self._click_price_type_toggle(window, descendants=_descendants)
+                _mode_switch_pending = True
 
-        # 6. 填写价格（仅限价，步骤 5 已确保处于限价模式）
-        if price_type == "limit" and price:
-            with timed("填写价格", self.logger):
-                self.window_service.input_text_to_element(
-                    window, CONTROL_ID_PRICE, price, descendants=_descendants, delay=0.05)
-                time.sleep(0.05)
-
-        # 7. 填写数量
+        # 6. 填写数量（与模式切换并行，数量控件不受限价/市价模式影响）
         if amount:
             with timed("填写数量", self.logger):
                 self.window_service.input_text_to_element(
                     window, CONTROL_ID_AMOUNT, amount, descendants=_descendants, delay=0.05)
+                time.sleep(0.05)
+
+        # 5b. 阶段 2/2：验证模式切换（填数量期间已自然等待 ~0.7s，切换早已完成）
+        if _mode_switch_pending:
+            with timed("验证价格模式切换", self.logger):
+                ok, _fresh_win, _fresh_desc = self._verify_price_type_switch(want_market)
+                if ok:
+                    is_market = want_market
+                    # 复用验证返回的新鲜窗口+descendants，省去重复刷新（~0.8s）
+                    window, _descendants = _fresh_win, _fresh_desc
+                else:
+                    # 切换未成功，重试完整切换流程
+                    is_market = self._switch_price_type(
+                        window, want_market, descendants=_descendants)
+                    window = self.window_service.get_trading_window()
+                    if window is None:
+                        raise Exception("切换价格模式后窗口消失")
+                    _descendants = list(window.descendants())
+
+        # 7. 填写价格（仅限价，此时模式已确认）
+        if price_type == "limit" and price:
+            with timed("填写价格", self.logger):
+                self.window_service.input_text_to_element(
+                    window, CONTROL_ID_PRICE, price, descendants=_descendants, delay=0.05)
                 time.sleep(0.05)
 
         # 8. 点击下单按钮并处理弹窗
@@ -390,6 +403,33 @@ class Trader:
         }
         self.logger.info(f"下单完成: {result}")
         return result
+
+    def _click_price_type_toggle(self, window, descendants=None) -> None:
+        """点击价格类型切换按钮（控制 ID=1400），不等待确认
+
+        从已有 descendants 中查找 label 元素，极快（~0.01s）。
+        调用后标签文字几乎立即变化，验证阶段（_verify_price_type_switch）
+        在填数量之后执行，已自然等待足够时间。
+        """
+        label = self.window_service.find_element_in_window(
+            window, CONTROL_ID_PRICE_TYPE, descendants=descendants)
+        if label is None:
+            raise Exception(f"未找到价格类型控件 control_id={CONTROL_ID_PRICE_TYPE}")
+        label.click_input()
+
+    def _verify_price_type_switch(self, want_market: bool):
+        """快速验证价格模式是否已切换，返回 (成功, 新鲜窗口, 新鲜descendants)
+
+        用新鲜窗口连接检查标签文本（避免 pywinauto UIA 缓存）。
+        调用时机在填数量之后，已自然等待足够时间让标签变化。
+        成功时返回新鲜窗口+descendants，caller 可直接复用，省去重复刷新。
+        """
+        window = self.window_service.get_trading_window_fast()
+        if window is None:
+            return False, None, None
+        if want_market != self._is_market_mode(window):
+            return False, None, None
+        return True, window, list(window.descendants())
 
     def _switch_price_type(self, window, want_market: bool, descendants=None) -> bool:
         """切换限价/市价模式
