@@ -54,6 +54,10 @@ class LightweightCaptchaOCR:
         self._templates: dict[int, list[np.ndarray]] = {}  # {digit: [template_arrays]}
         self._ready = False
 
+        # 预归一化模板矩阵，用于批量匹配（加载时构建一次）
+        self._template_matrix: Optional[np.ndarray] = None  # (N, 1064)
+        self._template_labels: Optional[np.ndarray] = None  # (N,) int digit
+
     # ---- 公开 API ----
 
     def warmup(self) -> bool:
@@ -87,7 +91,7 @@ class LightweightCaptchaOCR:
     # ---- 内部: 模板管理 ----
 
     def _load_templates(self):
-        """加载所有模板到内存"""
+        """加载所有模板到内存（一次硬盘读取，预归一化，构建批量匹配矩阵）"""
         if not os.path.isdir(self._template_dir):
             return
 
@@ -97,6 +101,9 @@ class LightweightCaptchaOCR:
         # 仅加载 real_ 前缀的模板（真实验证码提取）
         real_files = [f for f in files if os.path.basename(f).startswith("real_")]
 
+        all_flat = []
+        all_labels = []
+
         for filepath in real_files:
             digit = self._parse_digit_from_filename(os.path.basename(filepath))
             if digit is None:
@@ -105,12 +112,21 @@ class LightweightCaptchaOCR:
             try:
                 img = Image.open(filepath).convert("L")
                 arr = np.array(img, dtype=np.float32) / 255.0
+                # 预归一化：零均值单位方差，匹配阶段无需重复计算
+                arr_norm = self._normalize(arr)
 
                 if digit not in self._templates:
                     self._templates[digit] = []
-                self._templates[digit].append(arr)
+                self._templates[digit].append(arr_norm)
+
+                all_flat.append(arr_norm.flatten())
+                all_labels.append(digit)
             except Exception:
                 continue
+
+        if all_flat:
+            self._template_matrix = np.stack(all_flat)           # (N, 1064)
+            self._template_labels = np.array(all_labels, dtype=np.int8)  # (N,)
 
     @staticmethod
     def _parse_digit_from_filename(filename: str) -> Optional[int]:
@@ -259,26 +275,18 @@ class LightweightCaptchaOCR:
     # ---- 内部: 模板匹配 ----
 
     def _match_best(self, digit_arr: np.ndarray) -> tuple[int, float]:
-        """对单个数字的图像数组，返回 (最佳匹配的数字, 置信度)
+        """对单个数字，返回 (最佳匹配数字, 置信度)
 
-        使用归一化互相关 (NCC):
-          score = mean((A - μA) * (B - μB)) / (σA * σB)
-        最佳匹配 = 最高分（范围约 -1 到 1）
+        模板已预归一化并堆叠为矩阵，一次 BLAS 矩阵乘法完成全部比对。
         """
-        best_digit = 0
-        best_score = -2.0
+        # 归一化输入（模板已预归一化，此步骤仅对输入执行）
+        digit_flat = self._normalize(digit_arr).flatten()  # (1064,)
 
-        digit_norm = self._normalize(digit_arr)
+        # 批量计算余弦相似度: scores = T @ d, 一次 C 级 BLAS 调用
+        scores = self._template_matrix @ digit_flat        # (N,)
 
-        for digit, templates in self._templates.items():
-            for tpl in templates:
-                tpl_norm = self._normalize(tpl)
-                score = self._ncc(digit_norm, tpl_norm)
-                if score > best_score:
-                    best_score = score
-                    best_digit = digit
-
-        return best_digit, best_score
+        best_idx = int(np.argmax(scores))
+        return int(self._template_labels[best_idx]), float(scores[best_idx])
 
     # ---- 数学工具 ----
 
@@ -291,34 +299,28 @@ class LightweightCaptchaOCR:
             return arr - mean
         return (arr - mean) / std
 
-    @staticmethod
-    def _ncc(a: np.ndarray, b: np.ndarray) -> float:
-        """归一化互相关 (Normalized Cross-Correlation)
-
-        score = (1/N) * Σ(a_norm * b_norm)
-        范围约 [-1, 1]，越高越相似
-        """
-        if a.shape != b.shape:
-            b_img = Image.fromarray((b * 255).astype(np.uint8))
-            b_img = b_img.resize((a.shape[1], a.shape[0]), Image.LANCZOS)
-            b = np.array(b_img, dtype=np.float32) / 255.0
-            b = LightweightCaptchaOCR._normalize(b)
-
-        return float(np.mean(a * b))
-
     # ---- 模板积累 API ----
 
     def add_sample(self, digit: int, region_arr: np.ndarray) -> bool:
-        """添加一个数字样本到内存 + 磁盘模板库
+        """添加一个数字样本到内存 + 磁盘模板库，同步更新匹配矩阵
 
         Args:
             digit: 数字 (0-9)
             region_arr: 归一化后的数字区域数组 (float32, 范围 [0,1])
         """
         try:
+            # 预归一化后存储（与 _load_templates 一致）
+            arr_norm = self._normalize(region_arr)
+
             if digit not in self._templates:
                 self._templates[digit] = []
-            self._templates[digit].append(region_arr)
+            self._templates[digit].append(arr_norm)
+
+            # 更新批量匹配矩阵
+            new_row = arr_norm.flatten()
+            if self._template_matrix is not None:
+                self._template_matrix = np.vstack([self._template_matrix, new_row])
+                self._template_labels = np.append(self._template_labels, digit)
 
             # 保存到磁盘
             os.makedirs(self._template_dir, exist_ok=True)
