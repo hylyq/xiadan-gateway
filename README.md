@@ -8,7 +8,7 @@
 |------|------|
 | 单实例运行 | Windows 全局互斥锁保证同一时刻只有一个实例 |
 | 顺序执行 | 单 worker 线程任务队列，避免 `xiadan.exe` 并发冲突 |
-| 看门狗恢复 | 任务超时自动截图 + 激活 + ESC×3，重置后返回错误 |
+| 看门狗恢复 | 任务超时自动截图 + 激活 + ESC×5，重置后返回错误 |
 | 幂等检查 | 60s 窗口内相同参数的下单被拒绝，防 HTTP 超时重试重复下单 |
 | OCR 验证码 | 轻量模板匹配引擎，失败自动存档，可选 ddddocr 离线训练 |
 | 一键清仓 | `/orders/sell-all` 自动查持仓 → 市价卖出全部可用数量 |
@@ -319,7 +319,7 @@ xiadan-gateway/
 
 ### 任务队列与看门狗
 
-所有操作通过单 worker 线程 `TaskQueue` 顺序执行，避免 `xiadan.exe` 并发冲突。每个任务前自动调用 `WindowService.reset_window_state()` 重置窗口到 F1 买入基准态。任务超时后看门狗执行「截图存档 → 激活窗口 → ESC×3 重置」恢复流程，**完成所有恢复后才返回错误**，确保调用方收到 `TASK_TIMEOUT` 时 `xiadan.exe` 已恢复初始状态。
+所有操作通过单 worker 线程 `TaskQueue` 顺序执行，避免 `xiadan.exe` 并发冲突。每个任务前自动调用 `WindowService.reset_window_state()` 重置窗口到 F1 买入基准态。任务超时后看门狗执行「截图存档 → 激活窗口 → ESC×5 重置」恢复流程，**完成所有恢复后才返回错误**，确保调用方收到 `TASK_TIMEOUT` 时 `xiadan.exe` 已恢复初始状态。
 
 ### 事件驱动等待
 
@@ -351,7 +351,7 @@ Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 间隔 0.15s)
 
 ### 验证码 OCR — 轻量单引擎 + 失败存档
 
-同花顺 Ctrl+C **必然触发验证码弹窗**（4 位数字，白底，规则字体）。弹窗出现 = Ctrl+C 成功送达的确认信号。流程：`poll_until` 轮询检测弹窗（3s 超时）→ OCR 识别 → 输入 + 确定 → 读剪贴板 → `\t` 制表符校验。最多重试 3 次。
+同花顺 Ctrl+C **必然触发验证码弹窗**（4 位数字，白底，规则字体）。弹窗出现 = Ctrl+C 成功送达的确认信号。流程：主动定时扫描检测弹窗（最多 3 次 × 0.3s间隔）→ OCR 识别（UIA 缓存一次遍历全流程复用）→ 输入 + 确定 → 读剪贴板 → `\t` 制表符校验。外层最多 2 次尝试，内层 OCR 最多 3 次重试。
 
 **单引擎架构**（生产模式，`ddddocr_enabled: false`）：
 
@@ -402,7 +402,7 @@ Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 间隔 0.15s)
 
 ### 查询面板标准化
 
-所有查询通过 `_prepare_query_panel()`（`reset_window_state` + F4）进入查询面板，自包含初始状态不依赖 TaskQueue 前置重置。导航动作本身触发券商服务器查询，无需额外 F5 刷新。空数据表格（仅有表头无数据行）正常返回空列表，避免因数据为空触发 3 次重试。
+所有查询通过 `_prepare_query_panel()`（仅发 F4 切换到查询面板）进入查询面板。TaskQueue worker 在每个任务前已调用 `reset_window_state()`（ESC×5→F1），查询方法内不再重复重置，省 ~1.7s/次。导航动作本身触发券商服务器查询，无需额外 F5 刷新。空数据表格（仅有表头无数据行）正常返回空列表。
 
 ## 已知限制与防御
 
@@ -439,6 +439,24 @@ Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 间隔 0.15s)
 | **总响应（error path）** | **~51s** | **~14s** |
 
 `input_text_to_element` / `click_element` / `find_element_in_window` / `get_all_visible_texts` 均支持可选 `descendants` 参数，缓存未命中时自动降级 fresh scan。
+
+### 查询流程性能优化
+
+查询流程（`_copy_table_via_clipboard` → `_solve_captcha`）独立实施了同类优化：
+
+| 优化项 | 说明 | 节省 |
+|--------|------|:--:|
+| UIA 缓存复用 | `_solve_captcha` 内一次 `descendants()` 全流程共享（图片/输入框/按钮） | ~1.5s/次 |
+| 去重复 reset | TaskQueue worker 已调用 `reset_window_state()`，查询方法不再重复 | ~1.7s/次 |
+| 主动定时扫描 | 验证码检测用定时扫描替代 `poll_until` 空等 | ~0.3s/次 |
+| 外层重试精简 | 外层 3→2 次（内层 OCR 已有 3 次重试） | 失败路径 ~3s |
+| 验证轮询加速 | 2.0s→1.0s，移除超时后冗余重查 | ~1s/次 |
+| 诊断按需触发 | `_auto_diagnostic` 仅失败时执行，成功跳过 | ~0.5s/任务 |
+
+| 查询类型 | 优化前 | 优化后 | 降幅 |
+|----------|--------|--------|:--:|
+| 资金余额 | ~8s | ~4s | -50% |
+| 持仓/成交/委托 | ~15s | ~8-10s | -35% |
 
 **弹窗关闭机制**：非委托确认类弹窗统一用 `_close_non_confirm_popup()` 关闭——优先批量查找标准 Windows 按钮（IDOK=1 / IDCANCEL=2，一次遍历同时找两个），降级用 `keybd_event` 直发 ESC（不经过 `send_key`，避免前台窗口校验被模态弹窗阻断）。委托确认弹窗的「否(N)」降级也走同一方法。
 
