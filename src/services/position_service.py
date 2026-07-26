@@ -399,8 +399,12 @@ class PositionService:
             self.logger.error("窗口为 None，无法处理验证码")
             raise ApiError(ErrorCode.OCR_FAILED, "窗口为 None，无法处理验证码")
 
+        # 缓存 UIA 控件树：验证码弹窗控件少（~20个），一次遍历全流程复用
+        _descendants = list(window.descendants())
+
         # 查找验证码图片控件（精确 control_id=2405 匹配）
-        image_element = self.window_service.find_element_in_window(window, CAPTCHA_IMAGE_ID)
+        image_element = self.window_service.find_element_in_window(
+            window, CAPTCHA_IMAGE_ID, descendants=_descendants)
         if image_element is None:
             self.logger.error("验证码图片元素未找到（control_id=2405）")
             raise ApiError(ErrorCode.OCR_FAILED, "验证码图片元素未找到",
@@ -433,10 +437,11 @@ class PositionService:
 
                 self.logger.info(f"OCR 识别结果: {ocr_text}")
 
-                # 输入验证码 + 点击确定
+                # 输入验证码 + 点击确定（复用缓存的 descendants）
                 with timed("输入验证码", self.logger):
-                    self.window_service.input_text_to_element(window, CAPTCHA_INPUT_ID, ocr_text)
-                if not self._click_button(window, CAPTCHA_OK_BUTTON_ID):
+                    self.window_service.input_text_to_element(
+                        window, CAPTCHA_INPUT_ID, ocr_text, descendants=_descendants)
+                if not self._click_button(window, CAPTCHA_OK_BUTTON_ID, descendants=_descendants):
                     self.logger.warning("未找到验证码确定按钮")
                     continue
 
@@ -458,15 +463,17 @@ class PositionService:
 
                 # 失败：点击取消，重新触发验证码
                 self.logger.warning(f"验证码错误（尝试 {attempt + 1}/{max_retry}）")
-                self._click_button(window, CAPTCHA_CANCEL_BUTTON_ID)
+                self._click_button(window, CAPTCHA_CANCEL_BUTTON_ID, descendants=_descendants)
                 time.sleep(0.2)
 
-                # 重新检测验证码弹窗（避免用 _refresh_window_ref 切到主窗口）
+                # 重新检测验证码弹窗
                 window = self.window_service.get_trading_window()
                 if window and self._detect_captcha(window):
                     window = self._captcha_window or window
+                    # 窗口切换后刷新 UIA 树缓存
+                    _descendants = list(window.descendants())
                     image_element = self.window_service.find_element_in_window(
-                        window, CAPTCHA_IMAGE_ID)
+                        window, CAPTCHA_IMAGE_ID, descendants=_descendants)
                     if image_element is None:
                         self.logger.info("验证码弹窗已消失（image_element=None），视为处理成功")
                         return True
@@ -506,9 +513,9 @@ class PositionService:
         except Exception:
             return True  # 无法判断时假定有效
 
-    def _click_button(self, window, control_id: int) -> bool:
-        """点击按钮"""
-        button = self.window_service.find_element_in_window(window, control_id)
+    def _click_button(self, window, control_id: int, descendants=None) -> bool:
+        """点击按钮（可选复用缓存的 descendants）"""
+        button = self.window_service.find_element_in_window(window, control_id, descendants=descendants)
         if button:
             button.click()
             return True
