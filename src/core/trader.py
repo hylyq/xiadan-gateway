@@ -574,25 +574,6 @@ class Trader:
         text = label.window_text() or ""
         return "市价" in text or "最优" in text
 
-    def _has_any_dialog(self) -> bool:
-        """检查下单后是否有弹窗出现
-
-        检测 cid=1365（标题图）或 cid=1040（详情文本），用于 confirm_order 等场景。
-        """
-        window = self.window_service.get_trading_window_fast()
-        if window is None:
-            return False
-        try:
-            for el in window.descendants():
-                try:
-                    if el.control_id() in (CONFIRM_DIALOG_TITLE_ID, CONFIRM_DETAIL_TEXT_ID):
-                        return True
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        return False
-
     @staticmethod
     def _extract_dialog_text(title_el) -> str:
         """从弹窗标题元素的父容器中提取弹窗文本
@@ -764,16 +745,3 @@ class Trader:
             window, popup_keywords=list(SERVER_ERROR_POPUP_KEYWORDS)
         )
 
-    def confirm_order(self) -> dict:
-        """单独发送 Y 键确认委托（用于 confirm=false 的下单后续确认）
-
-        注意：仅当委托确认弹窗确实存在时才发送 Y 键，
-        避免快速交易模式下 Y 键泄漏到其他窗口。
-        """
-        self.logger.info("发送 Y 键确认委托")
-        if not self._has_any_dialog():
-            self.logger.warning("未检测到委托确认弹窗，跳过 Y 键发送")
-            return {"confirmed": False}
-        self.window_service.send_key("Y")
-        time.sleep(0.3)
-        return {"confirmed": True}

@@ -45,7 +45,6 @@
 | 看门狗恢复 | 任务超时自动截图 + 激活 + ESC×5，重置后返回错误 |
 | 幂等检查 | 60s 窗口内相同参数的下单被拒绝，防 HTTP 超时重试重复下单 |
 | OCR 验证码 | 轻量模板匹配引擎，失败自动存档，可选 ddddocr 离线训练 |
-| 一键清仓 | `/orders/sell-all` 自动查持仓 → 市价卖出全部可用数量 |
 | 生产级服务器 | `waitress` WSGI + 优雅关闭（SIGINT/SIGTERM） |
 | 配置热更新 | `POST /admin/reload-config` 无需重启 |
 | 截图自动清理 | 启动时清理过期截图（保留 200 张 / 7 天内） |
@@ -216,9 +215,7 @@ elif "某关键词" in (order_detail_text or ""):
 | GET | `/trades/today` | 今日成交 | ✓ | 40s |
 | GET | `/orders/pending` | 当日委托 | ✓ | 40s |
 | POST | `/orders` | 下单（限价/市价） | ✓ | 40s |
-| POST | `/orders/sell-all` | 一键清仓 | ✓ | 40s |
 | POST | `/orders/cancel-all` | 撤单（全部/撤买/撤卖） | ✓ | 40s |
-| POST | `/orders/confirm` | Y 键确认委托 | ✓ | 30s |
 | POST | `/actions/send-key` | 手动发送按键 | ✓ | 30s |
 | POST | `/actions/click` | 鼠标点击坐标 | ✓ | 30s |
 | POST | `/actions/close-dialog` | 关闭买入/卖出子面板 | ✓ | 30s |
@@ -237,7 +234,6 @@ elif "某关键词" in (order_detail_text or ""):
 | `amount` | | 委托数量 |
 | `price` | | 委托价格（限价模式，最多 2 位小数） |
 | `price_type` | | `limit`=限价(默认), `market`=市价 |
-| `confirm` | | `true`=自动确认(默认), `false`=不确认 |
 
 ```bash
 # 市价买入
@@ -254,21 +250,6 @@ curl -X POST http://localhost:5000/orders \
 curl -X POST http://localhost:5000/orders \
   -H "Content-Type: application/json" \
   -d '{"code":"601991","status":"2","amount":"100","price_type":"market"}'
-```
-
-### POST /orders/sell-all — 一键清仓
-
-自动查询持仓 → 按 code 匹配 → 提取可用余额 → 市价卖出全部。
-
-| 参数 | 必填 | 说明 |
-|------|:---:|------|
-| `code` | ✓ | 股票代码 |
-| `confirm` | | `true`=自动确认(默认) |
-
-```bash
-curl -X POST http://localhost:5000/orders/sell-all \
-  -H "Content-Type: application/json" \
-  -d '{"code":"002366"}'
 ```
 
 ### POST /orders/cancel-all — 撤单
