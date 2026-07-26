@@ -71,7 +71,7 @@ class PositionService:
                 pass
             for _ in range(2):
                 window.click_input()
-                time.sleep(0.3)
+                time.sleep(0.15)  # SetForegroundWindow <0.1s，0.3s 冗余
                 if win32gui.GetForegroundWindow() == target_handle:
                     break
                 self.logger.warning(f"激活后前台句柄 {win32gui.GetForegroundWindow():#x} ≠ 目标 {target_handle:#x}，重试")
@@ -276,12 +276,17 @@ class PositionService:
     def _prepare_query_panel(self):
         """切换到 F4 查询面板
 
-        不调用 reset_window_state()——TaskQueue worker 在每个任务前已执行，
-        窗口已处于 F1 基准态且在前台。此处只需发送 F4。
+        连续查询跳过时窗口已在 F4，无需重发 F4。
         """
+        from src.api.task_queue import TaskQueue
+        _tq = TaskQueue.get_instance()
+        if _tq.skip_window_setup:
+            self.logger.info("连续查询跳过，窗口已在 F4 面板")
+            _tq.skip_window_setup = False
+            return
         with timed("F4 打开查询面板", self.logger):
             self.window_service.send_key("F4", background=True)
-            time.sleep(0.5)
+            time.sleep(0.2)  # F4 切换 <0.15s
 
     # ------------------------------------------------------------
     # 资金余额（control_id 批量读取，无需 OCR）

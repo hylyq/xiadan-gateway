@@ -203,6 +203,11 @@ class TaskQueue(Singleton):
     _OPERATION_GROUPS = {
         "place_order": "trade",
         "cancel_all_orders": "cancel",
+        # 查询类操作：都基于 F4 面板，同组内连续可跳过 F4+导航
+        "get_position": "query",
+        "get_balance": "query",
+        "get_today_trades": "query",
+        "get_today_orders": "query",
     }
 
     @classmethod
@@ -218,7 +223,8 @@ class TaskQueue(Singleton):
         if task.name == "cancel_all_orders":
             from src.services.trading_service import TradingService
             return TradingService._had_dialog
-        return True  # 未知操作 → 保守假设有弹窗
+        # 查询操作：不涉及弹窗，窗口状态始终可信
+        return False
 
     @staticmethod
     def _is_clean_dismiss() -> bool:
