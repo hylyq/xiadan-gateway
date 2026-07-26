@@ -12,7 +12,7 @@ from src.constants import (
     BALANCE_FIELDS,
     CAPTCHA_IMAGE_ID, CAPTCHA_INPUT_ID, CAPTCHA_OK_BUTTON_ID,
     CAPTCHA_CANCEL_BUTTON_ID, CAPTCHA_VERIFY_ID,
-    CAPTCHA_TEXT_KEYWORDS,
+    CAPTCHA_DIALOG_TITLE, CAPTCHA_TEXT_KEYWORDS,
     MAIN_WINDOW_TITLE_KEYWORD
 )
 from src.exceptions import ApiError, ErrorCode
@@ -197,16 +197,11 @@ class PositionService:
             self.logger.warning(f"刷新窗口引用失败: {e}")
 
     def _detect_captcha(self, window) -> bool:
-        """检测验证码弹窗（主窗口 + 独立弹出窗口双重检测）
+        """检测验证码弹窗（两阶段：快速窗口标题 → 完整 UIA 扫描）
 
-        验证码弹窗可能是独立顶层窗口（独立于主交易窗口），
-        仅搜索主窗口子孙控件会漏掉。此方法同时搜索主窗口和所有可见 Desktop 窗口。
-
-        Args:
-            window: 主交易窗口对象（若为 None 则先刷新）
-
-        Returns:
-            是否检测到验证码弹窗。找到后弹窗引用存入 self._captcha_window 供 OCR 使用。
+        poll_until 轮询时每秒调用数次，必须极快（<50ms）。
+        阶段1 仅枚举 Desktop 窗口标题（无 UIA 树遍历），
+        命中后才进入阶段2 做完整 descendants 扫描。
         """
         if window is None:
             self._refresh_window_ref()
@@ -214,51 +209,38 @@ class PositionService:
         if window is None:
             return False
 
-        # 构建搜索列表: 先独立弹窗(验证码弹窗标题"提示"),再主窗口子控件
-        popups = []
         try:
             from pywinauto import Desktop
+
+            # 阶段1: 快速窗口标题检测（~10ms，无 descendants 遍历）
+            # 验证码弹窗标题="提示"，与主窗口"网上股票交易系统"完全不同
             for w in Desktop(backend="uia").windows(visible_only=True):
-                if w.handle != window.handle:
-                    popups.append(w)
+                win_text = self._safe_window_text(w)
+                if CAPTCHA_DIALOG_TITLE in win_text:  # "提示"
+                    # 阶段2: 确认弹窗包含验证码图片控件
+                    image = self.window_service.find_element_in_window(
+                        w, CAPTCHA_IMAGE_ID)
+                    if image is not None:
+                        self.logger.info(
+                            f"通过窗口标题'提示'+control_id=2405检测到验证码弹窗"
+                        )
+                        self._captcha_window = w
+                        return True
         except Exception:
             pass
-        windows_to_search = popups + [window]
 
-        for w in windows_to_search:
-            win_text = self._safe_window_text(w)
-            is_main_window = MAIN_WINDOW_TITLE_KEYWORD in win_text
+        # 兜底: 主窗口子孙控件扫描（验证码弹窗可能是主窗口子窗口）
+        # 仅在 poll_until 超时后的 except 块中触发，不参与高频轮询
+        try:
+            image = self.window_service.find_element_in_window(
+                window, CAPTCHA_IMAGE_ID)
+            if image is not None:
+                self.logger.info("通过 control_id=2405 在主窗口中检测到验证码弹窗")
+                self._captcha_window = window
+                return True
+        except Exception:
+            pass
 
-            # 方法1: control_id=2405 检测（精确可靠，适用于所有窗口）
-            try:
-                image = self.window_service.find_element_in_window(w, CAPTCHA_IMAGE_ID)
-                if image is not None:
-                    self.logger.info(
-                        f"通过 control_id=2405 检测到验证码弹窗（title='{win_text}'）"
-                    )
-                    self._captcha_window = w
-                    return True
-            except Exception:
-                pass
-
-            # 方法2: 文本匹配——仅用于独立弹窗，主窗口不执行（防止状态栏误报）
-            if is_main_window:
-                continue
-            try:
-                matches = self.window_service.find_element_by_text(
-                    w, CAPTCHA_TEXT_KEYWORDS
-                )
-                if matches:
-                    self.logger.info(
-                        f"通过文本匹配检测到验证码弹窗（{len(matches)} 个匹配, "
-                        f"title='{win_text}'）"
-                    )
-                    self._captcha_window = w
-                    return True
-            except Exception:
-                pass
-
-        self.logger.info("未检测到验证码弹窗（control_id 和文本匹配均未命中）")
         return False
 
     @staticmethod
