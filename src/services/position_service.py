@@ -11,7 +11,8 @@ from src.utils.poll import poll_until, timed, PollTimeoutError
 from src.constants import (
     BALANCE_FIELDS,
     CAPTCHA_IMAGE_ID, CAPTCHA_INPUT_ID, CAPTCHA_OK_BUTTON_ID,
-    CAPTCHA_CANCEL_BUTTON_ID, CAPTCHA_VERIFY_ID, CAPTCHA_TEXT_KEYWORDS
+    CAPTCHA_CANCEL_BUTTON_ID, CAPTCHA_VERIFY_ID, CAPTCHA_TEXT_KEYWORDS,
+    MAIN_WINDOW_TITLE_KEYWORD
 )
 from src.exceptions import ApiError, ErrorCode
 from src.models.config import AppConfig
@@ -221,7 +222,7 @@ class PositionService:
             pass
 
         for w in windows_to_search:
-            # 方法1: control_id=2405 检测
+            # 方法1: control_id=2405 检测（精确可靠）
             try:
                 image = self.window_service.find_element_in_window(w, CAPTCHA_IMAGE_ID)
                 if image is not None:
@@ -231,13 +232,23 @@ class PositionService:
             except Exception:
                 pass
 
-            # 方法2: 文本匹配（关键词检测）
+            # 方法2: 文本匹配（需排除主窗口误报）
             try:
                 matches = self.window_service.find_element_by_text(
                     w, CAPTCHA_TEXT_KEYWORDS
                 )
                 if matches:
-                    self.logger.info(f"通过文本匹配检测到验证码弹窗（{len(matches)} 个匹配控件）")
+                    # 排除主窗口误报: 验证码文字可能出现在主窗口状态栏
+                    win_text = self._safe_window_text(w)
+                    if MAIN_WINDOW_TITLE_KEYWORD in win_text:
+                        self.logger.debug(
+                            f"文本匹配命中但窗口为主窗口（title='{win_text}'），跳过"
+                        )
+                        continue
+                    self.logger.info(
+                        f"通过文本匹配检测到验证码弹窗（{len(matches)} 个匹配控件, "
+                        f"title='{win_text}'）"
+                    )
                     self._captcha_window = w
                     return True
             except Exception:
@@ -245,6 +256,14 @@ class PositionService:
 
         self.logger.info("未检测到验证码弹窗（control_id 和文本匹配均未命中）")
         return False
+
+    @staticmethod
+    def _safe_window_text(w) -> str:
+        """安全获取窗口标题文本"""
+        try:
+            return w.window_text() or ""
+        except Exception:
+            return ""
 
     def _dismiss_popup_if_present(self, window) -> bool:
         """检测并关闭常见提示弹窗（委托给 WindowService 统一处理）"""
@@ -401,6 +420,13 @@ class PositionService:
         for attempt in range(max_retry):
             try:
                 with timed("OCR 识别", self.logger):
+                    # 截图空白检测：隐藏控件截到的图像素方差极低
+                    if self._is_image_blank(image_path):
+                        self.logger.warning(
+                            f"验证码截图近乎空白（疑似截取到隐藏控件），"
+                            f"将重试（尝试 {attempt + 1}/{max_retry}）"
+                        )
+                        continue
                     ocr_text = self.ocr_service.recognize(image_path)
                 if not ocr_text:
                     self.logger.warning(f"OCR 识别为空（尝试 {attempt + 1}/{max_retry}）")
@@ -461,6 +487,29 @@ class PositionService:
             f"验证码识别失败，已重试 {max_retry} 次",
             suggestion="可稍后重试查询，或检查交易窗口是否被遮挡"
         )
+
+    @staticmethod
+    def _is_image_blank(image_path: str, threshold: float = 50.0) -> bool:
+        """检测图片是否近乎空白（像素方差极低=截取到隐藏控件）
+
+        Args:
+            image_path: 图片路径
+            threshold: 方差阈值，低于此值视为空白
+
+        Returns:
+            True=空白，False=正常
+        """
+        try:
+            from PIL import Image
+            import numpy as np
+            img = Image.open(image_path).convert("L")
+            arr = np.array(img, dtype=np.float64)
+            variance = float(np.var(arr))
+            if variance < threshold:
+                return True
+            return False
+        except Exception:
+            return False
 
     def _click_button(self, window, control_id: int) -> bool:
         """点击按钮"""

@@ -97,10 +97,18 @@ class TradingService:
                         raise Exception("弹窗关闭后窗口消失")
                     _descendants = list(window.descendants())
 
-                # 从 descendants 检查撤单按钮是否存在
+                # 从 descendants 检查撤单按钮是否存在且可点击
                 btn = self.window_service.find_element_in_window(
                     window, control_id, descendants=_descendants)
                 if btn is not None:
+                    if not self._is_button_enabled(btn):
+                        self.logger.info(f"撤单按钮 {control_id} 已存在但灰显（无委托可撤）")
+                        return {
+                            "cancel_type": operation_name,
+                            "success": False,
+                            "cancelled_count": 0,
+                            "reason": "当前无可撤委托",
+                        }
                     self.logger.info("撤单界面加载成功，撤单按钮已就绪")
                     break
                 self.logger.warning(f"撤单界面未加载（未找到撤单按钮），将重试 F3")
@@ -198,6 +206,15 @@ class TradingService:
     def _dismiss_blocking_popup(self, window) -> bool:
         """检测并关闭阻塞型提示弹窗（委托给 WindowService 统一处理）"""
         return self.window_service.dismiss_blocking_popup(window)
+
+    @staticmethod
+    def _is_button_enabled(btn) -> bool:
+        """检查按钮是否可点击（非灰显）"""
+        try:
+            return btn.is_enabled()
+        except Exception:
+            # 降级：若 is_enabled() 不可用，假定可用
+            return True
 
     @staticmethod
     def _parse_cancelled_count(text: str):
