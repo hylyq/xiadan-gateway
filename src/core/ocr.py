@@ -114,21 +114,29 @@ class OcrService(Singleton):
     # ================================================================
 
     def recognize(self, image_path: str) -> str:
-        """识别验证码 4 位数字（填入券商软件的结果）"""
+        """识别验证码 4 位数字（填入券商软件的结果，失败时存档）"""
         result = self._recognize_internal(image_path, "path")
-        return "".join(filter(str.isdigit, result)) if result else ""
+        digits = "".join(filter(str.isdigit, result)) if result else ""
+        if not digits:
+            self._ocr_failures += 1
+            self._save_failed_archive_from_path(image_path)
+        return digits
 
     def recognize_bytes(self, image_data: bytes) -> str:
-        """识别图片字节流中的 4 位数字"""
+        """识别图片字节流中的 4 位数字（失败时存档）"""
         result = self._recognize_internal(image_data, "bytes")
-        return "".join(filter(str.isdigit, result)) if result else ""
+        digits = "".join(filter(str.isdigit, result)) if result else ""
+        if not digits:
+            self._ocr_failures += 1
+            self._save_failed_archive(image_data)
+        return digits
 
     def recognize_text(self, image_path: str) -> str:
-        """全文本识别（诊断用）"""
+        """全文本识别（诊断用，不存档）"""
         return self._recognize_internal(image_path, "path") or ""
 
     def recognize_text_bytes(self, image_data: bytes) -> str:
-        """全文本识别（诊断用）"""
+        """全文本识别（诊断用，不存档）"""
         return self._recognize_internal(image_data, "bytes") or ""
 
     # ================================================================
@@ -204,9 +212,7 @@ class OcrService(Singleton):
         if len(light_digits) == 4:
             return light_digits
 
-        # 识别失败: 存档 + 返回空
-        self._ocr_failures += 1
-        self._save_failed_archive(image_data)
+        # 识别失败: 返回空（存档由调用方 recognize/recognize_bytes 负责）
         return ""
 
     # ================================================================
@@ -260,7 +266,7 @@ class OcrService(Singleton):
             pass
 
     def _save_failed_archive(self, image_data: bytes):
-        """存档识别失败的验证码图片（生产模式，供离线训练）"""
+        """存档识别失败的验证码图片（供离线训练）"""
         try:
             import time
             os.makedirs(self._archive_dir, exist_ok=True)
@@ -269,6 +275,14 @@ class OcrService(Singleton):
             with open(path, "wb") as f:
                 f.write(image_data)
             self.logger.info(f"验证码识别失败，已存档: {path}")
+        except Exception:
+            pass
+
+    def _save_failed_archive_from_path(self, image_path: str):
+        """从文件路径读取并存档识别失败的验证码图片"""
+        try:
+            with open(image_path, "rb") as f:
+                self._save_failed_archive(f.read())
         except Exception:
             pass
 
