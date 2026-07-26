@@ -94,7 +94,7 @@ class TradingService:
                 for f3_attempt in range(3):
                     self.window_service.send_key("F3", background=True)
                     self.logger.info(f"已发送 F3 打开委托撤单界面 (尝试 {f3_attempt + 1}/3)")
-                    time.sleep(0.3)
+                    time.sleep(0.15)  # F3 界面切换 <0.1s
 
                     window = self.window_service.get_trading_window()
                     if window is None:
@@ -133,12 +133,11 @@ class TradingService:
             self.window_service.click_element(window, control_id, descendants=_descendants)
             self.logger.info(f"已点击 {operation_name} 按钮")
 
-        # 统一弹窗检测与处理：sleep(0.4) 等待渲染 + 一次 descendants 遍历
-        # 替代 poll_until(_has_cancel_dialog) + 二次遍历，与买入流程优化思路一致
+        # 统一弹窗检测与处理：sleep(0.2) 等待渲染 + 一次 descendants 遍历
         cancelled_count = None
         confirm_dialog_shown = False
         with timed("撤单弹窗检测与处理", self.logger):
-            time.sleep(0.4)
+            time.sleep(0.2)  # 弹窗 <0.15s 出现
 
             window = self.window_service.get_trading_window_fast()
             if window is not None:
