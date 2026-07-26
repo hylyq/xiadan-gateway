@@ -289,13 +289,32 @@ class Trader:
                                 self.logger.warning(f"点击 '否(N)' 失败，降级关闭弹窗: {e}")
                         break  # 委托确认处理完毕，结束循环
                     else:
-                        # B) 非委托确认弹窗 → 区分警告/错误
+                        # B) 非委托确认弹窗 → 区分致命错误 / 干净错误 / 价格警告 / 普通警告
                         _error_keywords = ["提交失败", "清算中", "暂不支持"]
                         _is_submit_error = (
                             order_detail_text
                             and any(kw in order_detail_text for kw in _error_keywords)
                         )
-                        if _is_submit_error:
+                        # 干净错误：用户侧问题（余额不足等），窗口状态未损坏
+                        _clean_error_keywords = ["余额不足", "不允许卖空"]
+                        _is_clean_error = (
+                            order_detail_text
+                            and any(kw in order_detail_text for kw in _clean_error_keywords)
+                        )
+                        if _is_clean_error:
+                            # 点「确定」关闭单按钮弹窗，干净退出
+                            self.logger.warning(
+                                f"检测到干净错误弹窗: {order_detail_text[:100]}"
+                            )
+                            self._close_non_confirm_popup(window, descendants=_descendants)
+                            _popup_text = self._extract_popup_error_text(_descendants)
+                            _error_code, _message, _suggestion = self._classify_submit_error(_popup_text)
+                            Trader._clean_dismiss = True
+                            raise ApiError(
+                                _error_code, _message, suggestion=_suggestion,
+                                details={"popup_title": title_text, "popup_text": _popup_text}
+                            )
+                        elif _is_submit_error:
                             _popup_text = self._extract_popup_error_text(_descendants)
                             _error_code, _message, _suggestion = self._classify_submit_error(_popup_text)
                             self.logger.warning(
