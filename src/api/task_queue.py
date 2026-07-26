@@ -77,6 +77,11 @@ class TaskQueue(Singleton):
         self._diagnostic_history: deque = deque(maxlen=20)
         self._diag_lock = threading.Lock()
 
+        # 连续同向订单优化：跟踪上次任务状态，避免重复的准备操作
+        # 如 买入→买入 时跳过 _reset_trading_window + 激活 + F1
+        self._last_task_info: Optional[dict] = None
+        self.skip_window_setup = False  # Trader 读取此标志决定是否跳过准备
+
         # 启动 worker 线程
         self._worker = threading.Thread(target=self._worker_loop, daemon=True, name="Task-Worker")
         self._worker.start()
@@ -146,8 +151,11 @@ class TaskQueue(Singleton):
             watchdog.start()
 
             try:
-                # 任务开始前重置 xiadan.exe 状态
-                self._reset_trading_window()
+                # 连续同向订单优化：买入→买入 或 卖出→卖出 跳过窗口准备
+                # 上次任务成功后窗口仍停留在对应界面，无需重置/激活/按键
+                self.skip_window_setup = self._can_skip_window_setup(task)
+                if not self.skip_window_setup:
+                    self._reset_trading_window()
 
                 # 执行任务
                 task.result = task.func()
@@ -160,7 +168,13 @@ class TaskQueue(Singleton):
             finally:
                 watchdog.cancel()
 
-                # 自动诊断：仅在任务失败时记录界面状态（成功时界面符合预期，无诊断价值）
+                # 跟踪任务状态：成功则记录，失败则清除（状态不确定）
+                if task.error is None and not task.is_timeout:
+                    self._update_task_state(task)
+                else:
+                    self._last_task_info = None
+
+                # 自动诊断：仅在任务失败时记录界面状态
                 if task.error is not None:
                     self._auto_diagnostic(task)
 
@@ -168,7 +182,6 @@ class TaskQueue(Singleton):
                     self._current_task = None
 
                 # 若看门狗已判定超时并设置错误，丢弃迟到的 result/error
-                # 避免：HTTP 已返回超时错误后，原任务又完成并覆盖状态
                 if task.is_timeout:
                     self.logger.warning(
                         f"任务 {task.name} 在超时后才完成，丢弃迟到结果 "
@@ -179,6 +192,37 @@ class TaskQueue(Singleton):
 
                 task.event.set()
                 self._queue.task_done()
+
+    def _can_skip_window_setup(self, task: Task) -> bool:
+        """连续同向无弹窗订单时可跳过窗口准备步骤
+
+        条件：
+        1. 当前任务和上次任务都是 place_order
+        2. 方向相同（同为买入或同为卖出）
+        3. 上次任务未出现过任何弹窗（快速交易模式）
+           — 出现弹窗意味着窗口状态不可信，必须重新准备
+        """
+        if task.name != "place_order":
+            return False
+        if self._last_task_info is None:
+            return False
+        if self._last_task_info.get("name") != "place_order":
+            return False
+        if self._last_task_info.get("status") != task.params.get("status"):
+            return False
+        # 上次订单出现过弹窗 → 窗口状态不可信，禁止跳过
+        if self._last_task_info.get("had_dialog", True):
+            return False
+        return True
+
+    def _update_task_state(self, task: Task) -> None:
+        """记录任务成功后的窗口状态，供下次 _can_skip_window_setup 使用"""
+        from src.core.trader import Trader
+        self._last_task_info = {
+            "name": task.name,
+            "status": task.params.get("status"),
+            "had_dialog": Trader._had_any_dialog,
+        }
 
     def _reset_trading_window(self) -> None:
         """重置 xiadan.exe 到基准态（F1 买入界面）

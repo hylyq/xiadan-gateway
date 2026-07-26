@@ -485,7 +485,13 @@ class WindowService:
 
     def input_text_to_element(self, window, control_id, text: str, delay: float = 0.3,
                               descendants=None) -> bool:
-        """向输入框输入文本（先清空已有内容，再输入新内容）"""
+        """向输入框输入文本（先清空已有内容，再输入新内容）
+
+        清空策略（由快到慢）：
+        1. WM_SETTEXT 直接置空（最快，跳过 UI 渲染）
+        2. type_keys {HOME}+{END}{BACKSPACE} 全选删除（兜底）
+        3. 验证：若券商自动填充重新出现，再清一次
+        """
         try:
             element = self.find_element_in_window(window, control_id, descendants=descendants)
             if element is None and descendants is not None:
@@ -494,7 +500,7 @@ class WindowService:
             if element is None:
                 raise Exception(f"未找到 control_id={control_id} 的输入框")
             element.set_focus()
-            time.sleep(0.1)
+            time.sleep(0.08)
 
             # 方案一：先用 WM_SETTEXT 直接设置空文本（最快）
             cleared = False
@@ -505,14 +511,24 @@ class WindowService:
             except Exception:
                 pass
 
-            # 方案二：用 type_keys 做双重清空
-            # 先用 {HOME}+{END}{BACKSPACE}（Home→Shift+End 全选→删除）
+            # 方案二：用 type_keys 做兜底清空
+            # {HOME}+{END}{BACKSPACE} = Home→Shift+End 全选→删除
             # 比 ^a{BACKSPACE}（Ctrl+A）更可靠，某些控件不支持 Ctrl+A
             element.type_keys("{HOME}+{END}{BACKSPACE}")
             time.sleep(0.15)
-            # 第二次清空：应对自动填充在第一次清空后重新写入的情况
-            element.type_keys("{HOME}+{END}{BACKSPACE}")
-            time.sleep(delay)
+
+            # 验证清空结果：检测券商自动填充是否在清空后重新写入
+            # （如输入新代码后券商立即推价格，恰好覆盖了清空操作）
+            try:
+                remaining = (element.window_text() or "").strip()
+                if remaining:
+                    self.logger.info(
+                        f"清空后仍有内容 '{remaining[:20]}'（券商自动填充），二次清除"
+                    )
+                    element.type_keys("{HOME}+{END}{BACKSPACE}")
+                    time.sleep(0.1)
+            except Exception:
+                pass
 
             element.type_keys(text)
             self.logger.info(

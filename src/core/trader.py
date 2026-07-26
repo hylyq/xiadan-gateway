@@ -31,11 +31,14 @@ from src.utils.poll import poll_until, timed, PollTimeoutError
 class Trader:
     """下单编排器"""
 
+    # 上次下单是否出现过弹窗（类变量，跨实例持久化）
+    # TaskQueue 读取此标志判断连续同向订单能否跳过准备操作
+    _had_any_dialog = False
+
     def __init__(self, window_service: WindowService):
         self.window_service = window_service
         self.config = AppConfig()
         self.logger = Logger.get_instance()
-        self._cached_descendants = None  # _has_any_dialog 找到弹窗时缓存，供循环复用
 
     def place_order(
         self,
@@ -71,6 +74,9 @@ class Trader:
             f"price={price}, price_type={price_type}, confirm={confirm}"
         )
 
+        # 重置弹窗标志：place_order 执行过程中若遇到任何弹窗，设为 True
+        Trader._had_any_dialog = False
+
         # 0. 价格格式校验（A 股限 2 位小数）
         if price_type == "limit" and price:
             sanitized_price = sanitize_price(price)
@@ -80,19 +86,24 @@ class Trader:
                 )
             price = sanitized_price
 
-        # 1. 激活 xiadan.exe（下单需要前台激活，因为 type_keys() 和 click_input() 需要焦点）
-        with timed("激活窗口", self.logger):
-            trading_paths = self.config.get_trading_app_paths()
-            if not trading_paths:
-                raise Exception("未配置 xiadan.exe 路径，请检查 config/app_config.json")
-            self.window_service.activate_window(trading_paths)
-            time.sleep(0.2)
+        # 1. 激活窗口 + F1/F2（连续同向订单可跳过，窗口已处于正确状态）
+        from src.api.task_queue import TaskQueue
+        _task_queue = TaskQueue.get_instance()
+        if _task_queue.skip_window_setup:
+            self.logger.info("连续同向订单，跳过窗口激活与 F1/F2")
+            _task_queue.skip_window_setup = False  # 单次消耗
+        else:
+            with timed("激活窗口", self.logger):
+                trading_paths = self.config.get_trading_app_paths()
+                if not trading_paths:
+                    raise Exception("未配置 xiadan.exe 路径，请检查 config/app_config.json")
+                self.window_service.activate_window(trading_paths)
+                time.sleep(0.2)
 
-        # 2. F1/F2 切换买卖界面（步骤 1 已激活窗口，用 background 跳过冗余激活）
-        with timed("F1/F2 切换买卖界面", self.logger):
-            self.window_service.send_key(
-                "F1" if status == "1" else "F2", background=True)
-            time.sleep(0.1)
+            with timed("F1/F2 切换买卖界面", self.logger):
+                self.window_service.send_key(
+                    "F1" if status == "1" else "F2", background=True)
+                time.sleep(0.1)
 
         # 3. 获取交易窗口 + 缓存 descendants（下单流程中 input/click 共用）
         window = self.window_service.get_trading_window()
@@ -104,29 +115,53 @@ class Trader:
         with timed("填写股票代码", self.logger):
             self.window_service.input_text_to_element(
                 window, CONTROL_ID_CODE, code, descendants=_descendants, delay=0.1)
-            time.sleep(0.3)  # 等待券商自动填充价格完成
+            # 轮询等待券商自动填充价格（多数 <0.1s），替代固定 sleep(0.3)
+            try:
+                _price_el = self.window_service.find_element_in_window(
+                    window, CONTROL_ID_PRICE, descendants=_descendants)
+                poll_until(
+                    lambda: _price_el and bool((_price_el.window_text() or "").strip()),
+                    timeout=0.3, interval=0.05,
+                    description="券商价格自动填充"
+                )
+            except PollTimeoutError:
+                pass  # 券商无自动填充或填充较慢，继续执行
 
-        # 4.1 防御：输入代码后券商自动查询价格，若服务器维护会弹出错误弹窗
-        # （如 "事务处理机转发数据失败"、"Begin failed!" 等）
+        # 4.1 防御：检查服务器错误弹窗（复用步骤3的 _descendants，无需重遍历）
+        # 如 "事务处理机转发数据失败"、"Begin failed!" 等，95%+ 订单无此弹窗
         with timed("代码输入后弹窗防御", self.logger):
-            dismissed = self._dismiss_server_error_popup(window)
-            if dismissed:
-                # 弹窗关闭后重新获取窗口，因为弹窗可能改变了控件树
-                window = self.window_service.get_trading_window()
-                if window is None:
-                    raise Exception("关闭弹窗后窗口消失")
-                _descendants = list(window.descendants())
+            _has_server_error = False
+            try:
+                for el in _descendants:
+                    try:
+                        text = el.window_text() or ""
+                        if any(kw in text for kw in SERVER_ERROR_POPUP_KEYWORDS):
+                            _has_server_error = True
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            if _has_server_error:
+                # 检测到弹窗关键词，走完整关闭流程并重新获取窗口
+                dismissed = self._dismiss_server_error_popup(window)
+                if dismissed:
+                    window = self.window_service.get_trading_window()
+                    if window is None:
+                        raise Exception("关闭弹窗后窗口消失")
+                    _descendants = list(window.descendants())
 
-        # 5. 确保价格模式匹配（券商可能记住上次模式，输入代码后自动切换）
+        # 5. 确保价格模式匹配（先用已有 descendants 检测，匹配时跳过重遍历）
         with timed("切换价格模式", self.logger):
             want_market = (price_type == "market")
-            # 刷新窗口 + descendants 一次性完成，同时用于 _is_market_mode 检测
-            window = self.window_service.get_trading_window()
-            if window is None:
-                raise Exception("切换价格模式后窗口消失")
-            _descendants = list(window.descendants())
+            # 先用步骤 3/4.1 缓存检测模式，F1 默认限价 → 限价单 100% 跳过重遍历
             is_market = self._is_market_mode(window, descendants=_descendants)
             if want_market != is_market:
+                # 模式不匹配才重新获取窗口并切换（市价单或上次遗留市价模式）
+                window = self.window_service.get_trading_window()
+                if window is None:
+                    raise Exception("切换价格模式前窗口消失")
+                _descendants = list(window.descendants())
                 is_market = self._switch_price_type(window, want_market)
                 # 模式切换后重新刷新（控件树可能已变化）
                 window = self.window_service.get_trading_window()
@@ -154,82 +189,51 @@ class Trader:
                 window, CONTROL_ID_SUBMIT, descendants=_descendants)
             self.logger.info("已点击下单按钮，等待弹窗")
 
-        # 轮询等待弹窗出现（替代固定 sleep(0.5)），超时则走后续无弹窗逻辑。
-        # 快速交易模式下（买入/卖出确认=否）不弹委托确认窗，仅可能弹警告窗。
-        # 警告弹窗在点击下单按钮后立即出现，0.3s 足够检测；
-        # 正常情况无弹窗则快速跳过，不再浪费等待时间。
-        _dialog_detected = True
-        with timed("等待下单弹窗", self.logger):
-            try:
-                poll_until(
-                    lambda: self._has_any_dialog(),
-                    timeout=0.3, interval=0.1,
-                    description="下单后弹窗"
-                )
-            except PollTimeoutError:
-                _dialog_detected = False
-
-        # 检测弹窗类型（按优先级）：
-        # A) cid=1365 标题 + 标题含"委托确认" → 真正的委托确认弹窗
-        #    → confirm=true 点"是(Y)"提交, confirm=false 点"否(N)"取消
-        # B) cid=1365 标题 + 标题不含"委托确认"（如"提示信息"）→ 警告弹窗
-        #    → 点"是(Y)"关闭警告，继续等待后续"委托确认"弹窗
-        #    → 【关键】此时不能设置 confirmed=True，因为订单尚未提交
-        # C) cid=1040 文本 + cid=6 按钮（无 cid=1365）→ 警告弹窗（无标题图）
-        #    → 点"是(Y)"继续
-        # D) cid=1040 文本（无按钮）→ 纯错误弹窗 → 报错退出
-        # E) 无弹窗 → 提交失败
+        # 统一弹窗检测与处理：sleep(0.4) 等待渲染 + 一次 UIA 遍历完成检测+处理
+        # 替代原来的 poll_until(_has_any_dialog) + 弹窗循环两次遍历。
         #
-        # 同花顺可能连续弹出多个弹窗（先警告→再委托确认），
-        # 关闭警告后必须继续检测后续弹窗。
-        confirm_dialog_detected = False  # 是否检测到真正的"委托确认"弹窗
+        # 快速交易模式（确认=否）：sleep → 遍历无弹窗 → 立即返回
+        # 确认模式：sleep → 遍历找到弹窗 → 点 Y/N → 返回
+        # 警告+确认：遍历找到警告 → 关闭 → 继续检测后续委托确认弹窗
+        #
+        # 弹窗类型优先级：
+        # A) cid=1365 标题 + 标题含"委托确认" → 确认弹窗（点 Y/N 后结束）
+        # B) cid=1365 标题 + 标题不含"委托确认" → 警告弹窗（关闭后继续检测）
+        # C) cid=1040 文本 + cid=6 按钮 → 警告弹窗无标题图（关闭后继续检测）
+        # D) cid=1040 文本（无按钮）→ 纯错误弹窗 → 报错退出
+        # E) 首轮无弹窗 → 快速交易模式，直接返回
+        confirm_dialog_detected = False
         order_detail_text = None
-        confirmed = False  # 仅在真正的"委托确认"弹窗上点Y后才设为True
-        warning_dismissed = False  # 是否关闭过警告/提示弹窗
+        confirmed = False
+        warning_dismissed = False
 
-        with timed("弹窗处理循环", self.logger):
-            window = self.window_service.get_trading_window_fast()  # poll_until 已确认窗口存在，快速获取
+        with timed("弹窗检测与处理", self.logger):
+            time.sleep(0.4)  # 等待弹窗渲染，比 poll+descendants 遍历快
+
             for check_attempt in range(5):
+                window = self.window_service.get_trading_window_fast()
                 if window is None:
                     time.sleep(0.1)
-                    window = self.window_service.get_trading_window_fast()
                     continue
 
-                # 快速交易模式：轮询超时（0.3s 无弹窗）+ 缓存未命中 →
-                # 确认无弹窗，省去后续 4 轮 descendants 遍历（~4s）
-                if check_attempt > 0 and not _dialog_detected and self._cached_descendants is None:
-                    self.logger.info("未检测到任何弹窗，跳过后续检测")
-                    break
-
-                # 每轮重置弹窗文本（避免上一轮的旧值污染兜底逻辑）
-                order_detail_text = None
-
-                # 缓存 descendants 一次遍历供本轮所有查找复用
-                # 优先复用 _has_any_dialog 找到弹窗时缓存的列表，避免第二次 UIA 遍历
-                if self._cached_descendants is not None:
-                    _descendants = self._cached_descendants
-                    self._cached_descendants = None  # 用完即清，防止复用脏数据
-                else:
-                    _descendants = list(window.descendants())
+                # 一次 descendants 遍历：检测 + 处理
+                _descendants = list(window.descendants())
 
                 # A/B) 检查是否有标题图（cid=1365）
                 title_el = self.window_service.find_element_in_window(
                     window, CONFIRM_DIALOG_TITLE_ID, descendants=_descendants
                 )
                 if title_el is not None:
-                    _dialog_detected = True  # 标记已检测到弹窗，防止后续轮次错误跳出
                     title_text = title_el.window_text() or ""
                     self.logger.info(f"检测到弹窗标题: {title_text}")
 
-                    # 读取弹窗详情文本（cid=1040）
-                    # 弹窗刚出现时 detail text 控件可能尚未渲染，稍等再读
+                    # 读取弹窗详情文本（cid=1040），弹窗刚出现时可能尚未渲染
                     time.sleep(0.1)
                     detail_el = self.window_service.find_element_in_window(
                         window, CONFIRM_DETAIL_TEXT_ID, descendants=_descendants
                     )
                     if detail_el is not None:
                         order_detail_text = detail_el.window_text() or ""
-                    # 兜底：cid=1040 未找到或为空时，扫描所有可见文本
                     if not order_detail_text:
                         order_detail_text = self.window_service.get_all_visible_texts(
                             window, descendants=_descendants
@@ -238,7 +242,7 @@ class Trader:
                         self.logger.info(f"弹窗详情: {order_detail_text[:200]}")
 
                     if "委托确认" in title_text:
-                        # A) 真正的委托确认弹窗 — 订单已提交，等待用户确认
+                        # A) 真正的委托确认弹窗 — 订单已提交
                         confirm_dialog_detected = True
                         if confirm:
                             try:
@@ -256,22 +260,17 @@ class Trader:
                                     window, CONFIRM_NO_BUTTON_ID, descendants=_descendants)
                                 self.logger.info("已点击 '否(N)' 取消委托（预览模式）")
                             except Exception as e:
-                                # ESC 不能走 send_key（会触发前台窗口校验，模态弹窗导致失败）
                                 self._close_non_confirm_popup(window, descendants=_descendants)
                                 self.logger.warning(f"点击 '否(N)' 失败，降级关闭弹窗: {e}")
                         break  # 委托确认处理完毕，结束循环
                     else:
-                        # B) 非委托确认弹窗 — 需要区分"警告"和"错误"
-                        #    警告（如价格超限提醒）：点Y关闭后继续等待委托确认
-                        #    错误（如提交失败/清算中）：点Y关闭后立即跳出，由后续
-                        #    「提交失败检测」统一处理，避免反复重试浪费 30s+
+                        # B) 非委托确认弹窗 → 区分警告/错误
                         _error_keywords = ["提交失败", "清算中", "暂不支持"]
                         _is_submit_error = (
                             order_detail_text
                             and any(kw in order_detail_text for kw in _error_keywords)
                         )
                         if _is_submit_error:
-                            # 提取干净的弹窗文本（过滤 UI 标签），分类报错
                             _popup_text = self._extract_popup_error_text(_descendants)
                             _error_code, _message, _suggestion = self._classify_submit_error(_popup_text)
                             self.logger.warning(
@@ -291,7 +290,6 @@ class Trader:
                             self._close_non_confirm_popup(window, descendants=_descendants)
                             warning_dismissed = True
                             time.sleep(0.2)
-                            window = self.window_service.get_trading_window_fast()
                             continue  # 继续检测后续弹窗
 
                 # C) 无标题图但有文本（cid=1040）+ 有"是(Y)"按钮 → 警告弹窗
@@ -299,7 +297,6 @@ class Trader:
                     window, CONFIRM_DETAIL_TEXT_ID, descendants=_descendants
                 )
                 if text_el is not None:
-                    _dialog_detected = True  # 标记已检测到弹窗（无标题图的弹窗）
                     dialog_text = text_el.window_text() or ""
                     if not dialog_text.strip():
                         time.sleep(0.1)
@@ -316,7 +313,6 @@ class Trader:
                         yes_btn.click_input()
                         warning_dismissed = True
                         time.sleep(0.2)
-                        window = self.window_service.get_trading_window_fast()  # 弹窗关闭后重新获取
                         continue  # 继续检测后续弹窗（如委托确认）
                     else:
                         # D) 纯错误弹窗（无Y/N按钮），关闭并报错
@@ -329,7 +325,14 @@ class Trader:
                             details={"popup_title": "（无标题）", "popup_text": dialog_text[:200]}
                         )
 
-                time.sleep(0.1)
+                # 当前轮未找到任何弹窗
+                if check_attempt == 0:
+                    # 首轮 sleep(0.4) 后无弹窗 → 快速交易模式，订单已直接提交
+                    self.logger.info("未检测到弹窗，快速交易模式下订单已直接提交")
+                    break
+                # check_attempt > 0 且无弹窗：前几轮关闭了警告弹窗，但委托确认未出现
+                # 可能是提交失败，跳出循环走后续检测
+                break
 
         # 检测"提交失败"弹窗：仅在未出现委托确认弹窗且未主动确认时检查。
         # 弹窗确认后订单已由券商前端校验；快速交易模式无弹窗则订单已直接提交。
@@ -373,6 +376,9 @@ class Trader:
                 # 无弹窗 = 快速交易模式（确认已关闭），订单已直接提交
                 self.logger.info("未检测到弹窗，快速交易模式下订单已直接提交")
                 confirmed = True  # 无弹窗时视为已提交
+
+        # 记录是否有弹窗出现：仅快速交易模式（完全无弹窗）可让下次同向订单跳过准备
+        Trader._had_any_dialog = confirm_dialog_detected or warning_dismissed
 
         action = "买入" if status == "1" else "卖出"
         mode = "市价" if is_market else "限价"
@@ -480,22 +486,15 @@ class Trader:
     def _has_any_dialog(self) -> bool:
         """检查下单后是否有弹窗出现
 
-        检测 cid=1365（标题图）或 cid=1040（详情文本），
-        用于 poll_until 替代固定 sleep。
-        使用快速窗口获取（不重试），避免轮询时每 0.1s 产生 1.5s 开销。
+        检测 cid=1365（标题图）或 cid=1040（详情文本），用于 confirm_order 等场景。
         """
         window = self.window_service.get_trading_window_fast()
         if window is None:
             return False
-        # 一次 descendants 遍历同时检查两个 cid（原来分两次需要 2s）
-        # 找到弹窗时缓存列表，供后续弹窗处理循环复用，省去第二次遍历
         try:
-            _descendants = list(window.descendants())
-            for el in _descendants:
+            for el in window.descendants():
                 try:
-                    cid = el.control_id()
-                    if cid in (CONFIRM_DIALOG_TITLE_ID, CONFIRM_DETAIL_TEXT_ID):
-                        self._cached_descendants = _descendants
+                    if el.control_id() in (CONFIRM_DIALOG_TITLE_ID, CONFIRM_DETAIL_TEXT_ID):
                         return True
                 except Exception:
                     continue
