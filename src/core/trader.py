@@ -157,13 +157,11 @@ class Trader:
             # 先用步骤 3/4.1 缓存检测模式，F1 默认限价 → 限价单 100% 跳过重遍历
             is_market = self._is_market_mode(window, descendants=_descendants)
             if want_market != is_market:
-                # 模式不匹配才重新获取窗口并切换（市价单或上次遗留市价模式）
-                window = self.window_service.get_trading_window()
-                if window is None:
-                    raise Exception("切换价格模式前窗口消失")
-                _descendants = list(window.descendants())
-                is_market = self._switch_price_type(window, want_market)
-                # 模式切换后重新刷新（控件树可能已变化）
+                # 传入已有 _descendants 省去 _switch_price_type 内部的首次遍历（省 ~1s）
+                # 无需 caller 提前 get_trading_window（_switch_price_type 内部自己处理）
+                is_market = self._switch_price_type(
+                    window, want_market, descendants=_descendants)
+                # 模式切换后刷新控件树（价格/数量字段可见性可能已变化）
                 window = self.window_service.get_trading_window()
                 if window is None:
                     raise Exception("切换价格模式后窗口消失")
@@ -393,38 +391,51 @@ class Trader:
         self.logger.info(f"下单完成: {result}")
         return result
 
-    def _switch_price_type(self, window, want_market: bool) -> bool:
+    def _switch_price_type(self, window, want_market: bool, descendants=None) -> bool:
         """切换限价/市价模式
 
         点击 control_id=1400 在限价/市价之间切换（toggle），双向通用。
-        服务器正常时标签在「买入价格」↔「对手方最优」之间切换，
-        服务器异常时不变或弹窗。
-
-        策略：点击后先用短超时检测弹窗（服务器拒绝时弹窗 <0.5s），
-        无弹窗再用长超时等待标签变化。
+        策略：click → 短 sleep + 新鲜窗口检查标签变化（避免 pywinauto UIA 缓存）。
 
         Args:
             window: 当前窗口对象
-            want_market: True=希望切到市价, False=希望切到限价
-
-        Returns:
-            切换后是否处于市价模式
+            want_market: True=希望切到市价
+            descendants: 可选，已有的 descendants 列表（省一次 UIA 遍历）
         """
         _mode_name = "市价" if want_market else "限价"
         for attempt in range(2):
             self.logger.info(
                 f"尝试切换到{_mode_name}模式（点击 1400, 尝试 {attempt + 1}/2）"
             )
-            label = self.window_service.find_element_in_window(window, CONTROL_ID_PRICE_TYPE)
+            label = self.window_service.find_element_in_window(
+                window, CONTROL_ID_PRICE_TYPE, descendants=descendants)
             if label is None:
                 raise Exception(f"未找到价格类型控件 control_id={CONTROL_ID_PRICE_TYPE}")
             label.click_input()
 
-            # 第一步：短超时检测弹窗（服务器拒绝时弹窗立即出现）
+            # 标签切换在 <0.2s 内完成，用短 sleep + 新鲜窗口检查
+            # pywinauto 的 element ref 有 UIA 缓存问题，必须重新连接窗口
+            time.sleep(0.25)
+            _fresh = self.window_service.get_trading_window_fast()
+            if _fresh is not None and want_market == self._is_market_mode(_fresh):
+                self.logger.info(f"{_mode_name}模式切换成功")
+                return want_market
+
+            # 一次未就绪，再等 0.3s 重试（极少数慢网络场景）
             time.sleep(0.3)
+            _fresh = self.window_service.get_trading_window_fast()
+            if _fresh is not None and want_market == self._is_market_mode(_fresh):
+                self.logger.info(f"{_mode_name}模式切换成功")
+                return want_market
+
+            self.logger.warning(
+                f"尝试 {attempt + 1}/2 标签未变化，检查是否有服务器错误弹窗"
+            )
+            # 标签不变 → 罕见路径：服务器可能拒绝了切换（弹窗）
             window = self.window_service.get_trading_window()
-            if window is not None and self._dismiss_server_error_popup(window):
-                window = self.window_service.get_trading_window()
+            if window is None:
+                raise Exception("切换价格模式时窗口消失")
+            if self._dismiss_server_error_popup(window):
                 try:
                     _desc = list(window.descendants()) if window else []
                     _text = self._extract_popup_error_text(_desc)
@@ -437,30 +448,6 @@ class Trader:
                     suggestion=_sug + (" 或改用限价模式（price_type=limit）。" if want_market else ""),
                     details={"phase": "switch_price_type", "attempt": attempt + 1}
                 )
-
-            # 第二步：等待标签变化到目标状态
-            # 缓存 label 元素引用，轮询时只读文本（避免每次 get_trading_window + descendants 遍历）
-            _label = self.window_service.find_element_in_window(window, CONTROL_ID_PRICE_TYPE)
-            try:
-                poll_until(
-                    lambda: (_label is not None
-                             and want_market == (
-                                 "市价" in (_label.window_text() or "")
-                                 or "最优" in (_label.window_text() or "")
-                             )),
-                    timeout=3.0, interval=0.3,
-                    description=f"切换到{_mode_name}（尝试 {attempt + 1}/2）"
-                )
-                self.logger.info(f"{_mode_name}模式切换成功")
-                return want_market
-            except PollTimeoutError:
-                self.logger.warning(
-                    f"尝试 {attempt + 1}/2 超时，标签未变化"
-                )
-                window = self.window_service.get_trading_window()
-                if window is None:
-                    raise Exception("切换价格模式时窗口消失")
-                _label = None  # 下次重试重新获取
 
         raise ApiError(
             ErrorCode.MODE_SWITCH_FAILED,
