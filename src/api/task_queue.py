@@ -194,35 +194,50 @@ class TaskQueue(Singleton):
                 self._queue.task_done()
 
     def _can_skip_window_setup(self, task: Task) -> bool:
-        """连续同向无弹窗订单时可跳过窗口准备步骤
+        """连续同向无弹窗操作时可跳过窗口准备步骤
 
-        条件：
-        1. 当前任务和上次任务都是 place_order
-        2. 方向相同（同为买入或同为卖出）
-        3. 上次任务未出现过任何弹窗（快速交易模式）
-           — 出现弹窗意味着窗口状态不可信，必须重新准备
+        支持的操作类型：
+        - place_order: 连续同向（同为买入或同为卖出）且上笔无弹窗 → 跳过
+        - cancel_all_orders: 连续撤单且上笔无弹窗 → 跳过
+
+        出现弹窗意味着窗口状态不可信，必须重新准备。
         """
-        if task.name != "place_order":
-            return False
         if self._last_task_info is None:
             return False
-        if self._last_task_info.get("name") != "place_order":
-            return False
-        if self._last_task_info.get("status") != task.params.get("status"):
-            return False
-        # 上次订单出现过弹窗 → 窗口状态不可信，禁止跳过
-        if self._last_task_info.get("had_dialog", True):
-            return False
-        return True
+
+        last_name = self._last_task_info.get("name")
+
+        if task.name == "place_order":
+            if last_name != "place_order":
+                return False
+            if self._last_task_info.get("status") != task.params.get("status"):
+                return False
+            if self._last_task_info.get("had_dialog", True):
+                return False
+            return True
+
+        if task.name == "cancel_all_orders":
+            if last_name != "cancel_all_orders":
+                return False
+            if self._last_task_info.get("had_dialog", True):
+                return False
+            return True
+
+        return False
 
     def _update_task_state(self, task: Task) -> None:
         """记录任务成功后的窗口状态，供下次 _can_skip_window_setup 使用"""
-        from src.core.trader import Trader
-        self._last_task_info = {
-            "name": task.name,
-            "status": task.params.get("status"),
-            "had_dialog": Trader._had_any_dialog,
-        }
+        state = {"name": task.name}
+
+        if task.name == "place_order":
+            from src.core.trader import Trader
+            state["status"] = task.params.get("status")
+            state["had_dialog"] = Trader._had_any_dialog
+        elif task.name == "cancel_all_orders":
+            from src.services.trading_service import TradingService
+            state["had_dialog"] = TradingService._had_dialog
+
+        self._last_task_info = state
 
     def _reset_trading_window(self) -> None:
         """重置 xiadan.exe 到基准态（F1 买入界面）
