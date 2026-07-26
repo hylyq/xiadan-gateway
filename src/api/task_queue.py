@@ -196,55 +196,56 @@ class TaskQueue(Singleton):
                 task.event.set()
                 self._queue.task_done()
 
+    # ── 连续跳过：操作分组 ──────────────────────────────────
+    # 同组内上笔干净退出 → 跳过窗口重置。不同组 = 接口不同 → 必须重置。
+    # 例：trade 组内买→卖只需 F2，但 trade→cancel 必须完整重置（F1≠F3）。
+
+    _OPERATION_GROUPS = {
+        "place_order": "trade",
+        "cancel_all_orders": "cancel",
+    }
+
+    @classmethod
+    def _get_operation_group(cls, task_name: str) -> str:
+        return cls._OPERATION_GROUPS.get(task_name, task_name)
+
+    @staticmethod
+    def _read_had_dialog(task: Task) -> bool:
+        """读取任务执行后的弹窗标志（统一入口）"""
+        if task.name == "place_order":
+            from src.core.trader import Trader
+            return Trader._had_any_dialog
+        if task.name == "cancel_all_orders":
+            from src.services.trading_service import TradingService
+            return TradingService._had_dialog
+        return True  # 未知操作 → 保守假设有弹窗
+
     @staticmethod
     def _is_clean_dismiss() -> bool:
-        """检查本次失败是否为「干净退出」（价格超限等正常关闭弹窗的场景）
-
-        干净退出时窗口状态仍可信，下次同向操作可跳过准备。
-        """
+        """价格超限等「干净退出」——弹窗正常关闭，窗口状态可信"""
         from src.core.trader import Trader
         if Trader._clean_dismiss:
-            Trader._clean_dismiss = False  # 单次消耗
+            Trader._clean_dismiss = False
             return True
         return False
 
     def _can_skip_window_setup(self, task: Task) -> bool:
-        """上笔干净退出时跳过窗口重置+激活
-
-        - place_order: 上笔为干净退出的任意 place_order（不关心方向，
-          F1/F2 切换由 Trader 自己判断）
-        - cancel_all_orders: 连续撤单且上笔无弹窗 → 跳过
-        - 出现弹窗 → 窗口状态不可信，禁止跳过
-        """
+        """上笔干净退出 + 同组操作 → 跳过窗口重置"""
         if self._last_task_info is None:
             return False
-
-        last_name = self._last_task_info.get("name")
-
-        if task.name == "place_order":
-            if last_name != "place_order":
-                return False
-            return not self._last_task_info.get("had_dialog", True)
-
-        if task.name == "cancel_all_orders":
-            if last_name != "cancel_all_orders":
-                return False
-            return not self._last_task_info.get("had_dialog", True)
-
-        return False
+        if self._get_operation_group(task.name) != self._last_task_info.get("group"):
+            return False
+        return not self._last_task_info.get("had_dialog", True)
 
     def _update_task_state(self, task: Task) -> None:
-        """记录任务成功后的窗口状态，供下次 _can_skip_window_setup 使用"""
-        state = {"name": task.name}
-
+        """记录任务成功后的窗口状态"""
+        state = {
+            "name": task.name,
+            "group": self._get_operation_group(task.name),
+            "had_dialog": self._read_had_dialog(task),
+        }
         if task.name == "place_order":
-            from src.core.trader import Trader
             state["status"] = task.params.get("status")
-            state["had_dialog"] = Trader._had_any_dialog
-        elif task.name == "cancel_all_orders":
-            from src.services.trading_service import TradingService
-            state["had_dialog"] = TradingService._had_dialog
-
         self._last_task_info = state
 
     def _reset_trading_window(self) -> None:
