@@ -252,7 +252,8 @@ class Trader:
                     title_text = title_el.window_text() or ""
                     self.logger.info(f"检测到弹窗标题: {title_text}")
 
-                    # 读取弹窗详情文本（cid=1040），弹窗刚出现时可能尚未渲染
+                    # 读取弹窗文本：先试 cid=1040，失败则从弹窗容器内提取
+                    # （避免 get_all_visible_texts 混入主窗口 UI 标签）
                     time.sleep(0.1)
                     detail_el = self.window_service.find_element_in_window(
                         window, CONFIRM_DETAIL_TEXT_ID, descendants=_descendants
@@ -260,9 +261,7 @@ class Trader:
                     if detail_el is not None:
                         order_detail_text = detail_el.window_text() or ""
                     if not order_detail_text:
-                        order_detail_text = self.window_service.get_all_visible_texts(
-                            window, descendants=_descendants
-                        )
+                        order_detail_text = self._extract_dialog_text(title_el)
                     if order_detail_text:
                         self.logger.info(f"弹窗详情: {order_detail_text[:200]}")
 
@@ -303,16 +302,19 @@ class Trader:
                         )
                         if _is_clean_error:
                             # 点「确定」关闭单按钮弹窗，干净退出
+                            # order_detail_text 来自弹窗容器内提取，不含主窗口 UI
                             self.logger.warning(
                                 f"检测到干净错误弹窗: {order_detail_text[:100]}"
                             )
                             self._close_non_confirm_popup(window, descendants=_descendants)
-                            _popup_text = self._extract_popup_error_text(_descendants)
-                            _error_code, _message, _suggestion = self._classify_submit_error(_popup_text)
+                            _error_code, _message, _suggestion = self._classify_submit_error(
+                                order_detail_text
+                            )
                             Trader._clean_dismiss = True
                             raise ApiError(
                                 _error_code, _message, suggestion=_suggestion,
-                                details={"popup_title": title_text, "popup_text": _popup_text}
+                                details={"popup_title": title_text,
+                                         "popup_text": order_detail_text}
                             )
                         elif _is_submit_error:
                             _popup_text = self._extract_popup_error_text(_descendants)
@@ -590,6 +592,33 @@ class Trader:
         except Exception:
             pass
         return False
+
+    @staticmethod
+    def _extract_dialog_text(title_el) -> str:
+        """从弹窗标题元素的父容器中提取弹窗文本
+
+        只在弹窗容器内查找，避免混入主窗口 UI 标签。
+        与 _extract_popup_error_text（全局扫描+黑名单过滤）互补：
+        前者用于获取纯净弹窗文本，后者用于错误分类时的兜底提取。
+        """
+        try:
+            parent = title_el.parent()
+            texts = []
+            for c in parent.descendants():
+                try:
+                    t = (c.window_text() or "").strip()
+                    # 过滤：空文本、过长文本、标题本身、菜单标签
+                    if not t or len(t) > 200:
+                        continue
+                    if t in ("提示", "提示信息", "委托确认", "是(Y)", "否(N)",
+                              "确定", "取消"):
+                        continue
+                    texts.append(t)
+                except Exception:
+                    continue
+            return "\n".join(texts)
+        except Exception:
+            return ""
 
     @staticmethod
     def _extract_popup_error_text(descendants) -> str:
