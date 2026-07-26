@@ -214,8 +214,8 @@ class Trader:
                 window, CONTROL_ID_SUBMIT, descendants=_descendants)
             self.logger.info("已点击下单按钮，等待弹窗")
 
-        # 统一弹窗检测与处理：sleep(0.4) 等待渲染 + 一次 UIA 遍历完成检测+处理
-        # 替代原来的 poll_until(_has_any_dialog) + 弹窗循环两次遍历。
+        # 统一弹窗检测与处理：sleep(0.2) 等待渲染 + 一次 UIA 遍历完成检测+处理
+        # （弹窗实际 <0.15s 出现，未捕获时循环第 2 轮会兜底）
         #
         # 快速交易模式（确认=否）：sleep → 遍历无弹窗 → 立即返回
         # 确认模式：sleep → 遍历找到弹窗 → 点 Y/N → 返回
@@ -233,7 +233,7 @@ class Trader:
         warning_dismissed = False
 
         with timed("弹窗检测与处理", self.logger):
-            time.sleep(0.4)  # 等待弹窗渲染，比 poll+descendants 遍历快
+            time.sleep(0.2)  # 等待弹窗渲染（实际 <0.15s），省 0.2s vs 0.4s
 
             for check_attempt in range(5):
                 window = self.window_service.get_trading_window_fast()
@@ -403,7 +403,7 @@ class Trader:
 
                 # 当前轮未找到任何弹窗
                 if check_attempt == 0:
-                    # 首轮 sleep(0.4) 后无弹窗 → 快速交易模式，订单已直接提交
+                    # 首轮 sleep(0.2) 后无弹窗 → 快速交易模式，订单已直接提交
                     self.logger.info("未检测到弹窗，快速交易模式下订单已直接提交")
                     break
                 # check_attempt > 0 且无弹窗：前几轮关闭了警告弹窗，但委托确认未出现
