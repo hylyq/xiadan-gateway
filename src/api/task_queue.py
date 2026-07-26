@@ -169,7 +169,10 @@ class TaskQueue(Singleton):
                 watchdog.cancel()
 
                 # 跟踪任务状态：成功则记录，失败则清除（状态不确定）
+                # 例外：价格超限等「干净退出」——窗口状态可信，保留以便下次同向跳过
                 if task.error is None and not task.is_timeout:
+                    self._update_task_state(task)
+                elif self._is_clean_dismiss():
                     self._update_task_state(task)
                 else:
                     self._last_task_info = None
@@ -192,6 +195,18 @@ class TaskQueue(Singleton):
 
                 task.event.set()
                 self._queue.task_done()
+
+    @staticmethod
+    def _is_clean_dismiss() -> bool:
+        """检查本次失败是否为「干净退出」（价格超限等正常关闭弹窗的场景）
+
+        干净退出时窗口状态仍可信，下次同向操作可跳过准备。
+        """
+        from src.core.trader import Trader
+        if Trader._clean_dismiss:
+            Trader._clean_dismiss = False  # 单次消耗
+            return True
+        return False
 
     def _can_skip_window_setup(self, task: Task) -> bool:
         """连续同向无弹窗操作时可跳过窗口准备步骤

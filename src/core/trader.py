@@ -34,6 +34,9 @@ class Trader:
     # 上次下单是否出现过弹窗（类变量，跨实例持久化）
     # TaskQueue 读取此标志判断连续同向订单能否跳过准备操作
     _had_any_dialog = False
+    # 价格超限等警告是否被干净关闭（点「否」而非 ESC 乱关）
+    # True 时窗口状态仍可信，TaskQueue 不会清除 _last_task_info
+    _clean_dismiss = False
 
     def __init__(self, window_service: WindowService):
         self.window_service = window_service
@@ -76,6 +79,7 @@ class Trader:
 
         # 重置弹窗标志：place_order 执行过程中若遇到任何弹窗，设为 True
         Trader._had_any_dialog = False
+        Trader._clean_dismiss = False
 
         # 0. 价格格式校验（A 股限 2 位小数）
         if price_type == "limit" and price:
@@ -294,22 +298,44 @@ class Trader:
                                 details={"popup_title": title_text, "popup_text": _popup_text}
                             )
                         else:
-                            # B-warning) 非委托确认弹窗 + 无错误关键词 → 警告（如价格超限）
-                            # 优先点击「是(Y)」继续（承认警告、继续提交），
-                            # 降级 _close_non_confirm_popup（它用 IDOK/IDCANCEL/ESC，
-                            # 但 Y/N 按钮不是标准 cid=1/2，所以优先点击 Y 更可靠）
-                            self.logger.warning(
-                                f"检测到警告弹窗: {title_text}，"
-                                f"点击 '是(Y)' 继续"
+                            # B-warning) 非委托确认弹窗 + 无错误关键词 → 区分价格警告/通用警告
+                            _price_keywords = ["涨跌停", "超出", "价格"]
+                            _is_price_warning = (
+                                order_detail_text
+                                and any(kw in order_detail_text for kw in _price_keywords)
                             )
-                            try:
-                                self.window_service.click_element(
-                                    window, CONFIRM_YES_BUTTON_ID, descendants=_descendants)
-                            except Exception:
-                                self._close_non_confirm_popup(window, descendants=_descendants)
-                            warning_dismissed = True
-                            time.sleep(0.2)
-                            continue  # 继续检测后续弹窗（委托确认）
+                            if _is_price_warning:
+                                # 价格超限警告 → 点「否(N)」取消，干净退出
+                                # 弹窗是正常关闭的，窗口状态可信，下次同向可跳过
+                                self.logger.warning(
+                                    f"价格超限警告: {order_detail_text[:100]}，"
+                                    f"点击 '否(N)' 取消委托"
+                                )
+                                try:
+                                    self.window_service.click_element(
+                                        window, CONFIRM_NO_BUTTON_ID, descendants=_descendants)
+                                except Exception:
+                                    self._close_non_confirm_popup(window, descendants=_descendants)
+                                Trader._clean_dismiss = True
+                                raise ApiError(
+                                    ErrorCode.PRICE_OUT_OF_RANGE,
+                                    f"价格超出涨跌停限制: {order_detail_text[:150]}",
+                                    suggestion="请调整委托价格至涨跌停范围内后重试。"
+                                )
+                            else:
+                                # 通用警告 → 点「是(Y)」继续提交
+                                self.logger.warning(
+                                    f"检测到警告弹窗: {title_text}，"
+                                    f"点击 '是(Y)' 继续"
+                                )
+                                try:
+                                    self.window_service.click_element(
+                                        window, CONFIRM_YES_BUTTON_ID, descendants=_descendants)
+                                except Exception:
+                                    self._close_non_confirm_popup(window, descendants=_descendants)
+                                warning_dismissed = True
+                                time.sleep(0.2)
+                                continue  # 继续检测后续弹窗（委托确认）
 
                 # C) 无标题图但有文本（cid=1040）+ 有"是(Y)"按钮 → 警告弹窗
                 text_el = self.window_service.find_element_in_window(

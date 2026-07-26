@@ -27,6 +27,7 @@ class ErrorCode:
     OUTSIDE_TRADING_HOURS = "OUTSIDE_TRADING_HOURS" # 非交易时段
     T1_RESTRICTION = "T1_RESTRICTION"             # T+1 制度限制（当日买入次日可卖）
     INSUFFICIENT_SHARES = "INSUFFICIENT_SHARES"   # 可卖数量不足
+    PRICE_OUT_OF_RANGE = "PRICE_OUT_OF_RANGE"     # 价格超出涨跌停限制（干净退出）
     SERVER_UNAVAILABLE = "SERVER_UNAVAILABLE"       # 券商服务器不可用（维护中）
     OCR_FAILED = "OCR_FAILED"                       # 验证码识别失败
     INTERNAL_ERROR = "INTERNAL_ERROR"               # 未知异常
