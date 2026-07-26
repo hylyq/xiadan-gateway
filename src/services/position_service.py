@@ -222,10 +222,17 @@ class PositionService:
             pass
 
         for w in windows_to_search:
-            # 方法1: control_id=2405 检测（精确可靠）
+            # 方法1: control_id=2405 检测
             try:
                 image = self.window_service.find_element_in_window(w, CAPTCHA_IMAGE_ID)
                 if image is not None:
+                    # 排除主窗口误报（验证码控件可能残留在主窗口 UIA 树中）
+                    win_text = self._safe_window_text(w)
+                    if MAIN_WINDOW_TITLE_KEYWORD in win_text:
+                        self.logger.debug(
+                            f"control_id=2405 命中但窗口为主窗口（title='{win_text}'），跳过"
+                        )
+                        continue
                     self.logger.info("通过 control_id=2405 检测到验证码弹窗")
                     self._captcha_window = w
                     return True
@@ -420,11 +427,11 @@ class PositionService:
         for attempt in range(max_retry):
             try:
                 with timed("OCR 识别", self.logger):
-                    # 截图空白检测：隐藏控件截到的图像素方差极低
-                    if self._is_image_blank(image_path):
+                    # 截图尺寸校验：真实验证码 ~1KB，主窗口截图 > 50KB
+                    if not self._is_captcha_image_valid(image_path):
                         self.logger.warning(
-                            f"验证码截图近乎空白（疑似截取到隐藏控件），"
-                            f"将重试（尝试 {attempt + 1}/{max_retry}）"
+                            f"验证码截图异常（{os.path.getsize(image_path)} bytes，"
+                            f"疑似截取到主窗口），将重试（尝试 {attempt + 1}/{max_retry}）"
                         )
                         continue
                     ocr_text = self.ocr_service.recognize(image_path)
@@ -460,19 +467,24 @@ class PositionService:
                             self.logger.info("验证码验证成功")
                             return True
 
-                # 失败：点击取消，重新识别
+                # 失败：点击取消，重新触发验证码
                 self.logger.warning(f"验证码错误（尝试 {attempt + 1}/{max_retry}）")
                 self._click_button(window, CAPTCHA_CANCEL_BUTTON_ID)
                 time.sleep(0.2)
 
-                # 重新获取验证码图片
-                self._refresh_window_ref()
-                window = self._cached_window
-                image_element = self.window_service.find_element_in_window(window, CAPTCHA_IMAGE_ID)
-                if image_element is None:
-                    # 弹窗已关闭，视为成功
+                # 重新检测验证码弹窗（避免用 _refresh_window_ref 切到主窗口）
+                window = self.window_service.get_trading_window()
+                if window and self._detect_captcha(window):
+                    window = self._captcha_window or window
+                    image_element = self.window_service.find_element_in_window(
+                        window, CAPTCHA_IMAGE_ID)
+                    if image_element is None:
+                        return True
+                    image_element.capture_as_image().save(image_path)
+                else:
+                    # 验证码弹窗已消失，视为成功
+                    self.logger.info("验证码弹窗已消失，视为处理成功")
                     return True
-                image_element.capture_as_image().save(image_path)
 
             except Exception as e:
                 self.logger.error(f"验证码处理异常: {e}")
@@ -489,27 +501,20 @@ class PositionService:
         )
 
     @staticmethod
-    def _is_image_blank(image_path: str, threshold: float = 50.0) -> bool:
-        """检测图片是否近乎空白（像素方差极低=截取到隐藏控件）
+    def _is_captcha_image_valid(image_path: str, max_bytes: int = 5000) -> bool:
+        """校验验证码图片是否合理（非主窗口截图）
 
-        Args:
-            image_path: 图片路径
-            threshold: 方差阈值，低于此值视为空白
+        真实验证码图片约 1KB，主窗口截图 > 50KB。
+        文件过大说明截图对象错误（隐藏控件/主窗口）。
 
         Returns:
-            True=空白，False=正常
+            True=合理，False=异常
         """
         try:
-            from PIL import Image
-            import numpy as np
-            img = Image.open(image_path).convert("L")
-            arr = np.array(img, dtype=np.float64)
-            variance = float(np.var(arr))
-            if variance < threshold:
-                return True
-            return False
+            size = os.path.getsize(image_path)
+            return size <= max_bytes
         except Exception:
-            return False
+            return True  # 无法判断时假定有效
 
     def _click_button(self, window, control_id: int) -> bool:
         """点击按钮"""
