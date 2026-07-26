@@ -212,7 +212,7 @@ class PositionService:
         if window is None:
             return False
 
-        # 构建搜索列表: 优先独立弹窗(验证码弹窗标题"提示"),再主窗口
+        # 构建搜索列表: 先独立弹窗(验证码弹窗标题"提示"),再主窗口子控件
         popups = []
         try:
             from pywinauto import Desktop
@@ -227,16 +227,10 @@ class PositionService:
             win_text = self._safe_window_text(w)
             is_main_window = MAIN_WINDOW_TITLE_KEYWORD in win_text
 
-            # 方法1: control_id=2405 检测
+            # 方法1: control_id=2405 检测（精确可靠，适用于所有窗口）
             try:
                 image = self.window_service.find_element_in_window(w, CAPTCHA_IMAGE_ID)
                 if image is not None:
-                    # 主窗口中可能残留隐藏的 2405 控件，跳过
-                    if is_main_window:
-                        self.logger.debug(
-                            f"control_id=2405 命中主窗口（疑似残留控件），跳过"
-                        )
-                        continue
                     self.logger.info(
                         f"通过 control_id=2405 检测到验证码弹窗（title='{win_text}'）"
                     )
@@ -245,18 +239,14 @@ class PositionService:
             except Exception:
                 pass
 
-            # 方法2: 文本匹配（精确关键词，"检测到您正在拷贝数据"）
+            # 方法2: 文本匹配——仅用于独立弹窗，主窗口不执行（防止状态栏误报）
+            if is_main_window:
+                continue
             try:
                 matches = self.window_service.find_element_by_text(
                     w, CAPTCHA_TEXT_KEYWORDS
                 )
                 if matches:
-                    # 排除主窗口误报
-                    if is_main_window:
-                        self.logger.debug(
-                            f"文本匹配命中主窗口（title='{win_text}'），跳过"
-                        )
-                        continue
                     self.logger.info(
                         f"通过文本匹配检测到验证码弹窗（{len(matches)} 个匹配, "
                         f"title='{win_text}'）"
