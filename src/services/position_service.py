@@ -274,14 +274,11 @@ class PositionService:
     # ------------------------------------------------------------
 
     def _prepare_query_panel(self):
-        """重置到 F1 → F4 打开查询面板
+        """切换到 F4 查询面板
 
-        调用 window_service.reset_window_state() 确保窗口在前台且处于 F1 基准态，
-        然后发送 F4 切换到查询面板。
+        不调用 reset_window_state()——TaskQueue worker 在每个任务前已执行，
+        窗口已处于 F1 基准态且在前台。此处只需发送 F4。
         """
-        with timed("reset_window_state", self.logger):
-            self.window_service.reset_window_state()
-
         with timed("F4 打开查询面板", self.logger):
             self.window_service.send_key("F4", background=True)
             time.sleep(0.5)
