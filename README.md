@@ -166,6 +166,41 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `TASK_TIMEOUT` | 任务超时，恢复成功 |
 | `TASK_TIMEOUT_RECOVERY_FAILED` | 任务超时，恢复也失败 |
 
+### 弹窗处理与「干净退出」
+
+下单/撤单后可能出现多种弹窗，处理方式决定窗口状态是否可信：
+
+| 弹窗类型 | 标题示例 | 按钮 | 处理 | 窗口状态 |
+|---------|------|:---:|------|:---:|
+| 委托确认 | 「委托确认」 | 是(Y) / 否(N) | 点 Y 确认 / 点 N 取消 | 可信 |
+| 价格超限 | 「提示信息」 | 是(Y) / 否(N) | 点 N 取消 → `PRICE_OUT_OF_RANGE` | 可信（干净退出） |
+| 单按钮提示 | 「提示」 | 确定 | 点击确定（只能用鼠标，Y 键无效） | 取决于内容 |
+| 致命错误 | 「提示信息」 | 确定 | 关闭 + 分类报错 | **不可信** |
+
+> **注意**：标题为「提示」的单按钮弹窗只有「确定」按钮（cid=1），无法用字母键触发。调试时若发现 Y 键无效，检查是否为单按钮弹窗。
+
+#### 添加新的干净退出场景
+
+只需两步，不需要改动 `TaskQueue` 或跳过逻辑：
+
+**1. 在 `src/exceptions.py` 新增错误码：**
+```python
+NEW_ERROR = "NEW_ERROR"   # 描述
+```
+
+**2. 在 `src/core/trader.py` 的弹窗处理循环中，`_is_price_warning` 旁边新增检测：**
+```python
+# 检测条件：标题不含"委托确认"，文本含特定关键词
+elif "某关键词" in (order_detail_text or ""):
+    # 点「否」或「确定」关闭弹窗（根据实际按钮类型选择）
+    self.window_service.click_element(window, CONFIRM_NO_BUTTON_ID, ...)
+    # 设置干净退出标志 → finally 保留 _last_task_info → 下次同组跳过
+    Trader._clean_dismiss = True
+    raise ApiError(ErrorCode.NEW_ERROR, "描述", suggestion="建议")
+```
+
+`_clean_dismiss = True` 通知 `TaskQueue`：虽是错误，但弹窗已正常关闭，窗口状态仍可信，下次同组操作可跳过准备。
+
 ## API 接口
 
 | 方法 | 路径 | 说明 | 入队 | timeout |
