@@ -209,13 +209,12 @@ class TaskQueue(Singleton):
         return False
 
     def _can_skip_window_setup(self, task: Task) -> bool:
-        """连续同向无弹窗操作时可跳过窗口准备步骤
+        """上笔干净退出时跳过窗口重置+激活
 
-        支持的操作类型：
-        - place_order: 连续同向（同为买入或同为卖出）且上笔无弹窗 → 跳过
+        - place_order: 上笔为干净退出的任意 place_order（不关心方向，
+          F1/F2 切换由 Trader 自己判断）
         - cancel_all_orders: 连续撤单且上笔无弹窗 → 跳过
-
-        出现弹窗意味着窗口状态不可信，必须重新准备。
+        - 出现弹窗 → 窗口状态不可信，禁止跳过
         """
         if self._last_task_info is None:
             return False
@@ -225,18 +224,12 @@ class TaskQueue(Singleton):
         if task.name == "place_order":
             if last_name != "place_order":
                 return False
-            if self._last_task_info.get("status") != task.params.get("status"):
-                return False
-            if self._last_task_info.get("had_dialog", True):
-                return False
-            return True
+            return not self._last_task_info.get("had_dialog", True)
 
         if task.name == "cancel_all_orders":
             if last_name != "cancel_all_orders":
                 return False
-            if self._last_task_info.get("had_dialog", True):
-                return False
-            return True
+            return not self._last_task_info.get("had_dialog", True)
 
         return False
 

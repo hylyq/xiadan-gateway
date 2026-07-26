@@ -90,12 +90,22 @@ class Trader:
                 )
             price = sanitized_price
 
-        # 1. 激活窗口 + F1/F2（连续同向订单可跳过，窗口已处于正确状态）
+        # 1. 激活窗口 + F1/F2（上笔干净退出时可跳过重置+激活）
         from src.api.task_queue import TaskQueue
         _task_queue = TaskQueue.get_instance()
         if _task_queue.skip_window_setup:
-            self.logger.info("连续同向订单，跳过窗口激活与 F1/F2")
             _task_queue.skip_window_setup = False  # 单次消耗
+            _last_status = (_task_queue._last_task_info or {}).get("status")
+            if status != _last_status:
+                # 交叉方向（买→卖 或 卖→买）：只需按 F 键切换
+                self.logger.info(
+                    f"跳过窗口重置，按 {'F1' if status == '1' else 'F2'} 切换方向"
+                )
+                self.window_service.send_key(
+                    "F1" if status == "1" else "F2", background=True)
+                time.sleep(0.1)
+            else:
+                self.logger.info("连续同向订单，跳过窗口激活与 F1/F2")
         else:
             with timed("激活窗口", self.logger):
                 trading_paths = self.config.get_trading_app_paths()
