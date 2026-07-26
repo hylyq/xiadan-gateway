@@ -395,11 +395,15 @@ class PositionService:
             self.logger.error("窗口为 None，无法处理验证码")
             raise ApiError(ErrorCode.OCR_FAILED, "窗口为 None，无法处理验证码")
 
-        # 查找验证码图片控件（仅精确 control_id 匹配）
-        # 注意: 不降级到文本匹配——主窗口文本可能包含"验证码"关键词导致误截主窗口画面
+        # 查找验证码图片控件（仅精确 control_id 匹配，须可见）
+        # 注意: 主窗口可能存在多个 2405（隐藏残留 + 真实弹窗），
+        # find_element_in_window 返回第一个，必须过滤隐藏元素
         image_element = self.window_service.find_element_in_window(window, CAPTCHA_IMAGE_ID)
+        if image_element is not None and not self._is_element_visible(image_element):
+            self.logger.warning("找到 control_id=2405 但不可见（疑似主窗口残留控件），视为未找到")
+            image_element = None
         if image_element is None:
-            self.logger.error("验证码图片元素未找到（control_id=2405）")
+            self.logger.error("验证码图片元素未找到（control_id=2405 可见）")
             raise ApiError(ErrorCode.OCR_FAILED, "验证码图片元素未找到",
                            suggestion="请确认交易窗口是否正常显示验证码弹窗")
 
@@ -488,6 +492,14 @@ class PositionService:
             f"验证码识别失败，已重试 {max_retry} 次",
             suggestion="可稍后重试查询，或检查交易窗口是否被遮挡"
         )
+
+    @staticmethod
+    def _is_element_visible(element) -> bool:
+        """检查 UIA 元素是否可见（非隐藏/非残留控件）"""
+        try:
+            return element.is_visible()
+        except Exception:
+            return True  # 无法判断时假定可见
 
     @staticmethod
     def _is_captcha_image_valid(image_path: str, max_bytes: int = 5000) -> bool:
