@@ -12,8 +12,8 @@
   4. 与预存模板做归一化互相关（NCC），取最高分
 
 依赖: Pillow + NumPy（已在项目依赖中），零额外依赖
-内存: < 5MB（仅 10 张小模板图）
-速度: < 5ms/次
+内存: < 5MB（1,200+ 模板预归一化加载为 float32 矩阵）
+速度: < 0.01s/次（BLAS 批量矩阵乘法，一次 sgemv 调用）
 
 模板积累策略：
   - 初始训练：用 scripts/generate_templates.py 配合 ddddocr 标注提取模板
