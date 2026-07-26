@@ -175,6 +175,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | 委托确认 | 「委托确认」 | 是(Y) / 否(N) | 点 Y 确认 / 点 N 取消 | 可信 |
 | 价格超限 | 「提示信息」 | 是(Y) / 否(N) | 点 N 取消 → `PRICE_OUT_OF_RANGE` | 可信（干净退出） |
 | 单按钮提示 | 「提示」 | 确定 | 点击确定（只能用鼠标，Y 键无效） | 取决于内容 |
+| 余额不足 | 「提示」 | 确定 | 点确定关闭 → `ORDER_SUBMIT_FAILED` | 可信（干净退出） |
 | 致命错误 | 「提示信息」 | 确定 | 关闭 + 分类报错 | **不可信** |
 
 > **注意**：标题为「提示」的单按钮弹窗只有「确定」按钮（cid=1），无法用字母键触发。调试时若发现 Y 键无效，检查是否为单按钮弹窗。
@@ -188,18 +189,20 @@ uv run python main.py --dev       # 开发模式（热加载）
 NEW_ERROR = "NEW_ERROR"   # 描述
 ```
 
-**2. 在 `src/core/trader.py` 的弹窗处理循环中，`_is_price_warning` 旁边新增检测：**
+**2. 在 `src/core/trader.py` 的弹窗处理循环中，`_is_clean_error` 旁新增检测：**
 ```python
-# 检测条件：标题不含"委托确认"，文本含特定关键词
+# 检测条件：order_detail_text 含特定关键词
+# （order_detail_text 由 _extract_dialog_text 从弹窗容器内提取，不含主窗口 UI）
 elif "某关键词" in (order_detail_text or ""):
-    # 点「否」或「确定」关闭弹窗（根据实际按钮类型选择）
-    self.window_service.click_element(window, CONFIRM_NO_BUTTON_ID, ...)
-    # 设置干净退出标志 → finally 保留 _last_task_info → 下次同组跳过
+    # 点关闭弹窗
+    self._close_non_confirm_popup(window, descendants=_descendants)
     Trader._clean_dismiss = True
     raise ApiError(ErrorCode.NEW_ERROR, "描述", suggestion="建议")
 ```
 
 `_clean_dismiss = True` 通知 `TaskQueue`：虽是错误，但弹窗已正常关闭，窗口状态仍可信，下次同组操作可跳过准备。
+
+> **弹窗文本提取说明**：`order_detail_text` 优先从 cid=1040 读取，fallback 用 `_extract_dialog_text(title_el)` 从弹窗容器（`title_el.parent()`）内收集文本，确保不混入主窗口 UI 标签。
 
 ## API 接口
 
