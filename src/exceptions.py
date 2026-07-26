@@ -40,7 +40,10 @@ class ErrorCode:
     TASK_TIMEOUT_RECOVERY_FAILED = "TASK_TIMEOUT_RECOVERY_FAILED"  # 任务超时，恢复也失败
 
 
-# HTTP 状态码映射
+# HTTP 状态码映射（仅供参考，不实际用于响应）。
+# 为兼容 PowerShell Invoke-RestMethod 等会对非 200 自动抛异常的客户端，
+# 所有响应统一返回 HTTP 200，通过 JSON 中的 status 字段区分成功/失败。
+# 详见 src/api/response.py error_response()。
 HTTP_STATUS = {
     ErrorCode.AUTH_REQUIRED: 401,
     ErrorCode.AUTH_FAILED: 401,
