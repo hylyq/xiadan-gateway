@@ -33,6 +33,9 @@ tests/test_report_with_ocr.json
 # 用户本地配置（含个人路径，不提交）
 config/app_config.json
 
+# OCR 存档（原始验证码图片，随时间增长，不提交）
+assets/captcha_archive/
+
 # OS
 Thumbs.db
 desktop.ini

@@ -185,3 +185,18 @@ def diagnostic_history():
         "max_available": 20,
         "entries": history,
     })
+
+
+@action_bp.route("/ocr/quality", methods=["GET"])
+def ocr_quality_report():
+    """查看 OCR 质检报告
+
+    返回轻量引擎 vs ddddocr 的对比统计:
+      - 累计识别次数
+      - 准确率
+      - 模板覆盖情况
+      - 连续正确次数
+    """
+    from src.core.ocr import OcrService
+    ocr = OcrService.get_instance()
+    return success_response(ocr.quality_report)
