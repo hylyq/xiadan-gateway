@@ -294,14 +294,22 @@ class Trader:
                                 details={"popup_title": title_text, "popup_text": _popup_text}
                             )
                         else:
+                            # B-warning) 非委托确认弹窗 + 无错误关键词 → 警告（如价格超限）
+                            # 优先点击「是(Y)」继续（承认警告、继续提交），
+                            # 降级 _close_non_confirm_popup（它用 IDOK/IDCANCEL/ESC，
+                            # 但 Y/N 按钮不是标准 cid=1/2，所以优先点击 Y 更可靠）
                             self.logger.warning(
-                                f"检测到警告弹窗（非委托确认）: {title_text}，"
-                                f"关闭后继续等待委托确认"
+                                f"检测到警告弹窗: {title_text}，"
+                                f"点击 '是(Y)' 继续"
                             )
-                            self._close_non_confirm_popup(window, descendants=_descendants)
+                            try:
+                                self.window_service.click_element(
+                                    window, CONFIRM_YES_BUTTON_ID, descendants=_descendants)
+                            except Exception:
+                                self._close_non_confirm_popup(window, descendants=_descendants)
                             warning_dismissed = True
                             time.sleep(0.2)
-                            continue  # 继续检测后续弹窗
+                            continue  # 继续检测后续弹窗（委托确认）
 
                 # C) 无标题图但有文本（cid=1040）+ 有"是(Y)"按钮 → 警告弹窗
                 text_el = self.window_service.find_element_in_window(
@@ -378,11 +386,10 @@ class Trader:
         # 结果判定
         if not confirm_dialog_detected:
             if warning_dismissed:
-                # 关闭了警告弹窗，但始终未出现"委托确认"→ 订单未提交
-                self.logger.warning(
-                    "关闭了警告弹窗但未出现委托确认弹窗，订单可能未提交"
-                )
-                DiagnosticUtil().snapshot("warning_but_no_confirm")
+                # 关闭了警告弹窗但未出现委托确认 → 警告本身含确认语义
+                # （如价格超限警告点 Y = 继续提交），无错误弹窗即视为已提交
+                self.logger.info("警告已关闭且无错误弹窗，视为已提交")
+                confirmed = True
             else:
                 # 无弹窗 = 快速交易模式（确认已关闭），订单已直接提交
                 self.logger.info("未检测到弹窗，快速交易模式下订单已直接提交")
