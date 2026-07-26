@@ -140,18 +140,15 @@ class PositionService:
 
             # 等待验证码弹窗出现（主动定时完整扫描）
             # 验证码弹窗通常在 Ctrl+C 后 <500ms 出现。
-            # 策略: 先用快速 Desktop 弹窗检测(<10ms), 未命中则睡 0.25s 后完整扫描。
-            # 最多 4 个周期 = ~1.6s（vs 之前 poll_until 1.5s 超时+0.8s 扫描=2.3s）
+            # 策略: 先立即扫一次（可能已出现）, 未命中则睡 0.3s 再扫, 最多 3 次。
+            # 首次: ~0.8s → 后续: 0.3+0.8=1.1s/次 → 最坏 0.8+1.1+1.1=3.0s
+            # 弹窗正常<500ms出现 → 第 1-2 次命中 → ~0.8-1.9s
             with timed("等待验证码弹窗", self.logger):
                 captcha_found = False
-                for scan in range(4):
-                    time.sleep(0.25)
+                for scan in range(3):
+                    if scan > 0:
+                        time.sleep(0.3)
                     self._refresh_window_ref()
-                    # 先快速检测 Desktop 弹窗（~10ms）
-                    if self._detect_captcha(self._cached_window):
-                        captcha_found = True
-                        break
-                    # 再完整扫描主窗口 UIA 树（~0.8s）
                     if self._detect_captcha_full(self._cached_window):
                         captcha_found = True
                         break
