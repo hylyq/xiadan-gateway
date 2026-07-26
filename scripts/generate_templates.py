@@ -105,7 +105,7 @@ def cmd_batch(sample_dir: str = None):
         import ddddocr
     except ImportError:
         print("[ERROR] 批量提取需要 ddddocr 进行自动标注。")
-        print("  安装: uv add ddddocr")
+        print("  安装: uv sync --extra ocr")
         return
 
     png_files = sorted(glob.glob(os.path.join(sample_dir, "*.png")))

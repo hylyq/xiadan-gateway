@@ -189,13 +189,12 @@ def diagnostic_history():
 
 @action_bp.route("/ocr/quality", methods=["GET"])
 def ocr_quality_report():
-    """查看 OCR 质检报告
+    """查看 OCR 运行报告
 
-    返回轻量引擎 vs ddddocr 的对比统计:
-      - 累计识别次数
-      - 准确率
+    返回轻量引擎的运行统计:
+      - 累计识别次数 / 失败次数
       - 模板覆盖情况
-      - 连续正确次数
+      - ddddocr 调试模式状态
     """
     from src.core.ocr import OcrService
     ocr = OcrService.get_instance()

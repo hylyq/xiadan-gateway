@@ -16,9 +16,9 @@
 速度: < 5ms/次
 
 模板积累策略：
-  - 初始冷启动：用 ddddocr 标注真实验证码，提取数字区域保存为模板
-  - 运行时自动积累：ddddocr 成功识别时，自动提取数字并保存模板
-  - 当 10 个数字全部覆盖后，可完全脱离 ddddocr
+  - 初始训练：用 scripts/generate_templates.py 配合 ddddocr 标注提取模板
+  - 离线扩展：运行 scripts/train_ocr.py 利用真实交易过程中的验证码积累模板
+  - 当 10 个数字全部覆盖后（当前已全覆盖），可完全脱离 ddddocr
 """
 import os
 import glob

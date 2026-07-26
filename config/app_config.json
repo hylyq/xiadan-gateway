@@ -18,7 +18,8 @@
   },
   "ocr": {
     "warmup_on_start": true,
-    "max_retry": 3
+    "max_retry": 3,
+    "ddddocr_enabled": false
   },
   "logging": {
     "level": "INFO",

@@ -63,8 +63,13 @@ def get_disk_state():
 
 
 def check_latest_captcha():
-    """对最新 captcha 做轻量 vs ddddocr 对比"""
-    import ddddocr
+    """对最新 captcha 做轻量 vs ddddocr 对比（ddddocr 可选）"""
+    try:
+        import ddddocr
+    except ImportError:
+        print("ddddocr 未安装，跳过质检对比。安装: uv sync --extra ocr")
+        return None, None, None
+
     from src.core.ocr_lightweight import LightweightCaptchaOCR
 
     captcha_path = "logs/screenshots/captcha.png"

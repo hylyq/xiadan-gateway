@@ -831,7 +831,6 @@ name = "xiadan-gateway"
 version = "1.0.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "ddddocr" },
     { name = "flask" },
     { name = "flask-cors" },
     { name = "pillow" },
@@ -846,6 +845,9 @@ dependencies = [
 dev = [
     { name = "hupper" },
 ]
+ocr = [
+    { name = "ddddocr" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -855,7 +857,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ddddocr", specifier = ">=1.5.6" },
+    { name = "ddddocr", marker = "extra == 'ocr'", specifier = ">=1.5.6" },
     { name = "flask", specifier = ">=3.0.0" },
     { name = "flask-cors", specifier = ">=4.0.0" },
     { name = "hupper", marker = "extra == 'dev'", specifier = ">=1.12" },
@@ -866,7 +868,7 @@ requires-dist = [
     { name = "pywinauto", specifier = ">=0.6.8" },
     { name = "waitress", specifier = ">=3.0.2" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "ocr"]
 
 [package.metadata.requires-dev]
 dev = [

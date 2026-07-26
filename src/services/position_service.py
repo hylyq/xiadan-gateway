@@ -13,6 +13,7 @@ from src.constants import (
     CAPTCHA_IMAGE_ID, CAPTCHA_INPUT_ID, CAPTCHA_OK_BUTTON_ID,
     CAPTCHA_CANCEL_BUTTON_ID, CAPTCHA_VERIFY_ID, CAPTCHA_TEXT_KEYWORDS
 )
+from src.exceptions import ApiError, ErrorCode
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
 from src.utils.diagnostic import DiagnosticUtil
@@ -156,9 +157,13 @@ class PositionService:
             captcha_win = self._captcha_window or self._cached_window
 
             with timed("验证码 OCR + 输入 + 确认", self.logger):
-                if not self._solve_captcha(captcha_win):
-                    self.logger.warning(f"第 {attempt + 1} 次验证码处理失败")
-                    continue
+                try:
+                    self._solve_captcha(captcha_win)
+                except ApiError as e:
+                    if e.error_code == ErrorCode.OCR_FAILED:
+                        self.logger.warning(f"第 {attempt + 1} 次验证码处理失败: {e.message}")
+                        continue
+                    raise  # 其他 ApiError 继续向上传播
 
             with timed("读取剪贴板数据", self.logger):
                 data = self.window_service.get_clipboard()
@@ -169,9 +174,13 @@ class PositionService:
                     f"第 {attempt + 1} 次剪贴板内容无效: {repr(data[:100]) if data else '空'}"
                 )
 
-        # 所有尝试失败，截图诊断
+        # 所有尝试失败，截图诊断 + 返回 OCR 错误
         DiagnosticUtil().snapshot("query_empty_clipboard")
-        return []
+        raise ApiError(
+            ErrorCode.OCR_FAILED,
+            "验证码识别失败，已重试 3 次",
+            suggestion="可稍后重试查询，或检查交易窗口是否被遮挡"
+        )
 
     def _refresh_window_ref(self):
         """刷新缓存的窗口引用（解决 pywinauto descendants 缓存问题）"""
@@ -361,11 +370,11 @@ class PositionService:
         """
         if self.ocr_service is None:
             self.logger.error("OCR 服务未初始化，无法处理验证码")
-            return False
+            raise ApiError(ErrorCode.OCR_FAILED, "OCR 服务未初始化，无法处理验证码")
 
         if window is None:
             self.logger.error("窗口为 None，无法处理验证码")
-            return False
+            raise ApiError(ErrorCode.OCR_FAILED, "窗口为 None，无法处理验证码")
 
         # 查找验证码图片控件
         image_element = self.window_service.find_element_in_window(window, CAPTCHA_IMAGE_ID)
@@ -376,7 +385,8 @@ class PositionService:
                 image_element = matches[0]
             else:
                 self.logger.error("验证码图片元素未找到")
-                return False
+                raise ApiError(ErrorCode.OCR_FAILED, "验证码图片元素未找到",
+                               suggestion="请确认交易窗口是否正常显示验证码弹窗")
 
         # 保存验证码图片
         with timed("验证码截图保存", self.logger):
@@ -446,7 +456,11 @@ class PositionService:
                     pass
 
         self.logger.warning(f"验证码处理失败，已达到最大重试次数 {max_retry}")
-        return False
+        raise ApiError(
+            ErrorCode.OCR_FAILED,
+            f"验证码识别失败，已重试 {max_retry} 次",
+            suggestion="可稍后重试查询，或检查交易窗口是否被遮挡"
+        )
 
     def _click_button(self, window, control_id: int) -> bool:
         """点击按钮"""

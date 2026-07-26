@@ -1,19 +1,19 @@
-"""OCR 服务 — 轻量模板匹配 + ddddocr 质检员
+"""OCR 服务 — 轻量模板匹配（ddddocr 可选调试）
 
 架构:
-  - 主引擎: LightweightCaptchaOCR（模板匹配，< 5MB，< 5ms）
-  - 质检员: ddddocr（ONNX 模型，~150MB，每次并行运行）
+  - 生产模式 (ddddocr_enabled=false): 仅轻量引擎（< 5MB，< 5ms）
+  - 调试模式 (ddddocr_enabled=true):  轻量引擎 + ddddocr 质检员（~150MB）
 
-每次识别流程:
-  1. 轻量引擎识别 → 结果用于填入券商软件
-  2. ddddocr 识别 → 标准答案，用于:
-     a. 存档验证码图片（assets/captcha_archive/）
-     b. 提取数字模板（assets/digit_templates/）
-     c. 对比轻量结果，追踪准确率
-  3. 10/10 覆盖后，返回值用轻量引擎结果（快）
-     覆盖不全时，返回值用 ddddocr 结果（准）
+生产模式流程:
+  1. 轻量引擎识别 → 成功(4位)直接返回
+  2. 失败 → 存档 assets/captcha_archive/failed_*.png → 返回 ""
+  3. 调用方返回 HTTP OCR_FAILED 错误
 
-效果: 越用越准，每次使用都在自我完善。
+调试模式流程:
+  1. 轻量引擎识别 → ddddocr 质检 → 存档 + 模板提取 + 准确率对比
+  2. 全覆盖 → 信任轻量（快）；否则 → 以 ddddocr 为准
+
+效果: 日常 0 额外内存开销，ddddocr 保留作离线训练/调试工具。
 """
 import os
 import threading
@@ -35,6 +35,9 @@ class OcrService(Singleton):
         self.logger = Logger.get_instance()
         self._lock = threading.Lock()
 
+        # ddddocr 调试开关（默认关闭，省 ~150MB）
+        self._ddddocr_enabled = False
+
         # 主引擎: 轻量模板匹配
         self._lightweight: Optional[LightweightCaptchaOCR] = None
         self._light_ready = False
@@ -45,6 +48,7 @@ class OcrService(Singleton):
 
         # 统计
         self._total_recognitions = 0
+        self._ocr_failures = 0
         self._light_correct = 0
         self._light_mismatch = 0
         self._consecutive_correct = 0
@@ -55,6 +59,10 @@ class OcrService(Singleton):
         self._archive_dir = os.path.join(
             os.path.dirname(__file__), "..", "..", "assets", "captcha_archive"
         )
+
+    def configure(self, ddddocr_enabled: bool = False):
+        """设置 ddddocr 调试开关（必须在 warmup() 之前调用）"""
+        self._ddddocr_enabled = ddddocr_enabled
 
     # ================================================================
     # 预热
@@ -75,16 +83,19 @@ class OcrService(Singleton):
             else:
                 self.logger.info("轻量 OCR 模板不足，依赖 ddddocr")
 
-            # 2. ddddocr 质检员
-            try:
-                import ddddocr
-                self._ddddocr = ddddocr.DdddOcr(show_ad=False)
-                self._ddddocr_loaded = True
-                self.logger.info("ddddocr 质检员就绪")
-            except ImportError:
-                self.logger.info("ddddocr 未安装（无质检员）")
-            except Exception as e:
-                self.logger.warning(f"ddddocr 加载失败: {e}")
+            # 2. ddddocr 质检员（仅调试模式）
+            if self._ddddocr_enabled:
+                try:
+                    import ddddocr
+                    self._ddddocr = ddddocr.DdddOcr(show_ad=False)
+                    self._ddddocr_loaded = True
+                    self.logger.info("ddddocr 质检员就绪（调试模式）")
+                except ImportError:
+                    self.logger.info("ddddocr 未安装，调试模式不可用")
+                except Exception as e:
+                    self.logger.warning(f"ddddocr 加载失败: {e}")
+            else:
+                self.logger.info("ddddocr 已禁用（生产模式），省 ~150MB 内存")
 
             return self._light_ready or self._ddddocr_loaded
 
@@ -125,8 +136,9 @@ class OcrService(Singleton):
     # ================================================================
 
     def _recognize_internal(self, source, source_type: str) -> str:
-        """每次识别都执行完整流程:
-        轻量引擎 → ddddocr质检 → 存档 → 提取模板 → 对比统计
+        """识别逻辑:
+        - ddddocr 启用 → 完整双引擎（质检+存档+模板提取）
+        - ddddocr 禁用 → 仅轻量引擎，失败存档返回空
         """
         if not self._light_ready and not self._ddddocr_loaded:
             if not self.warmup():
@@ -154,8 +166,8 @@ class OcrService(Singleton):
                 pass
         light_digits = "".join(filter(str.isdigit, light_result))
 
-        # ---- 2. ddddocr 质检员 ----
-        if self._ddddocr_loaded:
+        # ---- 2. ddddocr 质检员（仅调试模式） ----
+        if self._ddddocr_enabled and self._ddddocr_loaded:
             try:
                 dddd_result = self._ddddocr.classification(image_data) or ""
                 dddd_digits = "".join(filter(str.isdigit, dddd_result))
@@ -188,7 +200,14 @@ class OcrService(Singleton):
             except Exception as e:
                 self.logger.error(f"ddddocr 异常: {e}")
 
-        return light_result
+        # ---- ddddocr 禁用: 仅轻量引擎 ----
+        if len(light_digits) == 4:
+            return light_digits
+
+        # 识别失败: 存档 + 返回空
+        self._ocr_failures += 1
+        self._save_failed_archive(image_data)
+        return ""
 
     # ================================================================
     # 质检统计
@@ -205,23 +224,31 @@ class OcrService(Singleton):
 
     @property
     def quality_report(self) -> dict:
-        """质检报告"""
-        return {
+        """质检报告（格式随 ddddocr 开关变化）"""
+        base = {
             "total_recognitions": self._total_recognitions,
-            "correct": self._light_correct,
-            "mismatch": self._light_mismatch,
-            "accuracy_rate": self.accuracy_rate,
-            "consecutive_correct": self._consecutive_correct,
+            "ddddocr_enabled": self._ddddocr_enabled,
             "templates": self._lightweight.template_count if self._lightweight else 0,
             "coverage": sorted(self._lightweight.coverage) if self._lightweight else [],
+            "full_coverage": len(self._lightweight.coverage) >= 10 if self._lightweight else False,
         }
+        if self._ddddocr_enabled:
+            base.update({
+                "correct": self._light_correct,
+                "mismatch": self._light_mismatch,
+                "accuracy_rate": self.accuracy_rate,
+                "consecutive_correct": self._consecutive_correct,
+            })
+        else:
+            base["failures"] = self._ocr_failures
+        return base
 
     # ================================================================
     # 内部: 存档 + 模板提取 + 质检日志
     # ================================================================
 
     def _save_to_archive(self, image_data: bytes, label: str):
-        """存档验证码图片，文件名含 ddddocr 标准答案"""
+        """存档验证码图片，文件名含 ddddocr 标准答案（仅调试模式）"""
         try:
             import time
             os.makedirs(self._archive_dir, exist_ok=True)
@@ -229,6 +256,19 @@ class OcrService(Singleton):
             path = os.path.join(self._archive_dir, f"captcha_{ts}_{label}.png")
             with open(path, "wb") as f:
                 f.write(image_data)
+        except Exception:
+            pass
+
+    def _save_failed_archive(self, image_data: bytes):
+        """存档识别失败的验证码图片（生产模式，供离线训练）"""
+        try:
+            import time
+            os.makedirs(self._archive_dir, exist_ok=True)
+            ts = int(time.time() * 1000)
+            path = os.path.join(self._archive_dir, f"failed_{ts}.png")
+            with open(path, "wb") as f:
+                f.write(image_data)
+            self.logger.info(f"验证码识别失败，已存档: {path}")
         except Exception:
             pass
 

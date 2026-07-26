@@ -38,7 +38,8 @@ DEFAULT_CONFIG = {
     },
     "ocr": {
         "warmup_on_start": True,
-        "max_retry": 3
+        "max_retry": 3,
+        "ddddocr_enabled": False
     },
     "logging": {
         "level": "INFO",

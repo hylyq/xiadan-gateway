@@ -64,15 +64,20 @@ def main():
         else:
             logger.info(f"交易程序路径: {trading_paths}")
 
-        # 4. 预加载 ddddocr
+        # 4. 预热 OCR 引擎（轻量模板匹配；ddddocr 可选）
         ocr_config = config.get_ocr_config()
         if ocr_config.get("warmup_on_start", True):
-            logger.info("预加载 ddddocr...")
+            ddddocr_enabled = ocr_config.get("ddddocr_enabled", False)
+            logger.info("预热 OCR 引擎...")
             ocr = OcrService.get_instance()
+            ocr.configure(ddddocr_enabled=ddddocr_enabled)
             if not ocr.warmup():
                 logger.warning(
-                    "ddddocr 预加载失败，查询持仓/成交时若遇到验证码将无法处理"
+                    "OCR 引擎预热失败，查询持仓/成交时若遇到验证码将无法处理"
                 )
+            else:
+                coverage = len(ocr.lightweight_coverage)
+                logger.info(f"OCR 引擎就绪，覆盖 {coverage}/10 个数字")
 
         # 5. 启动窗口监控
         monitor_config = config.get_window_monitor_config()

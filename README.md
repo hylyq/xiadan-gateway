@@ -10,7 +10,7 @@
 | 顺序执行 | 单 worker 线程任务队列，避免 `xiadan.exe` 并发冲突 |
 | 看门狗恢复 | 任务超时自动截图 + 激活 + ESC×3，重置后返回错误 |
 | 幂等检查 | 60s 窗口内相同参数的下单被拒绝，防 HTTP 超时重试重复下单 |
-| OCR 验证码 | 轻量模板匹配 + ddddocr 质检员双引擎，实时存档 + 在线学习 |
+| OCR 验证码 | 轻量模板匹配引擎，失败自动存档，可选 ddddocr 离线训练 |
 | 一键清仓 | `/orders/sell-all` 自动查持仓 → 市价卖出全部可用数量 |
 | 生产级服务器 | `waitress` WSGI + 优雅关闭（SIGINT/SIGTERM） |
 | 配置热更新 | `POST /admin/reload-config` 无需重启 |
@@ -60,7 +60,7 @@ uv run python main.py --dev       # 开发模式（热加载）
     "confirm_timeout_seconds": 10
   },
   "idempotency": { "order_dedup_window_seconds": 60 },
-  "ocr": { "warmup_on_start": true, "max_retry": 3 },
+  "ocr": { "warmup_on_start": true, "max_retry": 3, "ddddocr_enabled": false },
   "auth": { "enabled": false, "token": "" },
   "logging": { "level": "INFO", "file": "logs/app.log", "screenshot_dir": "logs/screenshots" }
 }
@@ -74,7 +74,8 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `task_queue.confirm_timeout_seconds` | 10 | 确认/按键操作超时（秒） |
 | `task_queue.max_size` | 50 | 队列最大长度 |
 | `idempotency.order_dedup_window_seconds` | 60 | 下单去重窗口（秒） |
-| `ocr.max_retry` | 3 | 验证码识别最大重试次数（轻量引擎 + ddddocr 质检） |
+| `ocr.max_retry` | 3 | 验证码识别最大重试次数 |
+| `ocr.ddddocr_enabled` | false | ddddocr 调试开关（开启后可启用双引擎质检+模板提取，需 `uv sync --extra ocr`） |
 | `window_monitor.enabled` | true | 窗口最小化监控开关 |
 | `auth.enabled` | false | Token 认证开关 |
 
@@ -292,8 +293,8 @@ xiadan-gateway/
 │   ├── generate_templates.py    # OCR 模板管理（查看/提取/批量标注）
 │   └── train_ocr.py             # OCR 迭代训练（自动触发验证码 + 追踪准确率）
 ├── assets/
-│   ├── digit_templates/          # 数字模板（Git 跟踪，运行时自动积累）
-│   └── captcha_archive/          # 验证码存档（gitignore，含 ddddocr 标签）
+│   ├── digit_templates/          # 数字模板（Git 跟踪，离线训练生成）
+│   └── captcha_archive/          # 失败验证码存档（gitignore，供离线训练使用）
 ├── logs/                        # 运行时生成（gitignore）
 ├── main.py                      # 启动入口（waitress + 单实例 + 优雅关闭）
 └── pyproject.toml               # 依赖与构建配置
@@ -310,7 +311,7 @@ xiadan-gateway/
 | **pywin32** | Windows API（按键、窗口、互斥锁） |
 | **psutil** | 进程枚举与路径匹配 |
 | **pyautogui** | 鼠标点击、全屏截图 |
-| **ddddocr** (ONNX Runtime) | 验证码 OCR 质检员（存档 + 模板提取 + 准确率监控） |
+| **ddddocr** (ONNX Runtime) | 可选，仅用于离线 OCR 训练脚本（`uv sync --extra ocr`） |
 | **Pillow + NumPy** | 轻量 OCR 模板匹配引擎 |
 | **pytest** | 单元测试 |
 
@@ -348,29 +349,34 @@ Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 间隔 0.15s)
 - **不用 SendInput**：券商可能通过 `LLKHF_INJECTED` 标志过滤注入输入
 - **不用 PostMessage**：不更新键状态表，券商 `GetAsyncKeyState` 检测不到
 
-### 验证码 OCR — 双引擎 + 在线学习
+### 验证码 OCR — 轻量单引擎 + 失败存档
 
 同花顺 Ctrl+C **必然触发验证码弹窗**（4 位数字，白底，规则字体）。弹窗出现 = Ctrl+C 成功送达的确认信号。流程：`poll_until` 轮询检测弹窗（3s 超时）→ OCR 识别 → 输入 + 确定 → 读剪贴板 → `\t` 制表符校验。最多重试 3 次。
 
-**双引擎架构**：
+**单引擎架构**（生产模式，`ddddocr_enabled: false`）：
 
 ```
 每个验证码 →
-  ├─ 轻量引擎（主）   模板匹配，< 5ms，< 5MB
-  └─ ddddocr（质检员）  ONNX 模型，10-50ms，每次并行运行
-       ├─ 存档: assets/captcha_archive/（验证码 + 标准答案）
-       ├─ 提取: assets/digit_templates/（数字模板实时更新）
-       └─ 对比: 追踪准确率，不一致时告警
+  └─ 轻量引擎（唯一）  模板匹配，< 5ms，< 5MB
+       ├─ 识别成功（4 位数字）→ 填入券商软件
+       └─ 识别失败 → 存档 assets/captcha_archive/ + HTTP 返回 OCR_FAILED
 ```
 
 | 引擎 | 内存 | 速度 | 角色 |
 |------|------|------|------|
-| 轻量模板匹配 | < 5MB | < 5ms | 主引擎，结果填入券商软件 |
-| ddddocr | ~150MB | 10-50ms | 质检员，并行存档 + 模板提取 + 准确率监控 |
+| 轻量模板匹配 | < 5MB | < 5ms | 唯一引擎，结果直接填入券商软件 |
+| ddddocr（可选） | ~150MB | 10-50ms | 调试模式下可作质检员，生产模式不加载 |
 
-**在线学习**：每次验证码自动提取数字模板，下一次识别即刻使用更新后的模板库。使用越久模板越多，匹配越精准。当前已积累 1,200+ 模板，连续 286 次验证与 ddddocr 100% 一致。
+当前已积累 1,200+ 模板，全部 10 个数字均已覆盖，日常使用无需 ddddocr。
 
-**质检报告**：`GET /ocr/quality` 返回轻量引擎 vs ddddocr 的实时对比统计（识别次数、准确率、模板数、覆盖数字）。
+**离线训练**：运行时不再自动提取模板或比对 ddddocr。模板训练转为离线操作：
+1. 失败验证码自动存档到 `assets/captcha_archive/failed_*.png`
+2. 运行 `uv sync --extra ocr && uv run python scripts/train_ocr.py` 触发真实交易验证码并积累样本
+3. 运行 `uv run python scripts/generate_templates.py batch` 从存档批量提取模板
+
+**调试模式**（`ddddocr_enabled: true`）：恢复原双引擎行为——ddddocr 并行质检、自动存档含标签验证码、实时提取模板、准确率对比。内存约 230-300MB。
+
+**质检报告**：`GET /ocr/quality` 返回轻量引擎的运行统计（识别次数、失败次数、模板数、覆盖数字、ddddocr 模式状态）。
 
 ### 弹窗分类处理
 
