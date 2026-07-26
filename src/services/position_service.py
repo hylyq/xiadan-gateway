@@ -138,24 +138,29 @@ class PositionService:
             with timed("Ctrl+C 发送", self.logger):
                 self._send_ctrl_c()
 
-            # 轮询等待验证码弹窗出现
+            # 等待验证码弹窗出现（主动定时完整扫描）
+            # 验证码弹窗通常在 Ctrl+C 后 <500ms 出现。
+            # 策略: 先用快速 Desktop 弹窗检测(<10ms), 未命中则睡 0.25s 后完整扫描。
+            # 最多 4 个周期 = ~1.6s（vs 之前 poll_until 1.5s 超时+0.8s 扫描=2.3s）
             with timed("等待验证码弹窗", self.logger):
-                try:
-                    poll_until(
-                        lambda: self._detect_captcha(
-                            self.window_service.get_trading_window()
-                        ),
-                        timeout=1.5, interval=0.1,
-                        description="Ctrl+C 后验证码弹窗"
-                    )
-                except PollTimeoutError:
+                captcha_found = False
+                for scan in range(4):
+                    time.sleep(0.25)
                     self._refresh_window_ref()
-                    if not self._detect_captcha_full(self._cached_window):
-                        self.logger.warning(
-                            f"第 {attempt + 1} 次 Ctrl+C 后未检测到验证码弹窗"
-                            f"（{1.5}s 超时），可能焦点丢失"
-                        )
-                        continue
+                    # 先快速检测 Desktop 弹窗（~10ms）
+                    if self._detect_captcha(self._cached_window):
+                        captcha_found = True
+                        break
+                    # 再完整扫描主窗口 UIA 树（~0.8s）
+                    if self._detect_captcha_full(self._cached_window):
+                        captcha_found = True
+                        break
+                if not captcha_found:
+                    self.logger.warning(
+                        f"第 {attempt + 1} 次 Ctrl+C 后未检测到验证码弹窗"
+                        f"（已扫描 4 次），可能焦点丢失"
+                    )
+                    continue
 
             # 使用检测到的验证码弹窗（可能是独立顶层窗口）
             captcha_win = self._captcha_window or self._cached_window
