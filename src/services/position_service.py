@@ -150,10 +150,10 @@ class PositionService:
                     )
                 except PollTimeoutError:
                     self._refresh_window_ref()
-                    if not self._detect_captcha(self._cached_window):
+                    if not self._detect_captcha_full(self._cached_window):
                         self.logger.warning(
                             f"第 {attempt + 1} 次 Ctrl+C 后未检测到验证码弹窗"
-                            f"（{3.0}s 超时），可能焦点丢失"
+                            f"（{1.5}s 超时），可能焦点丢失"
                         )
                         continue
 
@@ -197,11 +197,11 @@ class PositionService:
             self.logger.warning(f"刷新窗口引用失败: {e}")
 
     def _detect_captcha(self, window) -> bool:
-        """检测验证码弹窗（两阶段：快速窗口标题 → 完整 UIA 扫描）
+        """快速检测验证码弹窗（仅 Desktop 窗口标题枚举，无 UIA 树遍历）
 
-        poll_until 轮询时每秒调用数次，必须极快（<50ms）。
-        阶段1 仅枚举 Desktop 窗口标题（无 UIA 树遍历），
-        命中后才进入阶段2 做完整 descendants 扫描。
+        poll_until 高频轮询专用（~10ms/次）。
+        仅通过 Desktop 窗口标题搜索独立弹窗（如"提示"），
+        不扫描主窗口 UIA 树（~0.8s 太慢，留给超时兜底）。
         """
         if window is None:
             self._refresh_window_ref()
@@ -211,13 +211,9 @@ class PositionService:
 
         try:
             from pywinauto import Desktop
-
-            # 阶段1: 快速窗口标题检测（~10ms，无 descendants 遍历）
-            # 验证码弹窗标题="提示"，与主窗口"网上股票交易系统"完全不同
             for w in Desktop(backend="uia").windows(visible_only=True):
                 win_text = self._safe_window_text(w)
-                if CAPTCHA_DIALOG_TITLE in win_text:  # "提示"
-                    # 阶段2: 确认弹窗包含验证码图片控件
+                if CAPTCHA_DIALOG_TITLE in win_text:
                     image = self.window_service.find_element_in_window(
                         w, CAPTCHA_IMAGE_ID)
                     if image is not None:
@@ -229,17 +225,33 @@ class PositionService:
         except Exception:
             pass
 
-        # 兜底: 主窗口子孙控件扫描（验证码弹窗可能是主窗口子窗口）
-        # 仅在 poll_until 超时后的 except 块中触发，不参与高频轮询
-        try:
-            image = self.window_service.find_element_in_window(
-                window, CAPTCHA_IMAGE_ID)
-            if image is not None:
-                self.logger.info("通过 control_id=2405 在主窗口中检测到验证码弹窗")
-                self._captcha_window = window
-                return True
-        except Exception:
-            pass
+        return False
+
+    def _detect_captcha_full(self, window) -> bool:
+        """完整检测验证码弹窗（含主窗口 UIA 树扫描）
+
+        仅用于 poll_until 超时后的兜底检测（~0.8s，低频调用）。
+        """
+        # 先试快速检测
+        if self._detect_captcha(window):
+            return True
+
+        # 兜底：主窗口子孙控件扫描
+        if window is None:
+            self._refresh_window_ref()
+            window = self._cached_window
+        if window is not None:
+            try:
+                image = self.window_service.find_element_in_window(
+                    window, CAPTCHA_IMAGE_ID)
+                if image is not None:
+                    self.logger.info(
+                        "通过 control_id=2405 在主窗口中检测到验证码弹窗"
+                    )
+                    self._captcha_window = window
+                    return True
+            except Exception:
+                pass
 
         return False
 
@@ -450,7 +462,7 @@ class PositionService:
 
                 # 重新检测验证码弹窗
                 window = self.window_service.get_trading_window()
-                if window and self._detect_captcha(window):
+                if window and self._detect_captcha_full(window):
                     window = self._captcha_window or window
                     # 窗口切换后刷新 UIA 树缓存
                     _descendants = list(window.descendants())
