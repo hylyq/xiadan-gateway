@@ -775,5 +775,5 @@ class Trader:
             self.logger.warning("未检测到委托确认弹窗，跳过 Y 键发送")
             return {"confirmed": False}
         self.window_service.send_key("Y")
-        time.sleep(0.5)
+        time.sleep(0.3)
         return {"confirmed": True}

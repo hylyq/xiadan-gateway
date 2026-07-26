@@ -202,6 +202,7 @@ class TaskQueue(Singleton):
 
     _OPERATION_GROUPS = {
         "place_order": "trade",
+        "sell_all": "trade",           # 内部 place_order 后窗口停留在卖出界面
         "cancel_all_orders": "cancel",
         # 查询类操作：都基于 F4 面板，同组内连续可跳过 F4+导航
         "get_position": "query",
@@ -217,13 +218,13 @@ class TaskQueue(Singleton):
     @staticmethod
     def _read_had_dialog(task: Task) -> bool:
         """读取任务执行后的弹窗标志（统一入口）"""
-        if task.name == "place_order":
+        if task.name in ("place_order", "sell_all"):
             from src.core.trader import Trader
             return Trader._had_any_dialog
         if task.name == "cancel_all_orders":
             from src.services.trading_service import TradingService
             return TradingService._had_dialog
-        # 查询操作：不涉及弹窗，窗口状态始终可信
+        # 查询/内部子任务：不涉及弹窗，窗口状态始终可信
         return False
 
     @staticmethod
