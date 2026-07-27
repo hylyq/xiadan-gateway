@@ -103,5 +103,53 @@ class TestCancelledCountParsing:
         assert TradingService._parse_cancelled_count(text) == 1
 
 
+class TestSubmitErrorClassification:
+    """下单提交错误分类测试（Trader._classify_submit_error）"""
+
+    @staticmethod
+    def _classify(error_text: str):
+        """调用 Trader._classify_submit_error 静态方法"""
+        from src.core.trader import Trader
+        return Trader._classify_submit_error(error_text)
+
+    def test_insufficient_balance_funds(self):
+        """余额不足（资金不足变体）"""
+        text = "提交失败：当前账户10****88可用资金不足，还差600.200元。"
+        code, msg, suggestion = self._classify(text)
+        from src.exceptions import ErrorCode
+        assert code == ErrorCode.INSUFFICIENT_BALANCE, f"期望 INSUFFICIENT_BALANCE，实际 {code}"
+        assert "余额不足" in msg
+
+    def test_insufficient_balance_counter(self):
+        """余额不足（柜台余额不够变体）"""
+        text = "提交失败：柜台：可用余额不够。还差：300.30。"
+        code, msg, suggestion = self._classify(text)
+        from src.exceptions import ErrorCode
+        assert code == ErrorCode.INSUFFICIENT_BALANCE, f"期望 INSUFFICIENT_BALANCE，实际 {code}"
+        assert "余额不足" in msg
+
+    def test_insufficient_shares(self):
+        """可卖数量不足 → INSUFFICIENT_SHARES（回归）
+        用"可用余额不足"避免 hit T1_RESTRICTION_KEYWORDS 中的"可卖数量" """
+        text = "可用余额不足，请调整委托数量"
+        code, msg, suggestion = self._classify(text)
+        from src.exceptions import ErrorCode
+        assert code == ErrorCode.INSUFFICIENT_SHARES, f"期望 INSUFFICIENT_SHARES，实际 {code}"
+
+    def test_server_clearing(self):
+        """清算中 → SERVER_CLEARING（回归）"""
+        text = "清算中，暂不支持委托"
+        code, msg, suggestion = self._classify(text)
+        from src.exceptions import ErrorCode
+        assert code == ErrorCode.SERVER_CLEARING, f"期望 SERVER_CLEARING，实际 {code}"
+
+    def test_generic_failure(self):
+        """未知错误 → ORDER_SUBMIT_FAILED（兜底）"""
+        text = "未知错误，请重试"
+        code, msg, suggestion = self._classify(text)
+        from src.exceptions import ErrorCode
+        assert code == ErrorCode.ORDER_SUBMIT_FAILED, f"期望 ORDER_SUBMIT_FAILED，实际 {code}"
+
+
 # IdempotencyChecker 测试需要完整的配置环境，在集成测试中覆盖
 # 以下为基础逻辑测试，不依赖外部服务

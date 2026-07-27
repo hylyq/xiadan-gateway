@@ -294,6 +294,30 @@ class Trader:
                             order_detail_text
                             and any(kw in order_detail_text for kw in _error_keywords)
                         )
+                        # 余额不足检测：同时满足 "提交失败" + ("余额"或"资金") + "还差"
+                        # 实际弹窗文本示例:
+                        #   "提交失败：当前账户10****88可用资金不足，还差600.200元。"
+                        #   "提交失败：柜台：可用余额不够。还差：300.30。"
+                        _is_balance_error = (
+                            order_detail_text
+                            and "提交失败" in order_detail_text
+                            and ("余额" in order_detail_text or "资金" in order_detail_text)
+                            and "还差" in order_detail_text
+                        )
+                        if _is_balance_error:
+                            self.logger.warning(
+                                f"检测到余额不足弹窗: {order_detail_text[:100]}"
+                            )
+                            self._close_non_confirm_popup(window, descendants=_descendants)
+                            Trader._clean_dismiss = True
+                            raise ApiError(
+                                ErrorCode.INSUFFICIENT_BALANCE,
+                                f"账户余额不足: {order_detail_text[:150]}",
+                                suggestion="请检查账户可用资金后调整委托数量或价格。",
+                                details={"popup_title": title_text,
+                                         "popup_text": order_detail_text}
+                            )
+
                         # 干净错误：用户侧问题（余额不足等），窗口状态未损坏
                         _clean_error_keywords = ["余额不足", "不允许卖空"]
                         _is_clean_error = (
@@ -674,6 +698,14 @@ class Trader:
                 "A 股实行 T+1 交易制度，当日买入的股票需至下一个交易日方可卖出。"
             )
         # 可卖数量不足（仅卖出）
+        # 余额不足（防御性：若从其他路径进入 _classify_submit_error 也能正确分类）
+        # 注意：只用精确短语匹配，不用 "余额不足" 子串（会误匹配 "可用余额不足"=可卖数量）
+        if "可用资金不足" in error_text or "可用余额不够" in error_text:
+            return (
+                ErrorCode.INSUFFICIENT_BALANCE,
+                f"账户余额不足: {error_text[:150]}",
+                "请检查账户可用资金后调整委托数量或价格。"
+            )
         if "可卖数量" in error_text or "可用余额不足" in error_text:
             return (
                 ErrorCode.INSUFFICIENT_SHARES,
