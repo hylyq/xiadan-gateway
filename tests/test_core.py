@@ -128,6 +128,14 @@ class TestSubmitErrorClassification:
         assert code == ErrorCode.INSUFFICIENT_BALANCE, f"期望 INSUFFICIENT_BALANCE，实际 {code}"
         assert "余额不足" in msg
 
+    def test_short_selling_forbidden(self):
+        """卖空限制 → SHORT_SELLING_FORBIDDEN"""
+        text = "提交失败：股票余额不足，不允许卖空。"
+        code, msg, suggestion = self._classify(text)
+        from src.exceptions import ErrorCode
+        assert code == ErrorCode.SHORT_SELLING_FORBIDDEN, f"期望 SHORT_SELLING_FORBIDDEN，实际 {code}"
+        assert "不允许卖空" in msg
+
     def test_insufficient_shares(self):
         """可卖数量不足 → INSUFFICIENT_SHARES（回归）
         用"可用余额不足"避免 hit T1_RESTRICTION_KEYWORDS 中的"可卖数量" """
