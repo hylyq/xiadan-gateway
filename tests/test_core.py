@@ -129,8 +129,17 @@ class TestSubmitErrorClassification:
         assert "余额不足" in msg
 
     def test_short_selling_forbidden(self):
-        """卖空限制 → SHORT_SELLING_FORBIDDEN"""
+        """卖空限制（超出可卖数量）→ SHORT_SELLING_FORBIDDEN"""
         text = "提交失败：股票余额不足，不允许卖空。"
+        code, msg, suggestion = self._classify(text)
+        from src.exceptions import ErrorCode
+        assert code == ErrorCode.SHORT_SELLING_FORBIDDEN, f"期望 SHORT_SELLING_FORBIDDEN，实际 {code}"
+        assert "不允许卖空" in msg
+
+    def test_short_selling_no_position(self):
+        """卖空限制（无持仓）→ SHORT_SELLING_FORBIDDEN
+        关键字: "提交失败" + "无证券" + "持仓信息" """
+        text = "提交失败：当前账户10****88无证券601991的持仓信息。"
         code, msg, suggestion = self._classify(text)
         from src.exceptions import ErrorCode
         assert code == ErrorCode.SHORT_SELLING_FORBIDDEN, f"期望 SHORT_SELLING_FORBIDDEN，实际 {code}"

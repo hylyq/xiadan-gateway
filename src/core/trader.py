@@ -318,28 +318,36 @@ class Trader:
                                          "popup_text": order_detail_text}
                             )
 
-                        # 卖空检测：余额不足导致的卖出失败
-                        # 实际弹窗文本示例:
-                        #   "提交失败：股票余额不足，不允许卖空。"
+                        # 卖空检测：卖出无持仓或超出可卖数量
+                        # 变体1: "提交失败：股票余额不足，不允许卖空。"
+                        # 变体2: "提交失败：当前账户10****88无证券601991的持仓信息。"
                         # order_detail_text 从 cid=1040 提取可能不完整；
                         # _extract_popup_error_text 扫描全部 descendants，更可靠
+                        _sell_popup_text = (
+                            (order_detail_text or "")
+                            + "\n"
+                            + self._extract_popup_error_text(_descendants)
+                        )
                         _is_short_selling = (
-                            "不允许卖空" in (order_detail_text or "")
-                            or "不允许卖空" in self._extract_popup_error_text(_descendants)
+                            "不允许卖空" in _sell_popup_text
+                            or (
+                                "提交失败" in _sell_popup_text
+                                and "无证券" in _sell_popup_text
+                                and "持仓信息" in _sell_popup_text
+                            )
                         )
                         if _is_short_selling:
-                            _sell_popup = self._extract_popup_error_text(_descendants)
                             self.logger.warning(
-                                f"检测到卖空限制弹窗: {_sell_popup[:100]}"
+                                f"检测到卖空限制弹窗: {_sell_popup_text[:100]}"
                             )
                             self._close_non_confirm_popup(window, descendants=_descendants)
                             Trader._clean_dismiss = True
                             raise ApiError(
                                 ErrorCode.SHORT_SELLING_FORBIDDEN,
-                                f"不允许卖空: {_sell_popup[:150]}",
+                                f"不允许卖空: {_sell_popup_text[:150]}",
                                 suggestion="A 股不允许卖空，请检查持仓可卖数量后调整。",
                                 details={"popup_title": title_text,
-                                         "popup_text": _sell_popup}
+                                         "popup_text": _sell_popup_text}
                             )
 
                         # 干净错误：用户侧问题（余额不足等），窗口状态未损坏
@@ -722,8 +730,19 @@ class Trader:
                 "A 股实行 T+1 交易制度，当日买入的股票需至下一个交易日方可卖出。"
             )
         # 不允许卖空（防御性：若从其他路径进入也能正确分类）
-        # 弹窗文本示例: "提交失败：股票余额不足，不允许卖空。"
+        # 变体1: "提交失败：股票余额不足，不允许卖空。"
+        # 变体2: "提交失败：当前账户10****88无证券601991的持仓信息。"
         if "不允许卖空" in error_text:
+            return (
+                ErrorCode.SHORT_SELLING_FORBIDDEN,
+                f"不允许卖空: {error_text[:150]}",
+                "A 股不允许卖空，请检查持仓可卖数量后调整。"
+            )
+        if (
+            "提交失败" in error_text
+            and "无证券" in error_text
+            and "持仓信息" in error_text
+        ):
             return (
                 ErrorCode.SHORT_SELLING_FORBIDDEN,
                 f"不允许卖空: {error_text[:150]}",
