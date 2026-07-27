@@ -158,6 +158,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `T1_RESTRICTION` | T+1 制度限制（当日买入次日可卖） |
 | `INSUFFICIENT_SHARES` | 可卖数量不足 |
 | `INSUFFICIENT_BALANCE` | 可用资金/余额不足（点「确定」关闭，干净退出，下次同向可跳过） |
+| `SHORT_SELLING_FORBIDDEN` | 不允许卖空——无持仓或超出可卖数量（点「确定」关闭，干净退出） |
 | `PRICE_OUT_OF_RANGE` | 价格超出涨跌停限制（点「否」取消，干净退出，下次同向可跳过） |
 | `SERVER_UNAVAILABLE` | 券商服务器不可用（事务处理机转发失败等） |
 | `OCR_FAILED` | 验证码识别失败 |
@@ -177,6 +178,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | 价格超限 | 「提示信息」 | 是(Y) / 否(N) | 点 N 取消 → `PRICE_OUT_OF_RANGE` | 可信（干净退出） |
 | 单按钮提示 | 「提示」 | 确定 | 点击确定（只能用鼠标，Y 键无效） | 取决于内容 |
 | 余额不足 | 「提示」 | 确定 | 点确定关闭 → `INSUFFICIENT_BALANCE`（组合关键字：「提交失败」+ 余额/资金 + 「还差」） | 可信（干净退出） |
+| 卖空限制 | 「提示」 | 确定 | 点确定关闭 → `SHORT_SELLING_FORBIDDEN`（「不允许卖空」或 「提交失败」+「无证券」+「持仓信息」） | 可信（干净退出） |
 | 致命错误 | 「提示信息」 | 确定 | 关闭 + 分类报错 | **不可信** |
 
 > **注意**：标题为「提示」的单按钮弹窗只有「确定」按钮（cid=1），无法用字母键触发。调试时若发现 Y 键无效，检查是否为单按钮弹窗。
@@ -487,6 +489,7 @@ Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 间隔 0.15s)
 | 当前时间不允许委托 | `OUTSIDE_TRADING_HOURS` | 交易时段内操作 |
 | T+1 / 当日买入 / 未交收 | `T1_RESTRICTION` | 当日买入的股票需到下一个交易日方可卖出 |
 | 提交失败 + 余额/资金 + 还差 | `INSUFFICIENT_BALANCE` | 检查账户可用资金后调整数量或价格 |
+| 不允许卖空 / 提交失败 + 无证券 + 持仓信息 | `SHORT_SELLING_FORBIDDEN` | A 股不允许卖空，检查持仓可卖数量 |
 | 可卖数量 / 可用余额不足 | `INSUFFICIENT_SHARES` | 检查持仓可卖数量后调整 |
 | 事务处理机转发失败 | `SERVER_UNAVAILABLE` | 确认券商服务器正常 |
 | 其他 | `ORDER_SUBMIT_FAILED` | 通用建议 |
