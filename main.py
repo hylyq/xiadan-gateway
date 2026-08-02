@@ -28,6 +28,31 @@ from src.utils.logger import Logger
 MUTEX_NAME = "Global\\xiadan-gateway_Single_Instance_Mutex"
 
 
+def setup_console_utf8():
+    """Windows 控制台 UTF-8 支持：中文字符正常显示
+
+    乱码根源: Windows 控制台默认代码页 936(GBK)，且重定向时
+    stdout 用 ANSI 编码写入。日志文件本身是 UTF-8（无问题），
+    乱码只发生在控制台/重定向输出。
+
+    修复:
+    1. SetConsoleOutputCP(65001): 前台运行时控制台按 UTF-8 解码
+    2. sys.stdout/stderr reconfigure: 后台运行/重定向时输出 UTF-8 字节
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+    except Exception:
+        pass
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
 def check_single_instance():
     """检查是否已有实例在运行"""
     mutex = win32event.CreateMutex(None, False, MUTEX_NAME)
@@ -39,6 +64,9 @@ def check_single_instance():
 
 
 def main():
+    # 0. 控制台 UTF-8（中文日志正常显示）
+    setup_console_utf8()
+
     # 1. 单实例检查
     mutex = check_single_instance()
 
