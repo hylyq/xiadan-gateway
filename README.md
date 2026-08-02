@@ -112,6 +112,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `ocr.ddddocr_enabled` | false | ddddocr 调试开关（开启后可启用双引擎质检+模板提取，需 `uv sync --extra ocr`） |
 | `window_monitor.enabled` | true | 窗口最小化监控开关 |
 | `auth.enabled` | false | Token 认证开关 |
+| `logging.level` | INFO | 日志级别（排查 UIA 控件失效等问题时改 `DEBUG`，热生效无需重启） |
 
 > 修改配置后 `POST /admin/reload-config` 热重载（部分路径变更需重启）。
 
@@ -344,7 +345,8 @@ xiadan-gateway/
 │   │   └── config.py            # AppConfig（单例 + 热重载）
 │   └── utils/
 │       ├── singleton.py         # 线程安全单例基类
-│       ├── logger.py            # 日志器（文件轮转 + 控制台）
+│       ├── logger.py            # 日志器（文件轮转 + 控制台，级别可配置）
+│       ├── uia.py               # UIA 控件安全访问（safe_text/safe_control_type）
 │       ├── screenshot.py        # 截图工具 + 自动清理
 │       ├── poll.py              # 轮询等待（poll_until / timed）
 │       └── diagnostic.py        # 诊断工具（截图 + UI 文本 + OCR）
