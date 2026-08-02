@@ -43,15 +43,13 @@ def create_app() -> Flask:
             if request.path in PUBLIC_ENDPOINTS:
                 return None
             # 支持 Header: Authorization: Bearer <token> 或 X-API-Key: <token>
+            # 注意: 不支持 query string 传 token——会泄漏到访问日志/浏览器历史
             token = None
             auth_header = request.headers.get("Authorization", "")
             if auth_header.startswith("Bearer "):
                 token = auth_header[7:]
             if not token:
                 token = request.headers.get("X-API-Key")
-            # 也支持 query 参数 ?token=xxx（便于浏览器/curl 快速测试）
-            if not token:
-                token = request.args.get("token")
 
             if not token:
                 return error_response(
@@ -113,7 +111,7 @@ def _register_system_routes(app: Flask) -> None:
             "service": "xiadan-gateway",
             "version": "1.0.0",
             "xiadan_running": xiadan_running,
-            "trading_app_paths": trading_paths,
+            # 注意: 不返回 trading_app_paths（本机路径不对未认证访客暴露）
             "queue_status": task_queue.get_status(),
             "config": {
                 "watchdog_timeout_seconds": watchdog_timeout,

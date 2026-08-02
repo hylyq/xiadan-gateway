@@ -395,3 +395,78 @@ class TestConfigValidation:
         c = self._make_config(monkeypatch, tmp_path, {"host": ""})
         errors = c.validate()
         assert any("host" in e for e in errors)
+
+
+class TestAuthMiddleware:
+    """认证中间件测试（Flask test client + monkeypatch 配置）
+
+    锚定行为变更：query string 传 token（?token=xxx）已移除，
+    只接受 Authorization: Bearer / X-API-Key 请求头。
+    """
+
+    @staticmethod
+    def _make_client(monkeypatch, tmp_path, auth_enabled, token):
+        import json
+
+        from src.models import config as config_module
+
+        cfg = {"auth": {"enabled": auth_enabled, "token": token}}
+        p = tmp_path / "app_config.json"
+        p.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(config_module, "CONFIG_PATH", str(p))
+        config_module.AppConfig._reset_instance()
+
+        from src.api.routes import create_app
+        app = create_app()
+        app.config["TESTING"] = True
+        return app.test_client()
+
+    def test_auth_disabled_no_token_needed(self, monkeypatch, tmp_path):
+        """auth.enabled=false → 无认证要求"""
+        client = self._make_client(monkeypatch, tmp_path, False, "")
+        r = client.get("/queue/status")
+        assert r.get_json()["status"] == "success"
+
+    def test_missing_token_rejected(self, monkeypatch, tmp_path):
+        """启用认证后缺 token → AUTH_REQUIRED"""
+        client = self._make_client(monkeypatch, tmp_path, True, "secret")
+        r = client.get("/queue/status")
+        body = r.get_json()
+        assert body["status"] == "error"
+        assert body["error_code"] == "AUTH_REQUIRED"
+
+    def test_wrong_token_rejected(self, monkeypatch, tmp_path):
+        """错误 token → AUTH_FAILED"""
+        client = self._make_client(monkeypatch, tmp_path, True, "secret")
+        r = client.get("/queue/status", headers={"X-API-Key": "wrong"})
+        assert r.get_json()["error_code"] == "AUTH_FAILED"
+
+    def test_bearer_token_accepted(self, monkeypatch, tmp_path):
+        """Authorization: Bearer <token> 通过"""
+        client = self._make_client(monkeypatch, tmp_path, True, "secret")
+        r = client.get("/queue/status", headers={"Authorization": "Bearer secret"})
+        assert r.get_json()["status"] == "success"
+
+    def test_api_key_header_accepted(self, monkeypatch, tmp_path):
+        """X-API-Key: <token> 通过"""
+        client = self._make_client(monkeypatch, tmp_path, True, "secret")
+        r = client.get("/queue/status", headers={"X-API-Key": "secret"})
+        assert r.get_json()["status"] == "success"
+
+    def test_query_string_token_rejected(self, monkeypatch, tmp_path):
+        """行为锚定：?token=xxx 不再被接受（已移除 query string 传参）"""
+        client = self._make_client(monkeypatch, tmp_path, True, "secret")
+        r = client.get("/queue/status?token=secret")
+        assert r.get_json()["error_code"] == "AUTH_REQUIRED"
+
+    def test_health_always_public(self, monkeypatch, tmp_path):
+        """/health 始终公开（监控探活不受认证影响）"""
+        client = self._make_client(monkeypatch, tmp_path, True, "secret")
+        r = client.get("/health")
+        assert r.get_json()["status"] == "success"
+
+    def test_health_hides_app_paths(self, monkeypatch, tmp_path):
+        """/health 不返回 trading_app_paths（不对未认证访客暴露本机路径）"""
+        client = self._make_client(monkeypatch, tmp_path, False, "")
+        body = client.get("/health").get_json()
+        assert "trading_app_paths" not in body["data"]
