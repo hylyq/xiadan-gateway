@@ -11,6 +11,7 @@
 import time
 from typing import Optional
 
+from src.api.task_queue import TaskQueue, report_window_state
 from src.constants import (
     CONTROL_ID_CODE, CONTROL_ID_PRICE, CONTROL_ID_AMOUNT,
     CONTROL_ID_SUBMIT, CONTROL_ID_PRICE_TYPE,
@@ -33,18 +34,18 @@ from src.utils.uia import safe_text
 class Trader:
     """下单编排器"""
 
-    # 上次下单是否出现过弹窗（类变量，跨实例持久化）
-    # TaskQueue 读取此标志判断连续同向订单能否跳过准备操作
-    _had_any_dialog = False
-    # 价格超限等警告是否被干净关闭（点「否」而非 ESC 乱关）
-    # True 时窗口状态仍可信，TaskQueue 不会清除 _last_task_info
-    _clean_dismiss = False
-
     def __init__(self, window_service: WindowService):
         self.window_service = window_service
         self.config = AppConfig()
         self.logger = Logger.get_instance()
+        # 窗口状态（@report_window_state 装饰器在方法结束时上报给 TaskQueue）
+        # _had_any_dialog: 本次下单是否出现过弹窗（连续同向跳过的依据）
+        # _clean_dismiss: 价格超限等警告是否被干净关闭（点「否」而非 ESC 乱关），
+        #                 True 时窗口状态仍可信，TaskQueue 不清除连续跳过状态
+        self._had_any_dialog = False
+        self._clean_dismiss = False
 
+    @report_window_state
     def place_order(
         self,
         code: str,
@@ -54,7 +55,7 @@ class Trader:
         price_type: str = "limit",
         confirm: bool = True
     ) -> dict:
-        """下单
+        """下单（@report_window_state：结束时上报窗口状态给 TaskQueue）
 
         Args:
             code: 股票代码
@@ -80,8 +81,8 @@ class Trader:
         )
 
         # 重置弹窗标志：place_order 执行过程中若遇到任何弹窗，设为 True
-        Trader._had_any_dialog = False
-        Trader._clean_dismiss = False
+        self._had_any_dialog = False
+        self._clean_dismiss = False
 
         # 0. 价格格式校验（A 股限 2 位小数）
         if price_type == "limit" and price:
@@ -93,7 +94,6 @@ class Trader:
             price = sanitized_price
 
         # 1. 激活窗口 + F1/F2（上笔干净退出时可跳过重置+激活）
-        from src.api.task_queue import TaskQueue
         _task_queue = TaskQueue.get_instance()
         if _task_queue.skip_window_setup:
             _task_queue.skip_window_setup = False  # 单次消耗
@@ -302,7 +302,7 @@ class Trader:
                                     window, CONFIRM_NO_BUTTON_ID, descendants=_descendants)
                             except Exception:
                                 self._close_non_confirm_popup(window, descendants=_descendants)
-                            Trader._clean_dismiss = True
+                            self._clean_dismiss = True
                             raise ApiError(
                                 ErrorCode.PRICE_OUT_OF_RANGE,
                                 _rule.message_template.replace("{text}", (order_detail_text or "")[:150]),
@@ -329,7 +329,7 @@ class Trader:
                             )
                             self._close_non_confirm_popup(window, descendants=_descendants)
                             if _rule.clean_dismiss:
-                                Trader._clean_dismiss = True
+                                self._clean_dismiss = True
                             raise ApiError(
                                 _error_code, _message, suggestion=_suggestion,
                                 details={"popup_title": title_text,
@@ -435,7 +435,7 @@ class Trader:
                 confirmed = True  # 无弹窗时视为已提交
 
         # 记录是否有弹窗出现：仅快速交易模式（完全无弹窗）可让下次同向订单跳过准备
-        Trader._had_any_dialog = confirm_dialog_detected or warning_dismissed
+        self._had_any_dialog = confirm_dialog_detected or warning_dismissed
 
         action = "买入" if status == "1" else "卖出"
         mode = "市价" if is_market else "限价"

@@ -11,6 +11,7 @@
 看门狗触发后，必须完成所有恢复步骤后才 task['event'].set()，
 确保 HTTP 调用方收到 TASK_TIMEOUT 错误时，xiadan.exe 已重置为初始状态。
 """
+import functools
 import queue
 import threading
 import time
@@ -42,11 +43,36 @@ class Task:
         # 标记是否已被看门狗判定为超时
         # 用于 worker 在 finally 中丢弃迟到的 result，避免状态污染
         self.is_timeout: bool = False
+        # 业务代码通过 report_window_state 装饰器写入的窗口状态
+        # {"had_dialog": bool, "clean": bool} —— 连续同组跳过的决策依据
+        self.window_state: Optional[dict] = None
 
     def elapsed(self) -> float:
         if self.start_time is None:
             return 0
         return time.time() - self.start_time
+
+
+def report_window_state(fn):
+    """业务方法装饰器：方法结束时把窗口状态同步到当前任务
+
+    替代原先 TaskQueue 读取业务类变量的隐式契约——
+    业务方法无需知道 TaskQueue 的读取时机，结束时自动上报。
+
+    window_state = {"had_dialog": bool, "clean": bool}
+    TaskQueue 据此决定连续同组操作能否跳过窗口准备。
+
+    用法:
+        @report_window_state
+        def place_order(self, ...): ...
+    """
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return fn(self, *args, **kwargs)
+        finally:
+            TaskQueue.get_instance()._record_window_state(self)
+    return wrapper
 
 
 class TaskQueue(Singleton):
@@ -172,7 +198,7 @@ class TaskQueue(Singleton):
                 # 例外：价格超限等「干净退出」——窗口状态可信，保留以便下次同向跳过
                 if task.error is None and not task.is_timeout:
                     self._update_task_state(task)
-                elif self._is_clean_dismiss():
+                elif (task.window_state or {}).get("clean"):
                     self._update_task_state(task)
                 else:
                     self._last_task_info = None
@@ -217,26 +243,24 @@ class TaskQueue(Singleton):
     def _get_operation_group(cls, task_name: str) -> str:
         return cls._OPERATION_GROUPS.get(task_name, task_name)
 
-    @staticmethod
-    def _read_had_dialog(task: Task) -> bool:
-        """读取任务执行后的弹窗标志（统一入口）"""
-        if task.name == "place_order":
-            from src.core.trader import Trader
-            return Trader._had_any_dialog
-        if task.name == "cancel_all_orders":
-            from src.services.trading_service import TradingService
-            return TradingService._had_dialog
-        # 查询/内部子任务：不涉及弹窗，窗口状态始终可信
-        return False
+    def _record_window_state(self, business_obj) -> None:
+        """业务方法结束时回调：把业务窗口状态写入当前任务
 
-    @staticmethod
-    def _is_clean_dismiss() -> bool:
-        """价格超限等「干净退出」——弹窗正常关闭，窗口状态可信"""
-        from src.core.trader import Trader
-        if Trader._clean_dismiss:
-            Trader._clean_dismiss = False
-            return True
-        return False
+        由 report_window_state 装饰器调用，业务对象通过实例属性
+        _had_any_dialog（Trader）/ _had_dialog（TradingService）
+        与 _clean_dismiss 上报窗口状态。
+        查询等无装饰器任务 window_state 保持 None → had_dialog=False。
+        """
+        task = self._current_task
+        if task is None:
+            return
+        had_dialog = getattr(business_obj, "_had_any_dialog", None)
+        if had_dialog is None:
+            had_dialog = getattr(business_obj, "_had_dialog", False)
+        task.window_state = {
+            "had_dialog": bool(had_dialog),
+            "clean": bool(getattr(business_obj, "_clean_dismiss", False)),
+        }
 
     def _can_skip_window_setup(self, task: Task) -> bool:
         """上笔干净退出 + 同组操作 → 跳过窗口重置
@@ -265,10 +289,11 @@ class TaskQueue(Singleton):
 
     def _update_task_state(self, task: Task) -> None:
         """记录任务成功后的窗口状态"""
+        ws = task.window_state or {}
         state = {
             "name": task.name,
             "group": self._get_operation_group(task.name),
-            "had_dialog": self._read_had_dialog(task),
+            "had_dialog": ws.get("had_dialog", False),
         }
         if task.name == "place_order":
             state["status"] = task.params.get("status")

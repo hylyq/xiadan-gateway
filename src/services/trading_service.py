@@ -13,6 +13,7 @@
 """
 import time
 
+from src.api.task_queue import report_window_state
 from src.constants import (
     CANCEL_TYPE_MAP,
     CANCEL_CONFIRM_TEXT_ID, CANCEL_CONFIRM_YES_BUTTON_ID,
@@ -28,15 +29,15 @@ from src.utils.uia import safe_text
 class TradingService:
     """撤单服务"""
 
-    # 撤单过程是否出现弹窗（类变量，跨实例持久化）
-    # TaskQueue 读取此标志判断连续撤单能否跳过准备操作
-    _had_dialog = False
-
     def __init__(self, window_service: WindowService):
         self.window_service = window_service
         self.config = AppConfig()
         self.logger = Logger.get_instance()
+        # 撤单过程是否出现弹窗（@report_window_state 装饰器上报给 TaskQueue，
+        # 连续撤单能否跳过准备操作的依据）
+        self._had_dialog = False
 
+    @report_window_state
     def cancel_all_orders(self, cancel_type: str = "A") -> dict:
         """撤单
 
@@ -62,7 +63,7 @@ class TradingService:
         self.logger.info(f"开始撤单: {operation_name}")
 
         # 重置弹窗标志：本次执行过程中若遇到弹窗，设为 True
-        TradingService._had_dialog = False
+        self._had_dialog = False
 
         # 连续同向跳过：上次撤单成功后窗口仍在 F3，无需重置/激活/按键
         from src.api.task_queue import TaskQueue
@@ -183,7 +184,7 @@ class TradingService:
         )
 
         # 记录弹窗标志：有弹窗 = 下次同向不可跳过
-        TradingService._had_dialog = confirm_dialog_shown
+        self._had_dialog = confirm_dialog_shown
 
         return {
             "cancel_type": operation_name,

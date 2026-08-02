@@ -470,3 +470,155 @@ class TestAuthMiddleware:
         client = self._make_client(monkeypatch, tmp_path, False, "")
         body = client.get("/health").get_json()
         assert "trading_app_paths" not in body["data"]
+
+
+class TestWindowStateReporting:
+    """窗口状态通道测试（#6 重构锚定）
+
+    业务方法通过 @report_window_state 装饰器在结束时把状态写入
+    task.window_state，TaskQueue 不再读取业务类变量（隐式契约已消除）。
+    """
+
+    @staticmethod
+    def _make_task_queue():
+        from src.api.task_queue import TaskQueue
+        return TaskQueue.get_instance()
+
+    def test_record_window_state_trader(self):
+        """Trader 实例属性 → task.window_state（had_dialog + clean）"""
+        from src.api.task_queue import Task
+        tq = self._make_task_queue()
+        task = Task(lambda: None, "place_order", {}, 30)
+        tq._current_task = task
+        try:
+            class FakeTrader:
+                _had_any_dialog = True
+                _clean_dismiss = True
+            tq._record_window_state(FakeTrader())
+            assert task.window_state == {"had_dialog": True, "clean": True}
+        finally:
+            tq._current_task = None
+
+    def test_record_window_state_cancel(self):
+        """TradingService 用 _had_dialog 属性 → 同样上报"""
+        from src.api.task_queue import Task
+        tq = self._make_task_queue()
+        task = Task(lambda: None, "cancel_all_orders", {}, 30)
+        tq._current_task = task
+        try:
+            class FakeCancelService:
+                _had_dialog = True
+            tq._record_window_state(FakeCancelService())
+            assert task.window_state == {"had_dialog": True, "clean": False}
+        finally:
+            tq._current_task = None
+
+    def test_no_window_state_defaults_to_clean(self):
+        """无装饰器任务（查询）window_state=None → had_dialog=False 可跳过"""
+        from src.api.task_queue import Task
+        tq = self._make_task_queue()
+        task = Task(lambda: None, "get_position", {}, 30)
+        tq._last_task_info = None
+        try:
+            tq._update_task_state(task)
+            assert tq._last_task_info == {
+                "name": "get_position",
+                "group": "query",
+                "had_dialog": False,
+            }
+        finally:
+            tq._last_task_info = None
+
+    def test_can_skip_same_group_no_dialog(self):
+        """同组 + 上笔无弹窗 → 可跳过窗口准备"""
+        from src.api.task_queue import Task
+        tq = self._make_task_queue()
+        tq._last_task_info = {"name": "place_order", "group": "trade",
+                              "had_dialog": False, "status": "1"}
+        try:
+            task = Task(lambda: None, "place_order", {"status": "1"}, 30)
+            assert tq._can_skip_window_setup(task) is True
+        finally:
+            tq._last_task_info = None
+
+    def test_can_skip_cross_direction(self):
+        """同组买→卖（状态不同）仍可跳过重置（只按 F1/F2）"""
+        from src.api.task_queue import Task
+        tq = self._make_task_queue()
+        tq._last_task_info = {"name": "place_order", "group": "trade",
+                              "had_dialog": False, "status": "1"}
+        try:
+            task = Task(lambda: None, "place_order", {"status": "2"}, 30)
+            assert tq._can_skip_window_setup(task) is True
+        finally:
+            tq._last_task_info = None
+
+    def test_cannot_skip_different_group(self):
+        """不同组（trade→cancel）→ 不可跳过"""
+        from src.api.task_queue import Task
+        tq = self._make_task_queue()
+        tq._last_task_info = {"name": "place_order", "group": "trade",
+                              "had_dialog": False, "status": "1"}
+        try:
+            task = Task(lambda: None, "cancel_all_orders", {}, 30)
+            assert tq._can_skip_window_setup(task) is False
+        finally:
+            tq._last_task_info = None
+
+    def test_cannot_skip_after_dialog(self):
+        """上笔有弹窗 → 不可跳过"""
+        from src.api.task_queue import Task
+        tq = self._make_task_queue()
+        tq._last_task_info = {"name": "place_order", "group": "trade",
+                              "had_dialog": True, "status": "1"}
+        try:
+            task = Task(lambda: None, "place_order", {"status": "1"}, 30)
+            assert tq._can_skip_window_setup(task) is False
+        finally:
+            tq._last_task_info = None
+
+    def test_report_decorator_writes_task_state(self):
+        """装饰器端到端：业务方法执行后 task.window_state 已写入"""
+        from src.api.task_queue import Task, TaskQueue, report_window_state
+        tq = TaskQueue.get_instance()
+
+        class FakeBusiness:
+            def __init__(self):
+                self._had_any_dialog = False
+                self._clean_dismiss = True
+
+            @report_window_state
+            def run(self):
+                return "ok"
+
+        task = Task(lambda: None, "place_order", {}, 30)
+        tq._current_task = task
+        try:
+            result = FakeBusiness().run()
+            assert result == "ok"
+            assert task.window_state == {"had_dialog": False, "clean": True}
+        finally:
+            tq._current_task = None
+
+    def test_report_decorator_on_exception(self):
+        """异常路径也上报状态（finally 语义）"""
+        from src.api.task_queue import Task, TaskQueue, report_window_state
+        tq = TaskQueue.get_instance()
+
+        class FakeBusiness:
+            def __init__(self):
+                self._had_any_dialog = True
+                self._clean_dismiss = True
+
+            @report_window_state
+            def run(self):
+                raise RuntimeError("boom")
+
+        task = Task(lambda: None, "place_order", {}, 30)
+        tq._current_task = task
+        try:
+            with pytest.raises(RuntimeError):
+                FakeBusiness().run()
+            assert task.window_state == {"had_dialog": True, "clean": True}
+        finally:
+            tq._current_task = None
