@@ -165,9 +165,56 @@ class AppConfig(Singleton):
             cfg["screenshot_dir"] = os.path.join(BASE_DIR, cfg["screenshot_dir"])
         return cfg
 
-    def get_all(self) -> dict:
-        """获取全部配置（用于 /health 接口）"""
-        return self._config.copy()
+    def validate(self) -> list:
+        """配置校验，返回错误描述列表（空列表 = 通过）
+
+        启动时调用（main.py）：非法配置直接中止启动并打印修复指引，
+        避免 waitress 启动后运行期爆炸（如 port 类型错、看门狗超时为负）。
+
+        校验项：
+        - trading_app_paths: 必须是字符串列表，元素为非空字符串
+        - host: 非空字符串
+        - port: 1-65535 的整数（接受数字字符串）
+        - task_queue 超时/队列字段: 必须 > 0
+        """
+        errors = []
+
+        paths = self._config.get("trading_app_paths")
+        if paths is not None and not isinstance(paths, list):
+            errors.append(
+                f"trading_app_paths 必须是字符串列表，当前类型: {type(paths).__name__}"
+            )
+        elif paths:
+            for i, p in enumerate(paths):
+                if not isinstance(p, str) or not p.strip():
+                    errors.append(
+                        f"trading_app_paths[{i}] 无效（应为非空字符串）: {p!r}"
+                    )
+
+        host = self._config.get("host")
+        if not isinstance(host, str) or not host.strip():
+            errors.append(f"host 必须是非空字符串，当前: {host!r}")
+
+        try:
+            port = int(self._config.get("port"))
+            if not 1 <= port <= 65535:
+                errors.append(f"port 必须在 1-65535 之间，当前: {port}")
+        except (TypeError, ValueError):
+            errors.append(f"port 必须是数字，当前: {self._config.get('port')!r}")
+
+        qcfg = self._config.get("task_queue") or {}
+        for field in ("watchdog_timeout_seconds", "query_timeout_seconds",
+                      "confirm_timeout_seconds", "max_size"):
+            v = qcfg.get(field)
+            if v is None:
+                continue
+            try:
+                if float(v) <= 0:
+                    errors.append(f"task_queue.{field} 必须 > 0，当前: {v}")
+            except (TypeError, ValueError):
+                errors.append(f"task_queue.{field} 必须是数字，当前: {v!r}")
+
+        return errors
 
     def reload(self) -> dict:
         """热重载配置文件

@@ -318,3 +318,80 @@ class TestPopupDispatchRules:
         assert rule is not None
         assert rule.error_code == "SHORT_SELLING_FORBIDDEN"
         assert rule.clean_dismiss is True
+
+
+class TestConfigValidation:
+    """启动期配置校验测试（monkeypatch CONFIG_PATH + 单例重置隔离）"""
+
+    @staticmethod
+    def _make_config(monkeypatch, tmp_path, overrides):
+        import json
+
+        from src.models import config as config_module
+
+        cfg = {
+            "trading_app_paths": ["C:\\xiadan.exe"],
+            "host": "127.0.0.1",
+            "port": 5000,
+        }
+        cfg.update(overrides)
+        p = tmp_path / "app_config.json"
+        p.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(config_module, "CONFIG_PATH", str(p))
+        config_module.AppConfig._reset_instance()
+        return config_module.AppConfig()
+
+    def test_valid_config_passes(self, monkeypatch, tmp_path):
+        """合法配置通过校验"""
+        c = self._make_config(monkeypatch, tmp_path, {})
+        assert c.validate() == []
+
+    def test_valid_config_minimal(self, monkeypatch, tmp_path):
+        """最小配置（仅必填项）通过校验"""
+        c = self._make_config(monkeypatch, tmp_path, {
+            "trading_app_paths": None, "host": "0.0.0.0", "port": 8080,
+        })
+        assert c.validate() == []
+
+    def test_invalid_port_type(self, monkeypatch, tmp_path):
+        """port 非数字 → 报错"""
+        c = self._make_config(monkeypatch, tmp_path, {"port": "abc"})
+        errors = c.validate()
+        assert any("port" in e for e in errors)
+
+    def test_invalid_port_range(self, monkeypatch, tmp_path):
+        """port 越界 → 报错"""
+        c = self._make_config(monkeypatch, tmp_path, {"port": 70000})
+        errors = c.validate()
+        assert any("port" in e for e in errors)
+
+    def test_port_string_acceptable(self, monkeypatch, tmp_path):
+        """port 数字字符串（如 '5000'）→ 通过（int() 转换）"""
+        c = self._make_config(monkeypatch, tmp_path, {"port": "5000"})
+        assert c.validate() == []
+
+    def test_invalid_paths_type(self, monkeypatch, tmp_path):
+        """trading_app_paths 传字符串（应为列表）→ 报错"""
+        c = self._make_config(monkeypatch, tmp_path, {"trading_app_paths": "C:\\xiadan.exe"})
+        errors = c.validate()
+        assert any("trading_app_paths" in e for e in errors)
+
+    def test_empty_path_element(self, monkeypatch, tmp_path):
+        """路径列表含空元素 → 报错"""
+        c = self._make_config(monkeypatch, tmp_path, {"trading_app_paths": ["C:\\xiadan.exe", ""]})
+        errors = c.validate()
+        assert any("trading_app_paths[1]" in e for e in errors)
+
+    def test_negative_timeout(self, monkeypatch, tmp_path):
+        """看门狗超时为负 → 报错"""
+        c = self._make_config(monkeypatch, tmp_path, {
+            "task_queue": {"watchdog_timeout_seconds": -5},
+        })
+        errors = c.validate()
+        assert any("watchdog_timeout_seconds" in e for e in errors)
+
+    def test_invalid_host(self, monkeypatch, tmp_path):
+        """host 为空 → 报错"""
+        c = self._make_config(monkeypatch, tmp_path, {"host": ""})
+        errors = c.validate()
+        assert any("host" in e for e in errors)

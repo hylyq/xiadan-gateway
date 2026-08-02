@@ -53,6 +53,15 @@ def main():
         # 应用日志级别（默认 INFO，debug 日志仅在排查时开启）
         logger.set_level(config.get_logging_config().get("level", "INFO"))
 
+        # 2.5 配置校验：非法配置直接中止，避免启动后运行期爆炸
+        config_errors = config.validate()
+        if config_errors:
+            logger.error("配置校验失败，启动中止。请修复 config/app_config.json：")
+            for err in config_errors:
+                logger.error(f"  - {err}")
+            logger.error("修复后重新启动")
+            sys.exit(1)
+
         logger.info("=" * 60)
         logger.info("xiadan-gateway 启动中...")
         logger.info("=" * 60)
