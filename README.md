@@ -223,7 +223,7 @@ PopupRule(
 
 > 规则表**顺序敏感**：多个规则共享关键词（如"可卖数量"同时出现在 T1 与 `INSUFFICIENT_SHARES`），顺序决定归属——新规则要放在正确的优先级位置，并补测试防止回归。
 
-> **弹窗文本提取说明**：`order_detail_text` 优先从 cid=1040 读取，fallback 用 `_extract_dialog_text(title_el)` 从弹窗容器（`title_el.parent()`）内收集文本；匹配统一用组合文本（primary + `_extract_popup_error_text` 全控件扫描兜底），cid=1040 提取不完整时错误弹窗仍能被精确分类，不会被当作通用警告点「是(Y)」。
+> **弹窗文本提取说明**：`order_detail_text` 优先从 cid=1040 读取，fallback 用 `_extract_dialog_text(title_el)` 从弹窗容器（`title_el.parent()`）内收集文本；`_extract_popup_error_text` 同样**容器优先**（纯净、不依赖硬编码 UI 标签黑名单，券商界面升级不受影响），容器提取为空才降级全局扫描 + 黑名单过滤（兜底防线）；匹配统一用组合文本（primary + 兜底提取），cid=1040 提取不完整时错误弹窗仍能被精确分类，不会被当作通用警告点「是(Y)」。
 
 ## API 接口
 
