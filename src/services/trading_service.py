@@ -22,6 +22,7 @@ from src.models.config import AppConfig
 from src.services.window_service import WindowService
 from src.utils.logger import Logger
 from src.utils.poll import poll_until, timed, PollTimeoutError
+from src.utils.uia import safe_text
 
 
 class TradingService:
@@ -195,16 +196,10 @@ class TradingService:
     def _has_blocking_text(descendants) -> bool:
         """检查 descendants 中是否有阻塞型弹窗特征文本（不遍历 UIA 树）"""
         popup_keywords = ["Begin failed", "failed", "失败", "事务处理机"]
-        try:
-            for el in descendants:
-                try:
-                    text = el.window_text() or ""
-                    if any(kw in text for kw in popup_keywords):
-                        return True
-                except Exception:
-                    continue
-        except Exception:
-            pass
+        for el in descendants:
+            text = safe_text(el)
+            if any(kw in text for kw in popup_keywords):
+                return True
         return False
 
     def _dismiss_blocking_popup(self, window) -> bool:

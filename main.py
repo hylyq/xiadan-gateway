@@ -50,6 +50,8 @@ def main():
         # 2. 加载配置
         config = AppConfig()
         logger = Logger.get_instance()
+        # 应用日志级别（默认 INFO，debug 日志仅在排查时开启）
+        logger.set_level(config.get_logging_config().get("level", "INFO"))
 
         logger.info("=" * 60)
         logger.info("xiadan-gateway 启动中...")

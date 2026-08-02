@@ -17,6 +17,7 @@ from config.key_config import KEY_MAP
 from src.constants import TRADING_WINDOW_TITLE
 from src.utils.logger import Logger
 from src.utils.poll import timed
+from src.utils.uia import safe_control_type, safe_text
 
 
 class WindowService:
@@ -265,41 +266,38 @@ class WindowService:
 
         try:
             for ctrl in window.descendants():
-                try:
-                    text = ctrl.window_text() or ""
-                    if any(kw in text for kw in popup_keywords):
-                        self.logger.info(f"检测到提示弹窗: {text[:80]}，尝试关闭")
-                        # 尝试点击"确定"按钮（标准对话框 IDOK=1, IDCANCEL=2）
-                        for btn_id in (1, 2):
-                            btn = self.find_element_in_window(window, btn_id)
-                            if btn is not None:
-                                btn.click_input()
-                                self.logger.info(f"已点击按钮 cid={btn_id} 关闭弹窗")
-                                # 轮询等待弹窗消失（替代固定 sleep）
-                                try:
-                                    from src.utils.poll import poll_until_not
-                                    poll_until_not(
-                                        lambda: self._has_popup_text(popup_keywords),
-                                        timeout=2.0, interval=0.1,
-                                        description="弹窗关闭"
-                                    )
-                                except Exception:
-                                    pass
-                                return True
-                        # 找不到按钮则用 ENTER 关闭
-                        self.send_key("{ENTER}")
-                        try:
-                            from src.utils.poll import poll_until_not
-                            poll_until_not(
-                                lambda: self._has_popup_text(popup_keywords),
-                                timeout=2.0, interval=0.1,
-                                description="弹窗关闭(ENTER)"
-                            )
-                        except Exception:
-                            pass
-                        return True
-                except Exception:
-                    continue
+                text = safe_text(ctrl)
+                if any(kw in text for kw in popup_keywords):
+                    self.logger.info(f"检测到提示弹窗: {text[:80]}，尝试关闭")
+                    # 尝试点击"确定"按钮（标准对话框 IDOK=1, IDCANCEL=2）
+                    for btn_id in (1, 2):
+                        btn = self.find_element_in_window(window, btn_id)
+                        if btn is not None:
+                            btn.click_input()
+                            self.logger.info(f"已点击按钮 cid={btn_id} 关闭弹窗")
+                            # 轮询等待弹窗消失（替代固定 sleep）
+                            try:
+                                from src.utils.poll import poll_until_not
+                                poll_until_not(
+                                    lambda: self._has_popup_text(popup_keywords),
+                                    timeout=2.0, interval=0.1,
+                                    description="弹窗关闭"
+                                )
+                            except Exception:
+                                pass
+                            return True
+                    # 找不到按钮则用 ENTER 关闭
+                    self.send_key("{ENTER}")
+                    try:
+                        from src.utils.poll import poll_until_not
+                        poll_until_not(
+                            lambda: self._has_popup_text(popup_keywords),
+                            timeout=2.0, interval=0.1,
+                            description="弹窗关闭(ENTER)"
+                        )
+                    except Exception:
+                        pass
+                    return True
         except Exception:
             pass
         return False
@@ -315,7 +313,7 @@ class WindowService:
             return False
         try:
             for ctrl in window.descendants():
-                text = ctrl.window_text() or ""
+                text = safe_text(ctrl)
                 if any(kw in text for kw in popup_keywords):
                     return True
         except Exception:
@@ -329,12 +327,9 @@ class WindowService:
         try:
             texts = []
             for c in descendants:
-                try:
-                    t = c.window_text()
-                    if t and t.strip():
-                        texts.append(t.strip())
-                except Exception:
-                    pass
+                t = safe_text(c)
+                if t and t.strip():
+                    texts.append(t.strip())
             return "\n".join(texts)
         except Exception:
             return ""
@@ -396,22 +391,15 @@ class WindowService:
         result = []
         try:
             for ctrl in window.descendants():
-                try:
-                    ctrl_text = ctrl.window_text() or ""
-                    if not ctrl_text.strip():
-                        continue
-                    if control_type:
-                        try:
-                            if ctrl.element_info.control_type != control_type:
-                                continue
-                        except Exception:
-                            continue
-                    for kw in text_keywords:
-                        if kw in ctrl_text:
-                            result.append(ctrl)
-                            break
-                except Exception:
+                ctrl_text = safe_text(ctrl)
+                if not ctrl_text.strip():
                     continue
+                if control_type and safe_control_type(ctrl) != control_type:
+                    continue
+                for kw in text_keywords:
+                    if kw in ctrl_text:
+                        result.append(ctrl)
+                        break
         except Exception:
             pass
         return result
@@ -434,12 +422,9 @@ class WindowService:
                 target_type = root_control_id[1]
                 root = None
                 for el in window.descendants():
-                    try:
-                        if el.element_info.control_type == target_type:
-                            root = el
-                            break
-                    except Exception:
-                        continue
+                    if safe_control_type(el) == target_type:
+                        root = el
+                        break
             else:
                 root = self.find_element_in_window(window, root_control_id)
             if root is None:
@@ -841,17 +826,14 @@ class WindowService:
         # 验证：买入/卖出面板是否已关闭（检查是否有 "证券代码" 字段）
         try:
             for ctrl in window.descendants():
-                try:
-                    text = ctrl.window_text() or ""
-                    if "证券代码" in text or "买入价格" in text or "卖出价格" in text:
-                        self.logger.warning(
-                            f"F4 后子面板仍存在（检测到 '{text[:20]}'），尝试再按一次 F4"
-                        )
-                        self.send_key("F4")
-                        time.sleep(0.5)
-                        break
-                except Exception:
-                    continue
+                text = safe_text(ctrl)
+                if "证券代码" in text or "买入价格" in text or "卖出价格" in text:
+                    self.logger.warning(
+                        f"F4 后子面板仍存在（检测到 '{text[:20]}'），尝试再按一次 F4"
+                    )
+                    self.send_key("F4")
+                    time.sleep(0.5)
+                    break
         except Exception as e:
             self.logger.warning(f"验证子面板关闭状态时出错: {e}")
 

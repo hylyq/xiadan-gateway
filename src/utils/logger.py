@@ -99,6 +99,17 @@ class Logger(Singleton):
     def debug(self, message: str) -> None:
         self.add_log(message, "DEBUG")
 
+    def set_level(self, level: str = "INFO") -> None:
+        """设置日志级别（INFO/WARNING/ERROR/DEBUG），热生效
+
+        文件和控制台 handler 同步调整。默认 INFO 下 debug 日志不可见，
+        排查 UIA 控件失效等问题时将 config/logging.level 改为 DEBUG。
+        """
+        numeric = getattr(logging, str(level).upper(), logging.INFO)
+        self.file_logger.setLevel(numeric)
+        for handler in self.file_logger.handlers:
+            handler.setLevel(numeric)
+
     def get_recent_logs(self, count: int = 100) -> list:
         """获取最近 N 条日志"""
         with self.lock:

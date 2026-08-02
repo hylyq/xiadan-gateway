@@ -27,6 +27,7 @@ from src.services.window_service import WindowService
 from src.utils.diagnostic import DiagnosticUtil
 from src.utils.logger import Logger
 from src.utils.poll import poll_until, timed, PollTimeoutError
+from src.utils.uia import safe_text
 
 
 class Trader:
@@ -146,17 +147,11 @@ class Trader:
         # 如 "事务处理机转发数据失败"、"Begin failed!" 等，95%+ 订单无此弹窗
         with timed("代码输入后弹窗防御", self.logger):
             _has_server_error = False
-            try:
-                for el in _descendants:
-                    try:
-                        text = el.window_text() or ""
-                        if any(kw in text for kw in SERVER_ERROR_POPUP_KEYWORDS):
-                            _has_server_error = True
-                            break
-                    except Exception:
-                        continue
-            except Exception:
-                pass
+            for el in _descendants:
+                text = safe_text(el)
+                if any(kw in text for kw in SERVER_ERROR_POPUP_KEYWORDS):
+                    _has_server_error = True
+                    break
             if _has_server_error:
                 # 检测到弹窗关键词，走完整关闭流程并重新获取窗口
                 dismissed = self._dismiss_server_error_popup(window)
@@ -573,17 +568,14 @@ class Trader:
             parent = title_el.parent()
             texts = []
             for c in parent.descendants():
-                try:
-                    t = (c.window_text() or "").strip()
-                    # 过滤：空文本、过长文本、标题本身、菜单标签
-                    if not t or len(t) > 200:
-                        continue
-                    if t in ("提示", "提示信息", "委托确认", "是(Y)", "否(N)",
-                              "确定", "取消"):
-                        continue
-                    texts.append(t)
-                except Exception:
+                t = safe_text(c).strip()
+                # 过滤：空文本、过长文本、标题本身、菜单标签
+                if not t or len(t) > 200:
                     continue
+                if t in ("提示", "提示信息", "委托确认", "是(Y)", "否(N)",
+                          "确定", "取消"):
+                    continue
+                texts.append(t)
             return "\n".join(texts)
         except Exception:
             return ""
@@ -619,23 +611,20 @@ class Trader:
         }
         lines = []
         for el in descendants:
-            try:
-                t = (el.window_text() or "").strip()
-                if not t or len(t) > 200:
-                    continue
-                if t in _ui_labels:
-                    continue
-                if t in ("多", "少", "位置", "添加", "打开", "关闭",
-                          "专业", "精简", "退出", "登录", "系统",
-                          "最小化", "最大化", "分析", "风控", "条件",
-                          "双向", "零"):
-                    continue
-                # 过滤纯数字/时间戳（如 "00:00:22", "1/1", "1/2" 等分页信息）
-                if t.replace(":", "").replace("/", "").replace(".", "").isdigit():
-                    continue
-                lines.append(t)
-            except Exception:
-                pass
+            t = safe_text(el).strip()
+            if not t or len(t) > 200:
+                continue
+            if t in _ui_labels:
+                continue
+            if t in ("多", "少", "位置", "添加", "打开", "关闭",
+                      "专业", "精简", "退出", "登录", "系统",
+                      "最小化", "最大化", "分析", "风控", "条件",
+                      "双向", "零"):
+                continue
+            # 过滤纯数字/时间戳（如 "00:00:22", "1/1", "1/2" 等分页信息）
+            if t.replace(":", "").replace("/", "").replace(".", "").isdigit():
+                continue
+            lines.append(t)
         return "\n".join(lines)
 
     @staticmethod

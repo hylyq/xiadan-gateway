@@ -20,6 +20,7 @@ from src.models.config import AppConfig
 from src.services.window_service import WindowService
 from src.utils.diagnostic import DiagnosticUtil
 from src.utils.logger import Logger
+from src.utils.uia import safe_control_type, safe_text
 
 
 class PositionService:
@@ -259,11 +260,8 @@ class PositionService:
 
     @staticmethod
     def _safe_window_text(w) -> str:
-        """安全获取窗口标题文本"""
-        try:
-            return w.window_text() or ""
-        except Exception:
-            return ""
+        """安全获取窗口标题文本（委托 uia.safe_text，失败记录 debug 日志）"""
+        return safe_text(w)
 
     def _dismiss_popup_if_present(self, window) -> bool:
         """检测并关闭常见提示弹窗（委托给 WindowService 统一处理）"""
@@ -546,12 +544,9 @@ class PositionService:
             # 策略1: 树形路径导航
             tree_root = None
             for el in _descendants:
-                try:
-                    if el.element_info.control_type == "Tree":
-                        tree_root = el
-                        break
-                except Exception:
-                    continue
+                if safe_control_type(el) == "Tree":
+                    tree_root = el
+                    break
 
             if tree_root is not None:
                 current = tree_root
@@ -575,16 +570,13 @@ class PositionService:
             # 策略2: TreeItem 文本扫描（复用 _descendants）
             self.logger.info(f"树形路径未匹配，TreeItem 扫描: {page_name}")
             for el in _descendants:
-                try:
-                    if el.element_info.control_type == "TreeItem":
-                        if page_name in (el.window_text() or ""):
-                            el.click_input()
-                            self.logger.info(f"已通过 TreeItem 匹配点击 '{page_name}'")
-                            time.sleep(0.15)
-                            self._check_blocking_popup(_descendants, window)
-                            return
-                except Exception:
-                    continue
+                if safe_control_type(el) == "TreeItem":
+                    if page_name in safe_text(el):
+                        el.click_input()
+                        self.logger.info(f"已通过 TreeItem 匹配点击 '{page_name}'")
+                        time.sleep(0.15)
+                        self._check_blocking_popup(_descendants, window)
+                        return
 
         raise Exception(
             f"导航到 '{page_name}' 失败：树形路径和 TreeItem 扫描均未找到目标页面"
@@ -594,13 +586,10 @@ class PositionService:
         """用缓存的 descendants 检测阻塞弹窗，命中才走完整关闭流程"""
         popup_keywords = ["Begin failed", "failed", "失败", "事务处理机"]
         for el in descendants:
-            try:
-                text = el.window_text() or ""
-                if any(kw in text for kw in popup_keywords):
-                    self._dismiss_popup_if_present(window)
-                    return
-            except Exception:
-                continue
+            text = safe_text(el)
+            if any(kw in text for kw in popup_keywords):
+                self._dismiss_popup_if_present(window)
+                return
 
     def _format_table_data(self, table_data: Optional[str]) -> list:
         """将 tab 分隔的表格文本转为 JSON 列表
