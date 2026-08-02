@@ -634,6 +634,128 @@ class _FakeEl:
         return self._text
 
 
+class TestRunStats:
+    """运行统计测试（#12：错误码聚合 + 连续失败告警）"""
+
+    @staticmethod
+    def _make_task(name="place_order"):
+        from src.api.task_queue import Task
+        return Task(lambda: None, name, {}, 30)
+
+    def test_aggregate_error_counts(self):
+        """按错误码聚合 + 成功率计算"""
+        from src.api.task_queue import TaskQueue
+        from src.exceptions import ApiError, ErrorCode
+        tq = TaskQueue.get_instance()
+        tq._recent_tasks.clear()
+        tq._consecutive_failures = 0
+        try:
+            for _ in range(3):
+                task = self._make_task()
+                task.error = ApiError(ErrorCode.SERVER_CLEARING, "清算中")
+                tq._record_task_outcome(task)
+            for _ in range(2):
+                task = self._make_task("get_balance")
+                tq._record_task_outcome(task)
+
+            stats = tq.get_stats()
+            assert stats["total_tasks"] == 5
+            assert stats["success_count"] == 2
+            assert stats["failure_count"] == 3
+            assert stats["success_rate"] == 0.4
+            assert stats["error_counts"].get("SERVER_CLEARING") == 3
+            assert stats["consecutive_failures"] == 0  # 最后成功已清零
+        finally:
+            tq._recent_tasks.clear()
+            tq._consecutive_failures = 0
+
+    def test_unknown_error_defaults_to_internal(self):
+        """未知异常归 INTERNAL_ERROR"""
+        from src.api.task_queue import TaskQueue
+        tq = TaskQueue.get_instance()
+        tq._recent_tasks.clear()
+        try:
+            task = self._make_task()
+            task.error = RuntimeError("boom")
+            tq._record_task_outcome(task)
+            stats = tq.get_stats()
+            assert stats["error_counts"].get("INTERNAL_ERROR") == 1
+        finally:
+            tq._recent_tasks.clear()
+
+    def test_empty_window_returns_none_rate(self):
+        """窗口内无任务 → success_rate=None（无法计算）"""
+        from src.api.task_queue import TaskQueue
+        tq = TaskQueue.get_instance()
+        tq._recent_tasks.clear()
+        try:
+            stats = tq.get_stats()
+            assert stats["total_tasks"] == 0
+            assert stats["success_rate"] is None
+        finally:
+            tq._recent_tasks.clear()
+
+    def test_consecutive_failure_alert_at_3(self):
+        """连续 3 次失败 → 告警日志"""
+        from src.api.task_queue import TaskQueue
+        from src.exceptions import ApiError, ErrorCode
+        from src.utils.logger import Logger
+        tq = TaskQueue.get_instance()
+        tq._recent_tasks.clear()
+        tq._consecutive_failures = 0
+        Logger.get_instance().log_cache.clear()
+        try:
+            for _ in range(3):
+                task = self._make_task()
+                task.error = ApiError(ErrorCode.INTERNAL_ERROR, "测试")
+                tq._record_task_outcome(task)
+            logs = "\n".join(Logger.get_instance().log_cache)
+            assert "连续 3 次任务失败" in logs
+            assert tq._consecutive_failures == 3
+        finally:
+            tq._recent_tasks.clear()
+            tq._consecutive_failures = 0
+
+    def test_success_resets_consecutive_counter(self):
+        """成功任务清零连续失败计数"""
+        from src.api.task_queue import TaskQueue
+        from src.exceptions import ApiError, ErrorCode
+        tq = TaskQueue.get_instance()
+        tq._recent_tasks.clear()
+        tq._consecutive_failures = 0
+        try:
+            for _ in range(2):
+                task = self._make_task()
+                task.error = ApiError(ErrorCode.INTERNAL_ERROR, "测试")
+                tq._record_task_outcome(task)
+            ok_task = self._make_task()
+            tq._record_task_outcome(ok_task)
+            assert tq._consecutive_failures == 0
+        finally:
+            tq._recent_tasks.clear()
+            tq._consecutive_failures = 0
+
+    def test_health_returns_stats(self, monkeypatch, tmp_path):
+        """/health 响应包含 stats 字段"""
+        from src.api.routes import create_app
+        from src.models import config as config_module
+        import json
+
+        p = tmp_path / "app_config.json"
+        p.write_text(json.dumps({"trading_app_paths": []}), encoding="utf-8")
+        monkeypatch.setattr(config_module, "CONFIG_PATH", str(p))
+        config_module.AppConfig._reset_instance()
+
+        app = create_app()
+        app.config["TESTING"] = True
+        body = app.test_client().get("/health").get_json()
+        stats = body["data"]["stats"]
+        assert "total_tasks" in stats
+        assert "success_rate" in stats
+        assert "error_counts" in stats
+        assert "consecutive_failures" in stats
+
+
 class TestPopupTextExtraction:
     """弹窗文本提取测试（#8：容器优先 + 黑名单降级兜底）"""
 

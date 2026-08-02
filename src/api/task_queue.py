@@ -103,6 +103,11 @@ class TaskQueue(Singleton):
         self._diagnostic_history: deque = deque(maxlen=20)
         self._diag_lock = threading.Lock()
 
+        # 运行统计（#12）：按错误码聚合成功率 + 连续失败告警
+        self._stats_lock = threading.Lock()
+        self._recent_tasks: deque = deque(maxlen=500)  # (timestamp, success, error_code)
+        self._consecutive_failures = 0                 # 连续失败计数（告警阈值 3）
+
         # 连续同向订单优化：跟踪上次任务状态，避免重复的准备操作
         # 如 买入→买入 时跳过 _reset_trading_window + 激活 + F1
         self._last_task_info: Optional[dict] = None
@@ -224,6 +229,7 @@ class TaskQueue(Singleton):
 
                 task.event.set()
                 self._queue.task_done()
+                self._record_task_outcome(task)
 
     # ── 连续跳过：操作分组 ──────────────────────────────────
     # 同组内上笔干净退出 → 跳过窗口重置。不同组 = 接口不同 → 必须重置。
@@ -376,6 +382,75 @@ class TaskQueue(Singleton):
             f"超时恢复完成 - 任务: {task.name}, 截图: {screenshot_path}, "
             f"xiadan.exe 已重置为初始状态，HTTP 错误已返回给调用方"
         )
+
+    def _record_task_outcome(self, task: Task) -> None:
+        """记录任务结果到运行统计（#12）
+
+        错误码从异常提取（ApiError 自带；未知异常归 INTERNAL_ERROR）。
+        连续失败 ≥3 次触发告警日志，之后每 10 次递增提醒一次，
+        帮助尽早发现 xiadan.exe/券商端持续异常。
+        """
+        error_code = None
+        if task.error is not None:
+            error_code = getattr(task.error, "error_code", ErrorCode.INTERNAL_ERROR)
+        with self._stats_lock:
+            self._recent_tasks.append((time.time(), task.error is None, error_code))
+            if task.error is not None:
+                self._consecutive_failures += 1
+                if self._consecutive_failures == 3:
+                    self.logger.warning(
+                        f"⚠ 连续 {self._consecutive_failures} 次任务失败"
+                        f"（最近: {error_code}）——请检查 xiadan.exe/券商状态！"
+                    )
+                elif (self._consecutive_failures > 3
+                      and self._consecutive_failures % 10 == 0):
+                    self.logger.warning(
+                        f"⚠ 任务已连续失败 {self._consecutive_failures} 次"
+                        f"（最近: {error_code}）——建议立即人工检查！"
+                    )
+            else:
+                self._consecutive_failures = 0
+
+    def get_stats(self, window_seconds: int = 3600) -> dict:
+        """运行统计（#12）：按错误码聚合成功率 + 连续失败状态
+
+        滑动窗口默认最近 1 小时（deque 保留最近 500 次）。
+        返回 success_rate=None 表示窗口内无任务（无法计算）。
+
+        Returns:
+            {
+                "window_seconds": 3600,
+                "total_tasks": N,
+                "success_count": N,
+                "failure_count": N,
+                "success_rate": 0.95,
+                "error_counts": {"TASK_TIMEOUT": 2, ...},  # 按次数降序
+                "consecutive_failures": 0,
+            }
+        """
+        now = time.time()
+        with self._stats_lock:
+            recent = list(self._recent_tasks)
+            consecutive = self._consecutive_failures
+
+        windowed = [t for t in recent if now - t[0] <= window_seconds]
+        total = len(windowed)
+        success = sum(1 for _, ok, _ in windowed if ok)
+
+        error_counts = {}
+        for _, ok, code in windowed:
+            if not ok:
+                error_counts[code] = error_counts.get(code, 0) + 1
+
+        return {
+            "window_seconds": window_seconds,
+            "total_tasks": total,
+            "success_count": success,
+            "failure_count": total - success,
+            "success_rate": round(success / total, 3) if total else None,
+            "error_counts": dict(sorted(error_counts.items(), key=lambda x: -x[1])),
+            "consecutive_failures": consecutive,
+        }
 
     def get_status(self) -> dict:
         """获取队列状态"""

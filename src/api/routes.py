@@ -113,6 +113,7 @@ def _register_system_routes(app: Flask) -> None:
             "xiadan_running": xiadan_running,
             # 注意: 不返回 trading_app_paths（本机路径不对未认证访客暴露）
             "queue_status": task_queue.get_status(),
+            "stats": task_queue.get_stats(),
             "config": {
                 "watchdog_timeout_seconds": watchdog_timeout,
                 "recovery_time_seconds": recovery_time,
