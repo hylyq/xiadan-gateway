@@ -120,7 +120,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 |---------|--------|------|
 | `trading_app_paths` | `[]` | `xiadan.exe` 完整路径列表（按优先级排序），**至少配一个** |
 | `task_queue.watchdog_timeout_seconds` | 30 | 下单看门狗超时（秒） |
-| `task_queue.query_timeout_seconds` | 15 | 查询操作超时（秒） |
+| `task_queue.query_timeout_seconds` | 30 | 查询操作超时（秒） |
 | `task_queue.confirm_timeout_seconds` | 10 | 确认/按键操作超时（秒） |
 | `task_queue.max_size` | 50 | 队列最大长度 |
 | `idempotency.order_dedup_window_seconds` | 60 | 下单去重窗口（秒） |
@@ -130,7 +130,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `auth.enabled` | false | Token 认证开关 |
 | `logging.level` | INFO | 日志级别（排查 UIA 控件失效等问题时改 `DEBUG`，热生效无需重启） |
 
-> 修改配置后 `POST /admin/reload-config` 热重载（部分路径变更需重启）。
+> 修改配置后 `POST /admin/reload-config` 热重载（部分路径变更需重启）。超时值参考最新性能实测（2026-08 模拟盘：下单最坏 ~8s、查询最坏 ~12s 含失败重试，30s 提供 2.5-3.5× 余量；卡死任务更快触发看门狗恢复、调用方更快失败）。
 
 ## API 响应格式
 

@@ -9,8 +9,8 @@
   },
   "task_queue": {
     "max_size": 50,
-    "watchdog_timeout_seconds": 45,
-    "query_timeout_seconds": 60,
+    "watchdog_timeout_seconds": 30,
+    "query_timeout_seconds": 30,
     "confirm_timeout_seconds": 10
   },
   "idempotency": {

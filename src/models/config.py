@@ -30,7 +30,7 @@ DEFAULT_CONFIG = {
     "task_queue": {
         "max_size": 50,
         "watchdog_timeout_seconds": 30,
-        "query_timeout_seconds": 15,
+        "query_timeout_seconds": 30,
         "confirm_timeout_seconds": 10
     },
     "idempotency": {
