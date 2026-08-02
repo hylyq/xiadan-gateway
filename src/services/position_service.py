@@ -27,9 +27,13 @@ class PositionService:
     """持仓/资金/成交查询服务"""
 
     # 各查询表的特征列（用于 _copy_table_verified 验证页面切换是否成功）
+    # 实测表头（同花顺模拟账户）:
+    #   持仓: 成本价/股票余额   成交: 成交时间/成交编号   委托: 委托价格/委托数量
+    # 注意: 成交表与委托表都有"合同编号"，区分度差——委托表独有特征
+    # 是"委托价格"+"委托数量"（成交表用"成交均价"、持仓表两者皆无）
     POSITION_TABLE_COLUMNS = {"成本价", "股票余额"}
     TRADES_TABLE_COLUMNS = {"成交时间", "成交编号"}
-    ORDERS_TABLE_COLUMNS = {"委托编号"}
+    ORDERS_TABLE_COLUMNS = {"委托价格", "委托数量"}
 
     def __init__(self, window_service: WindowService, ocr_service=None):
         self.window_service = window_service
@@ -112,19 +116,27 @@ class PositionService:
             time.sleep(0.3)
 
     @staticmethod
-    def _is_table_matching(rows: list, required_columns: set) -> bool:
-        """表格特征列检测：首行含全部 required_columns 列
+    def _is_table_matching(rows: list, required_columns: set,
+                           require_all: bool = True) -> bool:
+        """表格特征列检测
 
         页面切换失败时会复制到其他查询表（持仓/当日成交/当日委托），
-        各自特征列不同（成本价/成交编号/委托编号）。空表无法判断，
+        各自特征列不同（成本价/成交编号/委托号）。空表无法判断，
         视为正确（可能当日无数据），不阻断流程。
+
+        Args:
+            require_all: True=全部列命中（默认，表头稳定时用）；
+                         False=任一列命中（表头命名有版本差异时用，如委托表）
         """
         if not rows:
             return True
         keys = set(rows[0].keys())
-        return required_columns.issubset(keys)
+        if require_all:
+            return required_columns.issubset(keys)
+        return bool(required_columns & keys)
 
-    def _copy_table_verified(self, table_name: str, required_columns: set) -> list:
+    def _copy_table_verified(self, table_name: str, required_columns: set,
+                             require_all: bool = True) -> list:
         """复制表格 + 特征列验证，失败重试一次，仍失败显式报错
 
         防御场景：非交易时段/服务器异常时树节点点击不触发页面切换，
@@ -132,11 +144,12 @@ class PositionService:
         """
         for attempt in range(2):
             data = self._copy_table_via_clipboard()
-            if self._is_table_matching(data, required_columns):
+            if self._is_table_matching(data, required_columns, require_all=require_all):
                 return data
+            actual_keys = set(data[0].keys()) if data else set()
             self.logger.warning(
                 f"第 {attempt + 1} 次复制到的不是{table_name}表"
-                f"（页面切换失败），重试"
+                f"（页面切换失败），实际表头: {sorted(actual_keys)}，重试"
             )
         DiagnosticUtil().snapshot(f"{table_name}_page_switch_failed")
         raise ApiError(

@@ -921,10 +921,24 @@ class TestTableColumnDetection:
             rows, PositionService.TRADES_TABLE_COLUMNS) is True
 
     def test_orders_table_detected(self):
-        """当日委托表（委托编号列）→ True"""
-        rows = [{"委托编号": "1001", "证券代码": "000001", "操作": "买入"}]
+        """当日委托表（实测表头：委托价格/委托数量/合同编号）→ True"""
+        rows = [{"委托时间": "09:30", "委托价格": "11.63", "委托数量": "100",
+                 "合同编号": "1001", "证券代码": "000001", "操作": "买入"}]
         assert PositionService._is_table_matching(
             rows, PositionService.ORDERS_TABLE_COLUMNS) is True
+
+    def test_orders_table_rejected_when_no_header(self):
+        """持仓表（无委托价格/委托数量）→ False（不误判为委托表）"""
+        rows = [{"证券代码": "000001", "成本价": "11.091", "股票余额": "2100"}]
+        assert PositionService._is_table_matching(
+            rows, PositionService.ORDERS_TABLE_COLUMNS) is False
+
+    def test_orders_table_rejected_for_trades(self):
+        """成交表（有合同编号但无委托价格/委托数量）→ False"""
+        rows = [{"成交时间": "09:30", "成交均价": "11.60", "成交数量": "100",
+                 "合同编号": "1001"}]
+        assert PositionService._is_table_matching(
+            rows, PositionService.ORDERS_TABLE_COLUMNS) is False
 
     def test_position_table_rejected_as_trades(self):
         """持仓表不是成交表（特征列不匹配）→ False"""
