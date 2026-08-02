@@ -77,6 +77,19 @@ uv run python main.py             # 启动服务（默认 http://localhost:5000�
 uv run python main.py --dev       # 开发模式（热加载）
 ```
 
+## 上线前必改（安全检查）
+
+以下配置默认是开发便利取向，**对外提供服务前必须确认**：
+
+| 检查项 | 默认 | 要求 |
+|--------|:---:|------|
+| `auth.enabled` | `false` | **改为 `true`** 并设置强 token。未开启时任何能访问服务的人都能下单/撤单 |
+| token 传输方式 | 仅 Header | token 只通过 `Authorization: Bearer <token>` 或 `X-API-Key` 请求头传递，**不支持 query string**（`?token=xxx` 已移除——会泄漏到访问日志/浏览器历史） |
+| 监听地址 | `127.0.0.1` | 局域网使用需确认防火墙策略；`0.0.0.0` 暴露到公网风险自负 |
+| `/health` 信息暴露 | 公开 | 健康检查始终公开（监控探活），但已不返回 `trading_app_paths` 等本机路径信息 |
+
+> 启用认证后，`/health` 仍无需 token（监控探活设计）。
+
 ## 配置
 
 复制 `config/app_config.example.json` 为 `config/app_config.json`，修改 `trading_app_paths`：
