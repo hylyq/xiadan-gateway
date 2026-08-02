@@ -176,6 +176,9 @@ class TaskQueue(Singleton):
                     self._update_task_state(task)
                 else:
                     self._last_task_info = None
+                    self.logger.debug(
+                        f"任务 {task.name} 失败/状态不确定，清除连续跳过状态"
+                    )
 
                 # 自动诊断：仅在任务失败时记录界面状态
                 if task.error is not None:
@@ -236,12 +239,29 @@ class TaskQueue(Singleton):
         return False
 
     def _can_skip_window_setup(self, task: Task) -> bool:
-        """上笔干净退出 + 同组操作 → 跳过窗口重置"""
-        if self._last_task_info is None:
+        """上笔干净退出 + 同组操作 → 跳过窗口重置
+
+        debug 日志（logging.level=DEBUG 时可见）记录每次决策及原因，
+        用于排查性能异常：该跳过没跳过（多余重置）或不该跳过却跳了
+        （窗口状态可能被上笔失败污染）。
+        """
+        last = self._last_task_info
+        if last is None:
+            self.logger.debug(
+                f"跳过窗口准备: 否（无上笔任务记录, 组={self._get_operation_group(task.name)}）"
+            )
             return False
-        if self._get_operation_group(task.name) != self._last_task_info.get("group"):
-            return False
-        return not self._last_task_info.get("had_dialog", True)
+        can_skip = (
+            self._get_operation_group(task.name) == last.get("group")
+            and not last.get("had_dialog", True)
+        )
+        self.logger.debug(
+            f"跳过窗口准备: {'是' if can_skip else '否'} "
+            f"(任务={task.name}, 组={self._get_operation_group(task.name)}, "
+            f"上笔组={last.get('group')}, 上笔弹窗={last.get('had_dialog')}, "
+            f"上笔状态={last.get('status')})"
+        )
+        return can_skip
 
     def _update_task_state(self, task: Task) -> None:
         """记录任务成功后的窗口状态"""
@@ -253,6 +273,7 @@ class TaskQueue(Singleton):
         if task.name == "place_order":
             state["status"] = task.params.get("status")
         self._last_task_info = state
+        self.logger.debug(f"任务状态更新（连续跳过依据）: {state}")
 
     def _reset_trading_window(self) -> None:
         """重置 xiadan.exe 到基准态（F1 买入界面）
