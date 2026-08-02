@@ -828,6 +828,83 @@ class TestPopupTextExtraction:
         assert "12345" not in result
 
 
+class TestOnscreenRatio:
+    """窗口与工作区交集比例计算测试（窗口位置自愈）"""
+
+    # 1920×1080 屏幕，任务栏 40px
+    WORK = (0, 0, 1920, 1040)
+    WIN = (560, 220, 1360, 820)  # 800×600 窗口
+
+    def test_window_fully_inside(self):
+        """窗口完全在工作区内 → 1.0"""
+        from src.services.window_service import WindowService
+        assert WindowService._onscreen_ratio(self.WIN, self.WORK) == 1.0
+
+    def test_window_fully_outside(self):
+        """窗口完全出屏（在工作区右侧外）→ 0.0"""
+        from src.services.window_service import WindowService
+        rect = (2000, 300, 2800, 900)
+        assert WindowService._onscreen_ratio(rect, self.WORK) == 0.0
+
+    def test_window_half_visible(self):
+        """窗口一半可见 → 0.5"""
+        from src.services.window_service import WindowService
+        # 800 宽窗口，右 400px 出屏
+        rect = (1520, 300, 2320, 900)
+        assert WindowService._onscreen_ratio(rect, self.WORK) == 0.5
+
+    def test_window_two_fifths_visible(self):
+        """窗口 2/5 可见（用户今天遇到的场景）→ 0.4，低于阈值触发自愈"""
+        from src.services.window_service import WindowService
+        # 800 宽窗口，左 320px 可见（320/800 = 0.4）
+        rect = (1600, 300, 2400, 900)
+        assert WindowService._onscreen_ratio(rect, self.WORK) == 0.4
+        assert 0.4 < WindowService.ONSCREEN_MIN_RATIO
+
+    def test_window_partially_off_top(self):
+        """窗口顶部出屏 → 比例按交集面积算"""
+        from src.services.window_service import WindowService
+        # 600 高窗口，顶部 200px 出屏 → 400/600 ≈ 0.667
+        rect = (560, -200, 1360, 400)
+        ratio = WindowService._onscreen_ratio(rect, self.WORK)
+        assert 0.66 <= ratio <= 0.67
+
+    def test_ensure_onscreen_moves_window_back(self, mocker):
+        """窗口出屏时 ensure_window_onscreen 调用 SetWindowPos 移回"""
+        from src.services.window_service import WindowService
+        ws = WindowService()
+        ws.logger = mocker.MagicMock()
+
+        mocker.patch("win32api.MonitorFromWindow", return_value=1)
+        mocker.patch("win32api.GetMonitorInfo", return_value={"Work": (0, 0, 1920, 1040)})
+        mocker.patch("win32gui.GetWindowRect", return_value=(2000, 300, 2800, 900))
+        mock_setpos = mocker.patch("win32gui.SetWindowPos")
+
+        assert ws.ensure_window_onscreen(12345) is True
+        mock_setpos.assert_called_once()
+        # SetWindowPos(hwnd, hWndInsertAfter, x, y, cx, cy, flags)
+        args = mock_setpos.call_args[0]
+        assert args[0] == 12345
+        # 800×600 窗口 → x = (1920-800)//2 = 560, y = (1040-600)//2 = 220
+        assert args[2] == 560
+        assert args[3] == 220
+        ws.logger.warning.assert_called_once()
+
+    def test_ensure_onscreen_no_move_when_inside(self, mocker):
+        """窗口在屏内时不移位（不调用 SetWindowPos）"""
+        from src.services.window_service import WindowService
+        ws = WindowService()
+        ws.logger = mocker.MagicMock()
+
+        mocker.patch("win32api.MonitorFromWindow", return_value=1)
+        mocker.patch("win32api.GetMonitorInfo", return_value={"Work": (0, 0, 1920, 1040)})
+        mocker.patch("win32gui.GetWindowRect", return_value=(560, 220, 1360, 820))
+        mock_setpos = mocker.patch("win32gui.SetWindowPos")
+
+        assert ws.ensure_window_onscreen(12345) is True
+        mock_setpos.assert_not_called()
+
+
 class TestTableColumnDetection:
     """查询表特征列检测测试（#修复：跨页复制错表的防御）"""
 

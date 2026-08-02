@@ -107,6 +107,8 @@ class WindowService:
             for path in paths_lower:
                 if path in found_windows:
                     hwnd = found_windows[path]
+                    # 窗口位置自愈：被误拖出屏幕时移回（点击/截图依赖屏幕坐标）
+                    self.ensure_window_onscreen(hwnd)
                     # 如果窗口不可见（如系统托盘），先显示
                     if not win32gui.IsWindowVisible(hwnd):
                         self.logger.info(f"目标窗口不可见 (title='{win32gui.GetWindowText(hwnd)}')，正在显示...")
@@ -240,6 +242,71 @@ class WindowService:
     def invalidate_window_cache(self):
         """使窗口缓存失效（窗口可能被关闭/重建后调用）"""
         self._cached_hwnd = None
+
+    # ------------------------------------------------------------
+    # 窗口位置自愈
+    # ------------------------------------------------------------
+
+    # 窗口与工作区交集面积占比低于此值视为"移出屏幕"（点击/截图失效）
+    ONSCREEN_MIN_RATIO = 0.6
+
+    @staticmethod
+    def _onscreen_ratio(rect, work) -> float:
+        """窗口矩形与工作区的交集面积占比（0.0 = 完全出屏，1.0 = 完全在内）
+
+        Args:
+            rect: 窗口矩形 (left, top, right, bottom)
+            work: 工作区矩形 (left, top, right, bottom)
+        """
+        inter_w = min(rect[2], work[2]) - max(rect[0], work[0])
+        inter_h = min(rect[3], work[3]) - max(rect[1], work[1])
+        win_w = rect[2] - rect[0]
+        win_h = rect[3] - rect[1]
+        if win_w <= 0 or win_h <= 0:
+            return 0.0
+        return max(0, inter_w) * max(0, inter_h) / (win_w * win_h)
+
+    def ensure_window_onscreen(self, hwnd: int) -> bool:
+        """确保窗口在屏幕工作区内（被误拖出屏幕时自动移回）
+
+        控件点击（click_input）与截图按屏幕坐标工作——窗口部分出屏时
+        控件可能点不到、截图截到屏幕外无效区域。任务开始前调用自愈。
+
+        Returns:
+            True=窗口已在有效区域（或已移回），False=获取信息失败
+        """
+        try:
+            monitor = win32api.MonitorFromWindow(
+                hwnd, win32con.MONITOR_DEFAULTTONEAREST)
+            info = win32api.GetMonitorInfo(monitor)
+            work = info["Work"]
+            rect = win32gui.GetWindowRect(hwnd)
+        except Exception as e:
+            self.logger.warning(f"获取窗口/工作区信息失败: {e}")
+            return False
+
+        ratio = self._onscreen_ratio(rect, work)
+        if ratio >= self.ONSCREEN_MIN_RATIO:
+            return True
+
+        # 移回：窗口中心对齐工作区中心，保持大小不变
+        win_w = rect[2] - rect[0]
+        win_h = rect[3] - rect[1]
+        new_x = work[0] + (work[2] - work[0] - win_w) // 2
+        new_y = work[1] + (work[3] - work[1] - win_h) // 2
+        self.logger.warning(
+            f"窗口移出屏幕（可见比例 {ratio:.0%}），自动移回工作区中心: "
+            f"({new_x}, {new_y})"
+        )
+        try:
+            win32gui.SetWindowPos(
+                hwnd, 0, new_x, new_y, 0, 0,
+                win32con.SWP_NOSIZE | win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE
+            )
+            return True
+        except Exception as e:
+            self.logger.warning(f"窗口位置恢复失败: {e}")
+            return False
 
     # ------------------------------------------------------------
     # 弹窗处理（统一方法，供 PositionService / TradingService 共用）
@@ -859,6 +926,12 @@ class WindowService:
                 "未找到交易窗口 '网上股票交易系统5.0'。"
                 "请确认券商程序已启动且窗口可见。"
             )
+
+        # 窗口位置自愈：被误拖出屏幕时移回（click_input/截图依赖屏幕坐标）
+        try:
+            self.ensure_window_onscreen(window.handle)
+        except Exception:
+            pass
 
         with timed("click_input 激活", self.logger):
             window.click_input()
