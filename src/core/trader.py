@@ -287,7 +287,8 @@ class Trader:
                         # B) 非委托确认弹窗 → 规则表驱动分类（src/core/popup_rules.py）
                         # 组合文本检测：primary（cid=1040）+ 全控件扫描兜底，
                         # 避免 cid=1040 提取不完整时错误弹窗被当通用警告点「是(Y)」
-                        _extract_text = self._extract_popup_error_text(_descendants)
+                        _extract_text = self._extract_popup_error_text(
+                            _descendants, title_el=title_el)
                         _rule = match_popup_rule(order_detail_text or "", _extract_text)
 
                         if _rule is not None and _rule.action == "click_no":
@@ -409,7 +410,8 @@ class Trader:
                         title_text = title_el.window_text() or ""
                         # 排除"委托确认"弹窗（正常流程中已处理）
                         if "委托确认" not in title_text:
-                            _popup_text = self._extract_popup_error_text(_descendants)
+                            _popup_text = self._extract_popup_error_text(
+                                _descendants, title_el=title_el)
                             _error_code, _message, _suggestion = self._classify_submit_error(_popup_text)
                             self.logger.warning(
                                 f"检测到提交失败弹窗: {title_text}, "
@@ -581,12 +583,26 @@ class Trader:
             return ""
 
     @staticmethod
-    def _extract_popup_error_text(descendants) -> str:
-        """从 descendants 列表中提取弹窗内的错误文本（过滤窗口 UI 标签）
+    def _extract_popup_error_text(descendants, title_el=None) -> str:
+        """从弹窗提取错误文本（黑名单降级为兜底防线）
+
+        策略:
+        1. title_el 提供时优先容器内提取（_extract_dialog_text，纯净，
+           不混入主窗口 UI 标签，不依赖硬编码黑名单——券商界面升级
+           时容器提取不受影响）
+        2. 容器提取为空 → 全局扫描 + 黑名单过滤（兜底，仅此路径依赖
+           _ui_labels 硬编码标签）
 
         弹窗文本通常只有几行（标题 + 错误内容 + 按钮文字），
-        过滤掉交易窗口的大量 UI 标签（证券代码、买入价格 等）。
+        全局扫描时过滤交易窗口的大量 UI 标签（证券代码、买入价格 等）。
         """
+        # 策略1: 弹窗容器内提取（纯净，黑名单不参与）
+        if title_el is not None:
+            container_text = Trader._extract_dialog_text(title_el)
+            if container_text:
+                return container_text
+
+        # 策略2: 全局扫描 + 黑名单过滤（兜底）
         # 交易窗口 UI 标签 + 侧边栏菜单项（不应出现在弹窗文本中）
         _ui_labels = {
             "证券代码", "证券名称", "买入价格", "卖出价格", "买入数量",

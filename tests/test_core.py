@@ -624,6 +624,88 @@ class TestWindowStateReporting:
             tq._current_task = None
 
 
+class _FakeEl:
+    """最小 UIA 元素模拟（window_text 返回固定文本）"""
+
+    def __init__(self, text):
+        self._text = text
+
+    def window_text(self):
+        return self._text
+
+
+class TestPopupTextExtraction:
+    """弹窗文本提取测试（#8：容器优先 + 黑名单降级兜底）"""
+
+    @staticmethod
+    def _extract(descendants, title_el=None):
+        from src.core.trader import Trader
+        return Trader._extract_popup_error_text(descendants, title_el=title_el)
+
+    def test_container_first_strategy(self):
+        """title_el 提供且容器有文本 → 容器优先（纯净，黑名单不参与）"""
+        container_descendants = [
+            _FakeEl("提交失败：可用余额不足，还差100元。"),
+            _FakeEl("是(Y)"),  # 容器提取过滤按钮文字
+        ]
+
+        class FakeContainer:
+            def descendants(self):
+                return container_descendants
+
+        class FakeTitle:
+            def parent(self):
+                return FakeContainer()
+
+        # 全局扫描路径包含 UI 标签（若走兜底会污染结果）
+        descendants = [
+            _FakeEl("证券代码"), _FakeEl("买入价格"),
+            _FakeEl("提交失败：可用余额不足，还差100元。"),
+        ]
+        result = self._extract(descendants, title_el=FakeTitle())
+        assert "提交失败：可用余额不足，还差100元。" in result
+        assert "是(Y)" not in result
+        assert "证券代码" not in result
+        assert "买入价格" not in result
+
+    def test_blacklist_fallback_without_title_el(self):
+        """无 title_el → 全局扫描 + 黑名单过滤（UI 标签被过滤）"""
+        descendants = [
+            _FakeEl("证券代码"), _FakeEl("买入价格"),
+            _FakeEl("提交失败：可用余额不足，还差100元。"),
+        ]
+        result = self._extract(descendants)
+        assert "提交失败：可用余额不足，还差100元。" in result
+        assert "证券代码" not in result
+        assert "买入价格" not in result
+
+    def test_empty_container_falls_back_to_scan(self):
+        """容器提取为空 → 降级全局扫描兜底"""
+        class FakeEmptyContainer:
+            def descendants(self):
+                return [_FakeEl("")]
+
+        class FakeTitle:
+            def parent(self):
+                return FakeEmptyContainer()
+
+        descendants = [_FakeEl("提交失败：清算中")]
+        result = self._extract(descendants, title_el=FakeTitle())
+        assert "提交失败：清算中" in result
+
+    def test_filters_digits_and_timestamps(self):
+        """纯数字/时间戳（分页信息）被过滤"""
+        descendants = [
+            _FakeEl("00:00:22"), _FakeEl("1/1"), _FakeEl("12345"),
+            _FakeEl("提交失败：当前时间不允许委托"),
+        ]
+        result = self._extract(descendants)
+        assert "提交失败：当前时间不允许委托" in result
+        assert "00:00:22" not in result
+        assert "1/1" not in result
+        assert "12345" not in result
+
+
 class TestCaptchaImageValidation:
     """验证码截图启发式校验测试
 
