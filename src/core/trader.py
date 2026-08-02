@@ -16,9 +16,10 @@ from src.constants import (
     CONTROL_ID_SUBMIT, CONTROL_ID_PRICE_TYPE,
     CONFIRM_DIALOG_TITLE_ID, CONFIRM_YES_BUTTON_ID,
     CONFIRM_NO_BUTTON_ID, CONFIRM_DETAIL_TEXT_ID,
-    CANCEL_CONFIRM_TEXT_ID, T1_RESTRICTION_KEYWORDS,
+    CANCEL_CONFIRM_TEXT_ID,
     SERVER_ERROR_POPUP_KEYWORDS
 )
+from src.core.popup_rules import match_popup_rule, match_submit_error
 from src.core.validation import sanitize_price
 from src.exceptions import ApiError, ErrorCode
 from src.models.config import AppConfig
@@ -288,141 +289,71 @@ class Trader:
                                 self.logger.warning(f"点击 '否(N)' 失败，降级关闭弹窗: {e}")
                         break  # 委托确认处理完毕，结束循环
                     else:
-                        # B) 非委托确认弹窗 → 区分致命错误 / 干净错误 / 价格警告 / 普通警告
-                        _error_keywords = ["提交失败", "清算中", "暂不支持"]
-                        _is_submit_error = (
-                            order_detail_text
-                            and any(kw in order_detail_text for kw in _error_keywords)
-                        )
-                        # 余额不足检测：同时满足 "提交失败" + ("余额"或"资金") + "还差"
-                        # 实际弹窗文本示例:
-                        #   "提交失败：当前账户10****88可用资金不足，还差600.200元。"
-                        #   "提交失败：柜台：可用余额不够。还差：300.30。"
-                        _is_balance_error = (
-                            order_detail_text
-                            and "提交失败" in order_detail_text
-                            and ("余额" in order_detail_text or "资金" in order_detail_text)
-                            and "还差" in order_detail_text
-                        )
-                        if _is_balance_error:
+                        # B) 非委托确认弹窗 → 规则表驱动分类（src/core/popup_rules.py）
+                        # 组合文本检测：primary（cid=1040）+ 全控件扫描兜底，
+                        # 避免 cid=1040 提取不完整时错误弹窗被当通用警告点「是(Y)」
+                        _extract_text = self._extract_popup_error_text(_descendants)
+                        _rule = match_popup_rule(order_detail_text or "", _extract_text)
+
+                        if _rule is not None and _rule.action == "click_no":
+                            # 价格超限警告 → 点「否(N)」取消，干净退出
+                            # 弹窗是正常关闭的，窗口状态可信，下次同向可跳过
                             self.logger.warning(
-                                f"检测到余额不足弹窗: {order_detail_text[:100]}"
+                                f"价格超限警告: {(order_detail_text or '')[:100]}，"
+                                f"点击 '否(N)' 取消委托"
                             )
-                            self._close_non_confirm_popup(window, descendants=_descendants)
+                            try:
+                                self.window_service.click_element(
+                                    window, CONFIRM_NO_BUTTON_ID, descendants=_descendants)
+                            except Exception:
+                                self._close_non_confirm_popup(window, descendants=_descendants)
                             Trader._clean_dismiss = True
                             raise ApiError(
-                                ErrorCode.INSUFFICIENT_BALANCE,
-                                f"账户余额不足: {order_detail_text[:150]}",
-                                suggestion="请检查账户可用资金后调整委托数量或价格。",
-                                details={"popup_title": title_text,
-                                         "popup_text": order_detail_text}
+                                ErrorCode.PRICE_OUT_OF_RANGE,
+                                _rule.message_template.replace("{text}", (order_detail_text or "")[:150]),
+                                suggestion=_rule.suggestion
                             )
 
-                        # 卖空检测：卖出无持仓或超出可卖数量
-                        # 变体1: "提交失败：股票余额不足，不允许卖空。"
-                        # 变体2: "提交失败：当前账户10****88无证券601991的持仓信息。"
-                        # order_detail_text 从 cid=1040 提取可能不完整；
-                        # _extract_popup_error_text 扫描全部 descendants，更可靠
-                        _sell_popup_text = (
-                            (order_detail_text or "")
-                            + "\n"
-                            + self._extract_popup_error_text(_descendants)
-                        )
-                        _is_short_selling = (
-                            "不允许卖空" in _sell_popup_text
-                            or (
-                                "提交失败" in _sell_popup_text
-                                and "无证券" in _sell_popup_text
-                                and "持仓信息" in _sell_popup_text
-                            )
-                        )
-                        if _is_short_selling:
-                            self.logger.warning(
-                                f"检测到卖空限制弹窗: {_sell_popup_text[:100]}"
-                            )
-                            self._close_non_confirm_popup(window, descendants=_descendants)
-                            Trader._clean_dismiss = True
-                            raise ApiError(
-                                ErrorCode.SHORT_SELLING_FORBIDDEN,
-                                f"不允许卖空: {_sell_popup_text[:150]}",
-                                suggestion="A 股不允许卖空，请检查持仓可卖数量后调整。",
-                                details={"popup_title": title_text,
-                                         "popup_text": _sell_popup_text}
-                            )
-
-                        # 干净错误：用户侧问题（余额不足等），窗口状态未损坏
-                        _clean_error_keywords = ["余额不足", "不允许卖空"]
-                        _is_clean_error = (
-                            order_detail_text
-                            and any(kw in order_detail_text for kw in _clean_error_keywords)
-                        )
-                        if _is_clean_error:
-                            # 点「确定」关闭单按钮弹窗，干净退出
-                            # order_detail_text 来自弹窗容器内提取，不含主窗口 UI
-                            self.logger.warning(
-                                f"检测到干净错误弹窗: {order_detail_text[:100]}"
-                            )
-                            self._close_non_confirm_popup(window, descendants=_descendants)
-                            _error_code, _message, _suggestion = self._classify_submit_error(
-                                order_detail_text
-                            )
-                            Trader._clean_dismiss = True
-                            raise ApiError(
-                                _error_code, _message, suggestion=_suggestion,
-                                details={"popup_title": title_text,
-                                         "popup_text": order_detail_text}
-                            )
-                        elif _is_submit_error:
-                            _popup_text = self._extract_popup_error_text(_descendants)
-                            _error_code, _message, _suggestion = self._classify_submit_error(_popup_text)
-                            self.logger.warning(
-                                f"检测到提交错误弹窗: title={title_text}, "
-                                f"error_code={_error_code}, text={_popup_text[:100]}"
-                            )
-                            self._close_non_confirm_popup(window, descendants=_descendants)
-                            raise ApiError(
-                                _error_code, _message, suggestion=_suggestion,
-                                details={"popup_title": title_text, "popup_text": _popup_text}
-                            )
-                        else:
-                            # B-warning) 非委托确认弹窗 + 无错误关键词 → 区分价格警告/通用警告
-                            _price_keywords = ["涨跌停", "超出", "价格"]
-                            _is_price_warning = (
-                                order_detail_text
-                                and any(kw in order_detail_text for kw in _price_keywords)
-                            )
-                            if _is_price_warning:
-                                # 价格超限警告 → 点「否(N)」取消，干净退出
-                                # 弹窗是正常关闭的，窗口状态可信，下次同向可跳过
-                                self.logger.warning(
-                                    f"价格超限警告: {order_detail_text[:100]}，"
-                                    f"点击 '否(N)' 取消委托"
-                                )
-                                try:
-                                    self.window_service.click_element(
-                                        window, CONFIRM_NO_BUTTON_ID, descendants=_descendants)
-                                except Exception:
-                                    self._close_non_confirm_popup(window, descendants=_descendants)
-                                Trader._clean_dismiss = True
-                                raise ApiError(
-                                    ErrorCode.PRICE_OUT_OF_RANGE,
-                                    f"价格超出涨跌停限制: {order_detail_text[:150]}",
-                                    suggestion="请调整委托价格至涨跌停范围内后重试。"
+                        if _rule is not None:
+                            # raise_error：关闭弹窗 + 报错
+                            # error_code 为 None 的规则（余额不足变体/提交失败类）
+                            # 委托 match_submit_error 决定精确错误码
+                            if _rule.error_code is None:
+                                _classify_text = _extract_text or order_detail_text or ""
+                                _error_code, _message, _suggestion = self._classify_submit_error(
+                                    _classify_text
                                 )
                             else:
-                                # 通用警告 → 点「是(Y)」继续提交
-                                self.logger.warning(
-                                    f"检测到警告弹窗: {title_text}，"
-                                    f"点击 '是(Y)' 继续"
-                                )
-                                try:
-                                    self.window_service.click_element(
-                                        window, CONFIRM_YES_BUTTON_ID, descendants=_descendants)
-                                except Exception:
-                                    self._close_non_confirm_popup(window, descendants=_descendants)
-                                warning_dismissed = True
-                                time.sleep(0.2)
-                                continue  # 继续检测后续弹窗（委托确认）
+                                _error_code = _rule.error_code
+                                _message = _rule.message_template.replace(
+                                    "{text}", (order_detail_text or "")[:150])
+                                _suggestion = _rule.suggestion
+                            self.logger.warning(
+                                f"检测到错误弹窗: title={title_text}, "
+                                f"error_code={_error_code}, text={(order_detail_text or '')[:100]}"
+                            )
+                            self._close_non_confirm_popup(window, descendants=_descendants)
+                            if _rule.clean_dismiss:
+                                Trader._clean_dismiss = True
+                            raise ApiError(
+                                _error_code, _message, suggestion=_suggestion,
+                                details={"popup_title": title_text,
+                                         "popup_text": order_detail_text or _extract_text or ""}
+                            )
+
+                        # 通用警告（未命中任何规则）→ 点「是(Y)」继续提交
+                        self.logger.warning(
+                            f"检测到警告弹窗: {title_text}，"
+                            f"点击 '是(Y)' 继续"
+                        )
+                        try:
+                            self.window_service.click_element(
+                                window, CONFIRM_YES_BUTTON_ID, descendants=_descendants)
+                        except Exception:
+                            self._close_non_confirm_popup(window, descendants=_descendants)
+                        warning_dismissed = True
+                        time.sleep(0.2)
+                        continue  # 继续检测后续弹窗（委托确认）
 
                 # C) 无标题图但有文本（cid=1040）+ 有"是(Y)"按钮 → 警告弹窗
                 text_el = self.window_service.find_element_in_window(
@@ -709,70 +640,17 @@ class Trader:
 
     @staticmethod
     def _classify_submit_error(error_text: str):
-        """根据弹窗文本分类提交错误，返回 (error_code, message, suggestion)"""
-        if "清算" in error_text:
-            return (
-                ErrorCode.SERVER_CLEARING,
-                f"券商系统清算中: {error_text[:150]}",
-                "请等待券商清算结束后重试（通常交易日 15:30-次日 9:00）。"
-            )
-        if "当前时间不允许委托" in error_text or "非交易" in error_text:
-            return (
-                ErrorCode.OUTSIDE_TRADING_HOURS,
-                f"非交易时段: {error_text[:150]}",
-                "请在交易时段内操作（工作日 9:30-11:30, 13:00-15:00）。"
-            )
-        # T+1 制度限制（仅卖出）：当日买入的股票次日才能卖出
-        if any(kw in error_text for kw in T1_RESTRICTION_KEYWORDS):
-            return (
-                ErrorCode.T1_RESTRICTION,
-                f"T+1 制度限制: {error_text[:150]}",
-                "A 股实行 T+1 交易制度，当日买入的股票需至下一个交易日方可卖出。"
-            )
-        # 不允许卖空（防御性：若从其他路径进入也能正确分类）
-        # 变体1: "提交失败：股票余额不足，不允许卖空。"
-        # 变体2: "提交失败：当前账户10****88无证券601991的持仓信息。"
-        if "不允许卖空" in error_text:
-            return (
-                ErrorCode.SHORT_SELLING_FORBIDDEN,
-                f"不允许卖空: {error_text[:150]}",
-                "A 股不允许卖空，请检查持仓可卖数量后调整。"
-            )
-        if (
-            "提交失败" in error_text
-            and "无证券" in error_text
-            and "持仓信息" in error_text
-        ):
-            return (
-                ErrorCode.SHORT_SELLING_FORBIDDEN,
-                f"不允许卖空: {error_text[:150]}",
-                "A 股不允许卖空，请检查持仓可卖数量后调整。"
-            )
-        # 可卖数量不足（仅卖出）
-        # 余额不足（防御性：若从其他路径进入 _classify_submit_error 也能正确分类）
-        # 注意：只用精确短语匹配，不用 "余额不足" 子串（会误匹配 "可用余额不足"=可卖数量）
-        if "可用资金不足" in error_text or "可用余额不够" in error_text:
-            return (
-                ErrorCode.INSUFFICIENT_BALANCE,
-                f"账户余额不足: {error_text[:150]}",
-                "请检查账户可用资金后调整委托数量或价格。"
-            )
-        if "可卖数量" in error_text or "可用余额不足" in error_text:
-            return (
-                ErrorCode.INSUFFICIENT_SHARES,
-                f"可卖数量不足: {error_text[:150]}",
-                "请检查持仓的可卖数量（冻结数量/当日买入不可卖出）后调整委托数量。"
-            )
-        if "事务处理机" in error_text or "转发数据失败" in error_text:
-            return (
-                ErrorCode.SERVER_UNAVAILABLE,
-                f"券商服务器不可用: {error_text[:150]}",
-                "请确认券商服务器正常运行后重试。若为交易时段外，请等待交易时段再操作。"
-            )
+        """根据弹窗文本分类提交错误，返回 (error_code, message, suggestion)
+
+        规则表驱动（src/core/popup_rules.py:SUBMIT_ERROR_RULES），
+        顺序敏感：T1 的"可卖数量"先于 INSUFFICIENT_SHARES、"可用余额不足"
+        是 SHARES 精确短语而"可用余额不够"是 BALANCE——不要随意调序。
+        """
+        rule = match_submit_error(error_text)
         return (
-            ErrorCode.ORDER_SUBMIT_FAILED,
-            f"订单提交失败: {error_text[:150]}",
-            "请检查交易条件（余额、交易时间、涨跌停限制等）后重试"
+            rule.error_code,
+            rule.message_template.replace("{text}", error_text[:150]),
+            rule.suggestion,
         )
 
     def _close_non_confirm_popup(self, window, descendants=None) -> None:
