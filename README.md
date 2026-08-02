@@ -48,6 +48,7 @@
 | OCR 验证码 | 轻量模板匹配引擎，失败自动存档，可选 ddddocr 离线训练 |
 | 生产级服务器 | `waitress` WSGI + 优雅关闭（SIGINT/SIGTERM） |
 | 配置热更新 | `POST /admin/reload-config` 无需重启 |
+| 启动配置校验 | 启动时校验配置类型/值域（port/超时/路径），非法配置直接中止并打印修复指引 |
 | 截图自动清理 | 启动时清理过期截图（保留 200 张 / 7 天内） |
 | 认证安全 | Token 使用 `hmac.compare_digest` 常量时间比较 |
 
