@@ -497,15 +497,51 @@ class PositionService:
     def _is_captcha_image_valid(image_path: str, max_bytes: int = 5000) -> bool:
         """校验验证码图片是否合理（非主窗口截图）
 
-        真实验证码图片约 1KB，主窗口截图 > 50KB。
-        文件过大说明截图对象错误（隐藏控件/主窗口）。
+        真实验证码: 92×38 白底蓝字 4 位数字（~1KB）。
+        主窗口截图 > 50KB 且尺寸大得多。截到隐藏控件/弹窗边缘时
+        可能尺寸合格但内容异常（全白/暗像素集中边缘）。
+
+        启发式（任一不满足 = 异常）:
+        1. 文件大小 ≤ 5KB（原有）
+        2. 尺寸接近 92×38（允许 ±40% 偏差）
+        3. 白底占比 > 50%（与二值化阈值 200 一致）
+        4. 暗像素水平跨度在 15%-85% 宽度之间（数字集中中间区域，
+           截到空白/边缘时分布异常）
 
         Returns:
             True=合理，False=异常
         """
         try:
             size = os.path.getsize(image_path)
-            return size <= max_bytes
+            if size > max_bytes:
+                return False
+
+            from PIL import Image
+            import numpy as np
+
+            img = Image.open(image_path).convert("L")
+            w, h = img.size
+            if w * h == 0:
+                return False
+            # 尺寸合理性：真实验证码 92×38，允许 ±40% 偏差
+            if not (55 <= w <= 130 and 22 <= h <= 54):
+                return False
+
+            arr = np.array(img, dtype=np.uint8)
+            # 白底占比（>200 为白/浅色背景，与二值化阈值一致）
+            white_ratio = float((arr > 200).mean())
+            if white_ratio < 0.5:
+                return False
+
+            # 暗像素水平分布：数字笔画集中在中间区域
+            dark_cols = np.where((arr < 200).any(axis=0))[0]
+            if len(dark_cols) == 0:
+                return False  # 全白 = 隐藏控件未渲染
+            span = int(dark_cols.max()) - int(dark_cols.min()) + 1
+            if not (0.15 * w <= span <= 0.85 * w):
+                return False  # 暗像素集中在边缘/角落 = 截到边缘
+
+            return True
         except Exception:
             return True  # 无法判断时假定有效
 

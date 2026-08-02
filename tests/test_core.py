@@ -622,3 +622,56 @@ class TestWindowStateReporting:
             assert task.window_state == {"had_dialog": True, "clean": True}
         finally:
             tq._current_task = None
+
+
+class TestCaptchaImageValidation:
+    """验证码截图启发式校验测试
+
+    真实验证码: 92×38 白底蓝字。启发式拦截:
+    主窗口截图（尺寸大）、隐藏控件未渲染（全白）、截到边缘（暗像素
+    集中在角落）、大文件（>5KB）。
+    """
+
+    @staticmethod
+    def _make_png(tmp_path, name, size, dark_region=None):
+        """生成测试图片：白底 + 可选暗色区域"""
+        from PIL import Image
+        import numpy as np
+
+        w, h = size
+        arr = np.full((h, w), 255, dtype=np.uint8)
+        if dark_region:
+            x0, x1 = dark_region
+            arr[:, x0:x1] = 100  # 暗像素（模拟数字笔画）
+        p = tmp_path / name
+        Image.fromarray(arr).save(p)
+        return str(p)
+
+    def test_valid_captcha(self, tmp_path):
+        """92×38 白底 + 中间数字笔画 → 有效"""
+        p = self._make_png(tmp_path, "valid.png", (92, 38), dark_region=(30, 62))
+        assert PositionService._is_captcha_image_valid(p) is True
+
+    def test_full_white_hidden_control(self, tmp_path):
+        """92×38 全白（隐藏控件未渲染）→ 异常"""
+        p = self._make_png(tmp_path, "white.png", (92, 38))
+        assert PositionService._is_captcha_image_valid(p) is False
+
+    def test_dark_pixels_at_edge(self, tmp_path):
+        """暗像素集中在左缘（截到弹窗边缘）→ 异常"""
+        p = self._make_png(tmp_path, "edge.png", (92, 38), dark_region=(0, 8))
+        assert PositionService._is_captcha_image_valid(p) is False
+
+    def test_main_window_screenshot(self, tmp_path):
+        """主窗口截图尺寸（800×600）→ 异常"""
+        p = self._make_png(tmp_path, "main.png", (800, 600), dark_region=(300, 500))
+        assert PositionService._is_captcha_image_valid(p) is False
+
+    def test_too_much_dark_area(self, tmp_path):
+        """暗色面积过大（白底占比 <50%，如深色背景图）→ 异常"""
+        p = self._make_png(tmp_path, "dark.png", (92, 38), dark_region=(0, 80))
+        assert PositionService._is_captcha_image_valid(p) is False
+
+    def test_missing_file_assumed_valid(self):
+        """文件不存在无法判断 → 假定有效（保持原行为，不阻断流程）"""
+        assert PositionService._is_captcha_image_valid("nonexistent.png") is True
