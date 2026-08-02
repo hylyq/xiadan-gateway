@@ -185,27 +185,30 @@ uv run python main.py --dev       # 开发模式（热加载）
 
 #### 添加新的干净退出场景
 
-只需两步，不需要改动 `TaskQueue` 或跳过逻辑：
+分类由 `src/core/popup_rules.py` 规则表驱动，不需要改动 `TaskQueue` 或跳过逻辑：
 
 **1. 在 `src/exceptions.py` 新增错误码：**
 ```python
 NEW_ERROR = "NEW_ERROR"   # 描述
 ```
 
-**2. 在 `src/core/trader.py` 的弹窗处理循环中，`_is_clean_error` 旁新增检测：**
+**2. 在 `src/core/popup_rules.py` 加一条规则**（弹窗动作表 `POPUP_RULES` 或错误码表 `SUBMIT_ERROR_RULES`）：
 ```python
-# 检测条件：order_detail_text 含特定关键词
-# （order_detail_text 由 _extract_dialog_text 从弹窗容器内提取，不含主窗口 UI）
-elif "某关键词" in (order_detail_text or ""):
-    # 点关闭弹窗
-    self._close_non_confirm_popup(window, descendants=_descendants)
-    Trader._clean_dismiss = True
-    raise ApiError(ErrorCode.NEW_ERROR, "描述", suggestion="建议")
+PopupRule(
+    _or(("某关键词", "另一关键词")),   # 任一 AND 组全部命中即匹配
+    "raise_error",                    # 动作: raise_error / click_no / click_yes
+    ErrorCode.NEW_ERROR,
+    "描述: {text}",                   # {text} 占位，自动替换为弹窗文本
+    "建议",
+    clean_dismiss=True,               # 弹窗正常关闭，窗口状态可信，下次同组可跳过
+),
 ```
 
-`_clean_dismiss = True` 通知 `TaskQueue`：虽是错误，但弹窗已正常关闭，窗口状态仍可信，下次同组操作可跳过准备。
+**3. 在 `tests/test_core.py` 补参数化测试用例。**
 
-> **弹窗文本提取说明**：`order_detail_text` 优先从 cid=1040 读取，fallback 用 `_extract_dialog_text(title_el)` 从弹窗容器（`title_el.parent()`）内收集文本，确保不混入主窗口 UI 标签。
+> 规则表**顺序敏感**：多个规则共享关键词（如"可卖数量"同时出现在 T1 与 `INSUFFICIENT_SHARES`），顺序决定归属——新规则要放在正确的优先级位置，并补测试防止回归。
+
+> **弹窗文本提取说明**：`order_detail_text` 优先从 cid=1040 读取，fallback 用 `_extract_dialog_text(title_el)` 从弹窗容器（`title_el.parent()`）内收集文本；匹配统一用组合文本（primary + `_extract_popup_error_text` 全控件扫描兜底），cid=1040 提取不完整时错误弹窗仍能被精确分类，不会被当作通用警告点「是(Y)」。
 
 ## API 接口
 
@@ -328,6 +331,7 @@ xiadan-gateway/
 │   │   └── idempotency.py       # 下单幂等检查
 │   ├── core/
 │   │   ├── trader.py            # 下单编排器
+│   │   ├── popup_rules.py       # 弹窗/提交错误分类规则表（动作 + 错误码）
 │   │   ├── ocr.py               # OCR 服务（双引擎调度 + 质检）
 │   │   ├── ocr_lightweight.py   # 轻量 OCR（模板匹配，纯 NumPy/Pillow）
 │   │   └── validation.py        # 数据校验纯函数
