@@ -26,6 +26,11 @@ from src.utils.uia import safe_control_type, safe_text
 class PositionService:
     """持仓/资金/成交查询服务"""
 
+    # 各查询表的特征列（用于 _copy_table_verified 验证页面切换是否成功）
+    POSITION_TABLE_COLUMNS = {"成本价", "股票余额"}
+    TRADES_TABLE_COLUMNS = {"成交时间", "成交编号"}
+    ORDERS_TABLE_COLUMNS = {"委托编号"}
+
     def __init__(self, window_service: WindowService, ocr_service=None):
         self.window_service = window_service
         self.ocr_service = ocr_service  # 注入 OCR 服务（避免循环依赖）
@@ -106,6 +111,41 @@ class PositionService:
             _send_one()
             time.sleep(0.3)
 
+    @staticmethod
+    def _is_table_matching(rows: list, required_columns: set) -> bool:
+        """表格特征列检测：首行含全部 required_columns 列
+
+        页面切换失败时会复制到其他查询表（持仓/当日成交/当日委托），
+        各自特征列不同（成本价/成交编号/委托编号）。空表无法判断，
+        视为正确（可能当日无数据），不阻断流程。
+        """
+        if not rows:
+            return True
+        keys = set(rows[0].keys())
+        return required_columns.issubset(keys)
+
+    def _copy_table_verified(self, table_name: str, required_columns: set) -> list:
+        """复制表格 + 特征列验证，失败重试一次，仍失败显式报错
+
+        防御场景：非交易时段/服务器异常时树节点点击不触发页面切换，
+        Ctrl+C 复制到的是其他查询表——不验证会静默返回假数据。
+        """
+        for attempt in range(2):
+            data = self._copy_table_via_clipboard()
+            if self._is_table_matching(data, required_columns):
+                return data
+            self.logger.warning(
+                f"第 {attempt + 1} 次复制到的不是{table_name}表"
+                f"（页面切换失败），重试"
+            )
+        DiagnosticUtil().snapshot(f"{table_name}_page_switch_failed")
+        raise ApiError(
+            ErrorCode.INTERNAL_ERROR,
+            f"{table_name}查询失败：无法切换到{table_name}页面"
+            "（券商服务器未响应，可能处于非交易时段）",
+            suggestion="交易时段内重试，或检查券商服务器状态"
+        )
+
     def _is_valid_table_data(self, data: str) -> bool:
         """校验剪贴板内容是否为有效的表格数据
 
@@ -135,6 +175,10 @@ class PositionService:
         max_attempts = 2
         for attempt in range(max_attempts):
             self.logger.info(f"第 {attempt + 1}/{max_attempts} 次尝试 Ctrl+C 读取表格数据")
+
+            # 复制前清空剪贴板：焦点丢失/表格未就绪时 Ctrl+C 会复制失败，
+            # 不清空会读到上次任务残留的数据（如持仓表）伪装成"复制成功"
+            self.window_service.clear_clipboard()
 
             with timed("Ctrl+C 发送", self.logger):
                 self._send_ctrl_c()
@@ -290,29 +334,63 @@ class PositionService:
     # 资金余额（control_id 批量读取，无需 OCR）
     # ------------------------------------------------------------
 
+    def _read_balance_fields(self, window) -> dict:
+        """从资金股票页读取资金概览字段（control_id 批量读取，无需 OCR）"""
+        control_ids = list(BALANCE_FIELDS.values())
+        elements = self.window_service.find_element_in_window(window, control_ids)
+
+        result = {}
+        for field_name, control_id in BALANCE_FIELDS.items():
+            element = next((e for e in elements if e.control_id() == control_id), None)
+            if element:
+                result[field_name] = element.window_text()
+            else:
+                result[field_name] = None
+                self.logger.warning(f"未找到 {field_name} 对应的控件 control_id={control_id}")
+        return result
+
     def get_balance(self) -> dict:
-        """获取资金余额"""
+        """获取资金余额
+
+        显式导航到"资金股票"页（资金概览栏只在资金股票页可见——
+        连续查询时窗口可能停在当日成交/当日委托页，全部字段会读取失败）。
+        全部字段为 None = 页面未切换（非交易时段/服务器异常），
+        重试一次导航，仍失败显式报错，绝不静默返回 None 字段。
+        """
         self.logger.info("开始获取资金余额")
 
         with timed("_prepare_query_panel", self.logger):
             self._prepare_query_panel()
 
+        with timed("导航到资金股票", self.logger):
+            self._refresh_window_ref()
+            window = self._cached_window
+            self._navigate_to_query_page(window, "资金股票")
+
         with timed("control_id 批量读取", self.logger):
-            # 批量获取所有字段
             window = self.window_service.get_trading_window()
             if window is None:
                 raise Exception("未找到交易窗口 '网上股票交易系统5.0'")
-            control_ids = list(BALANCE_FIELDS.values())
-            elements = self.window_service.find_element_in_window(window, control_ids)
+            result = self._read_balance_fields(window)
 
-            result = {}
-            for field_name, control_id in BALANCE_FIELDS.items():
-                element = next((e for e in elements if e.control_id() == control_id), None)
-                if element:
-                    result[field_name] = element.window_text()
-                else:
-                    result[field_name] = None
-                    self.logger.warning(f"未找到 {field_name} 对应的控件 control_id={control_id}")
+            if all(v is None for v in result.values()):
+                # 资金概览栏不可见 = 页面未切换到资金股票（连续查询/非交易时段）
+                self.logger.warning(
+                    "资金概览字段全部为空（可能窗口不在资金股票页），重试导航"
+                )
+                self._refresh_window_ref()
+                window = self._cached_window
+                if window is not None:
+                    self._navigate_to_query_page(window, "资金股票")
+                    result = self._read_balance_fields(window)
+                if all(v is None for v in result.values()):
+                    DiagnosticUtil().snapshot("balance_page_switch_failed")
+                    raise ApiError(
+                        ErrorCode.INTERNAL_ERROR,
+                        "资金余额查询失败：无法切换到资金股票页面"
+                        "（券商服务器未响应，可能处于非交易时段）",
+                        suggestion="交易时段内重试，或检查券商服务器状态"
+                    )
 
         self.logger.info(f"资金余额查询完成: {result}")
         return result
@@ -322,14 +400,27 @@ class PositionService:
     # ------------------------------------------------------------
 
     def get_position(self) -> list:
-        """获取当前持仓"""
+        """获取当前持仓
+
+        显式导航到"资金股票"页（不依赖"F4 默认页"假设——连续查询时
+        窗口可能停在当日成交/当日委托页，直接 Ctrl+C 会复制错表）。
+        复制后验证表头特征：页面切换失败时（如非交易时段服务器不响应）
+        返回的是其他查询表，验证失败重试一次，仍失败则显式报错，
+        绝不静默返回假数据。
+        """
         self.logger.info("开始获取持仓")
 
         with timed("_prepare_query_panel", self.logger):
             self._prepare_query_panel()
 
-        # F4 打开后默认就是"资金股票"页面，无需额外导航
-        return self._copy_table_via_clipboard()
+        with timed("导航到资金股票", self.logger):
+            self._refresh_window_ref()
+            window = self._cached_window
+            self._navigate_to_query_page(window, "资金股票")
+
+        # 特征列验证：页面切换失败时（非交易时段）复制到的是其他查询表，
+        # 验证失败重试一次，仍失败显式报错，绝不静默返回假数据
+        return self._copy_table_verified("持仓", self.POSITION_TABLE_COLUMNS)
 
     # ------------------------------------------------------------
     # 今日成交（树形菜单 + Ctrl+C + OCR 兜底）
@@ -347,7 +438,7 @@ class PositionService:
             window = self._cached_window
             self._navigate_to_query_page(window, "当日成交")
 
-        return self._copy_table_via_clipboard()
+        return self._copy_table_verified("成交", self.TRADES_TABLE_COLUMNS)
 
     # ------------------------------------------------------------
     # 当日委托（树形菜单 + Ctrl+C + OCR 兜底）
@@ -369,7 +460,7 @@ class PositionService:
             window = self._cached_window
             self._navigate_to_query_page(window, "当日委托")
 
-        return self._copy_table_via_clipboard()
+        return self._copy_table_verified("委托", self.ORDERS_TABLE_COLUMNS)
 
     # ------------------------------------------------------------
     # OCR 验证码处理

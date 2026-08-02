@@ -828,6 +828,39 @@ class TestPopupTextExtraction:
         assert "12345" not in result
 
 
+class TestTableColumnDetection:
+    """查询表特征列检测测试（#修复：跨页复制错表的防御）"""
+
+    def test_position_table_detected(self):
+        """持仓表（成本价+股票余额列）→ True"""
+        rows = [{"证券代码": "000001", "成本价": "11.091", "股票余额": "2100"}]
+        assert PositionService._is_table_matching(
+            rows, PositionService.POSITION_TABLE_COLUMNS) is True
+
+    def test_trades_table_detected(self):
+        """当日成交表（成交时间+成交编号列）→ True"""
+        rows = [{"成交时间": "09:30:00", "成交编号": "123", "证券代码": "000001"}]
+        assert PositionService._is_table_matching(
+            rows, PositionService.TRADES_TABLE_COLUMNS) is True
+
+    def test_orders_table_detected(self):
+        """当日委托表（委托编号列）→ True"""
+        rows = [{"委托编号": "1001", "证券代码": "000001", "操作": "买入"}]
+        assert PositionService._is_table_matching(
+            rows, PositionService.ORDERS_TABLE_COLUMNS) is True
+
+    def test_position_table_rejected_as_trades(self):
+        """持仓表不是成交表（特征列不匹配）→ False"""
+        rows = [{"证券代码": "000001", "成本价": "11.091", "股票余额": "2100"}]
+        assert PositionService._is_table_matching(
+            rows, PositionService.TRADES_TABLE_COLUMNS) is False
+
+    def test_empty_table_assumed_valid(self):
+        """空表无法判断 → True（不阻断流程）"""
+        assert PositionService._is_table_matching(
+            [], PositionService.POSITION_TABLE_COLUMNS) is True
+
+
 class TestCaptchaImageValidation:
     """验证码截图启发式校验测试
 
