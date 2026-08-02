@@ -141,9 +141,9 @@ class PositionService:
         DiagnosticUtil().snapshot(f"{table_name}_page_switch_failed")
         raise ApiError(
             ErrorCode.INTERNAL_ERROR,
-            f"{table_name}查询失败：无法切换到{table_name}页面"
-            "（券商服务器未响应，可能处于非交易时段）",
-            suggestion="交易时段内重试，或检查券商服务器状态"
+            f"{table_name}查询失败：未检测到{table_name}表特征列"
+            "（页面切换异常——窗口可能被遮挡/最小化，或焦点未进入表格）",
+            suggestion="请确认券商窗口完整可见后重试"
         )
 
     def _is_valid_table_data(self, data: str) -> bool:
@@ -387,9 +387,9 @@ class PositionService:
                     DiagnosticUtil().snapshot("balance_page_switch_failed")
                     raise ApiError(
                         ErrorCode.INTERNAL_ERROR,
-                        "资金余额查询失败：无法切换到资金股票页面"
-                        "（券商服务器未响应，可能处于非交易时段）",
-                        suggestion="交易时段内重试，或检查券商服务器状态"
+                        "资金余额查询失败：资金概览字段全部为空"
+                        "（页面切换异常——窗口可能被遮挡/最小化，或焦点未进入表格）",
+                        suggestion="请确认券商窗口完整可见后重试"
                     )
 
         self.logger.info(f"资金余额查询完成: {result}")
