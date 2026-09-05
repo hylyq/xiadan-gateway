@@ -1122,3 +1122,44 @@ class TestIdempotencyRecordRetention:
         chk = self._checker()
         chk._records["601991_1_100__limit"] = 0  # 1970 年 → 必然过期
         chk.check_and_record("601991", "1", "100", "10.50", "limit")
+
+
+class TestCrossSiteRejection:
+    """跨站防御测试（#12：带 Origin 头的浏览器请求一律拒绝，防恶意网页触发交易）"""
+
+    @staticmethod
+    def _make_client(monkeypatch, tmp_path, auth_enabled=False, token=""):
+        import json
+
+        from src.models import config as config_module
+
+        cfg = {"auth": {"enabled": auth_enabled, "token": token}}
+        p = tmp_path / "app_config.json"
+        p.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(config_module, "CONFIG_PATH", str(p))
+        config_module.AppConfig._reset_instance()
+
+        from src.api.routes import create_app
+        app = create_app()
+        app.config["TESTING"] = True
+        return app.test_client()
+
+    def test_origin_header_rejected_even_without_auth(self, monkeypatch, tmp_path):
+        """未开认证也拒绝带 Origin 的请求（恶意网页无法触发下单）"""
+        client = self._make_client(monkeypatch, tmp_path)
+        r = client.get("/queue/status", headers={"Origin": "http://evil.example"})
+        body = r.get_json()
+        assert body["status"] == "error"
+        assert body["error_code"] == "AUTH_FAILED"
+
+    def test_no_origin_allowed(self, monkeypatch, tmp_path):
+        """脚本客户端（无 Origin 头）不受影响"""
+        client = self._make_client(monkeypatch, tmp_path)
+        r = client.get("/queue/status")
+        assert r.get_json()["status"] == "success"
+
+    def test_health_public_with_origin(self, monkeypatch, tmp_path):
+        """/health 探活不受 Origin 防御影响"""
+        client = self._make_client(monkeypatch, tmp_path)
+        r = client.get("/health", headers={"Origin": "http://evil.example"})
+        assert r.get_json()["status"] == "success"

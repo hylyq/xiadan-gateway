@@ -22,8 +22,6 @@ from src.utils.logger import Logger
 
 def create_app() -> Flask:
     """创建 Flask 应用"""
-    from flask_cors import CORS
-
     config = AppConfig()
     logger = Logger.get_instance()
     auth_config = config.get_auth_config()
@@ -33,8 +31,25 @@ def create_app() -> Flask:
     PUBLIC_ENDPOINTS = {"/health"}
 
     app = Flask(__name__)
-    CORS(app)
+    # 不启用 CORS：本网关仅接受脚本/程序调用，无浏览器前端。
+    # 浏览器跨站请求必带 Origin 头（见下方中间件），一律拒绝——
+    # 防止用户浏览器中的恶意网页向本机网关发起交易请求。
     app.config["JSON_AS_ASCII"] = False
+
+    # 跨站防御中间件：拒绝带 Origin 头的请求（始终生效，与认证开关无关）
+    @app.before_request
+    def _reject_cross_site():
+        if request.path in PUBLIC_ENDPOINTS:
+            return None
+        if request.headers.get("Origin"):
+            return error_response(
+                ErrorCode.AUTH_FAILED,
+                "已拒绝浏览器跨站请求（检测到 Origin 头）",
+                generate_request_id(),
+                "本网关仅接受脚本/程序调用（curl、PowerShell、HTTP 客户端等，"
+                "不携带 Origin 头）。如确需浏览器访问请自行评估并改造。"
+            )
+        return None
 
     # 认证中间件
     if auth_enabled and expected_token:
