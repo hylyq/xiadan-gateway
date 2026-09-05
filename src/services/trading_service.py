@@ -17,7 +17,8 @@ from src.api.task_queue import report_window_state
 from src.constants import (
     CANCEL_TYPE_MAP,
     CANCEL_CONFIRM_TEXT_ID, CANCEL_CONFIRM_YES_BUTTON_ID,
-    CANCEL_CONFIRM_TEXT_KEYWORD
+    CANCEL_CONFIRM_TEXT_KEYWORD,
+    BLOCKING_POPUP_KEYWORDS,
 )
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
@@ -196,10 +197,9 @@ class TradingService:
     @staticmethod
     def _has_blocking_text(descendants) -> bool:
         """检查 descendants 中是否有阻塞型弹窗特征文本（不遍历 UIA 树）"""
-        popup_keywords = ["Begin failed", "failed", "失败", "事务处理机"]
         for el in descendants:
             text = safe_text(el)
-            if any(kw in text for kw in popup_keywords):
+            if any(kw in text for kw in BLOCKING_POPUP_KEYWORDS):
                 return True
         return False
 

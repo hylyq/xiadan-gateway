@@ -131,7 +131,11 @@ def _register_system_routes(app: Flask) -> None:
         """热重载配置文件
 
         重新读取 config/app_config.json，无需重启服务。
-        注意: trading_app_paths 等路径变更需重启服务才能完全生效。
+        日志级别同步热生效；trading_app_paths 等路径变更需重启服务才能完全生效。
         """
         result = config.reload()
+        # 日志级别热生效（启动时由 main.py 设置，重载后需重新应用）
+        Logger.get_instance().set_level(
+            config.get_logging_config().get("level", "INFO")
+        )
         return success_response(result, generate_request_id())

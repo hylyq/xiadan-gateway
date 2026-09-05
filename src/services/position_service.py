@@ -10,6 +10,7 @@ from typing import Optional
 from src.utils.poll import poll_until, timed, PollTimeoutError
 from src.constants import (
     BALANCE_FIELDS,
+    BLOCKING_POPUP_KEYWORDS,
     CAPTCHA_IMAGE_ID, CAPTCHA_INPUT_ID, CAPTCHA_OK_BUTTON_ID,
     CAPTCHA_CANCEL_BUTTON_ID, CAPTCHA_VERIFY_ID,
     CAPTCHA_DIALOG_TITLE, CAPTCHA_TEXT_KEYWORDS,
@@ -749,10 +750,9 @@ class PositionService:
 
     def _check_blocking_popup(self, descendants, window) -> None:
         """用缓存的 descendants 检测阻塞弹窗，命中才走完整关闭流程"""
-        popup_keywords = ["Begin failed", "failed", "失败", "事务处理机"]
         for el in descendants:
             text = safe_text(el)
-            if any(kw in text for kw in popup_keywords):
+            if any(kw in text for kw in BLOCKING_POPUP_KEYWORDS):
                 self._dismiss_popup_if_present(window)
                 return
 

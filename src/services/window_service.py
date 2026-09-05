@@ -14,7 +14,7 @@ import win32process
 from pywinauto import Application, Desktop
 
 from config.key_config import KEY_MAP
-from src.constants import TRADING_WINDOW_TITLE
+from src.constants import TRADING_WINDOW_TITLE, BLOCKING_POPUP_KEYWORDS
 from src.utils.logger import Logger
 from src.utils.poll import timed
 from src.utils.singleton import Singleton
@@ -341,13 +341,13 @@ class WindowService(Singleton):
 
         Args:
             window: 交易窗口对象（若为 None 则直接返回 False）
-            popup_keywords: 弹窗检测关键词，默认 ["Begin failed", "failed", "提示"]
+            popup_keywords: 弹窗检测关键词，默认 BLOCKING_POPUP_KEYWORDS
 
         Returns:
             是否关闭了弹窗
         """
         if popup_keywords is None:
-            popup_keywords = ["Begin failed", "failed", "失败", "事务处理机"]
+            popup_keywords = list(BLOCKING_POPUP_KEYWORDS)
 
         if window is None:
             return False
