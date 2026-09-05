@@ -212,8 +212,7 @@ class TaskQueue(Singleton):
                     )
 
                 # 自动诊断：仅在任务失败时记录界面状态
-                if task.error is not None:
-                    self._auto_diagnostic(task)
+                # （快照在下方 event.set() 之后的 finally 尾部执行）
 
                 with self._lock:
                     self._current_task = None
@@ -230,6 +229,13 @@ class TaskQueue(Singleton):
                 task.event.set()
                 self._queue.task_done()
                 self._record_task_outcome(task)
+
+                # 自动诊断：仅任务失败时记录界面状态。
+                # 放在 event.set() 之后——诊断是事后排查数据，不应阻塞 HTTP 响应
+                # （截图+UIA 遍历 ~2s）。worker 串行执行，下一任务在本 finally
+                # 结束前不会开始，快照界面状态仍与失败时刻一致。
+                if task.error is not None:
+                    self._auto_diagnostic(task)
 
     # ── 连续跳过：操作分组 ──────────────────────────────────
     # 同组内上笔干净退出 → 跳过窗口重置。不同组 = 接口不同 → 必须重置。
@@ -468,10 +474,10 @@ class TaskQueue(Singleton):
         }
 
     def _auto_diagnostic(self, task: Task) -> None:
-        """任务执行后自动诊断记录（无论成功失败）
+        """任务失败后自动诊断记录（成功任务不记录）
 
         自动捕获界面状态并保存到历史队列。
-        让我（AI 助手）可以随时通过 /diagnostic/history 查看每一步的界面状态。
+        让我（AI 助手）可以随时通过 /diagnostic/history 查看失败时的界面状态。
         """
         try:
             info = DiagnosticUtil().snapshot(f"task_{task.name}")

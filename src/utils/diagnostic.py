@@ -91,33 +91,28 @@ class DiagnosticUtil:
                     main_window = dialogs[0]
 
             if main_window is not None:
-                # 枚举所有子孙控件，提取文本
+                # 单次遍历同时提取控件文本 + 状态栏（原先分两轮遍历多花 ~0.8s）
                 seen_texts = set()
+                status_bar_texts = []
                 for ctrl in main_window.descendants():
                     try:
+                        if ctrl.element_info.control_type == "StatusBar":
+                            status = ctrl.window_text()
+                            if status and status.strip():
+                                status_bar_texts.append(status.strip())
+                            continue
                         text = ctrl.window_text()
                         if text and text.strip() and text.strip() not in seen_texts:
                             seen_texts.add(text.strip())
                             ui_text_lines.append(text.strip())
                     except Exception:
                         continue
+                ui_text_lines.extend(status_bar_texts)
                 # 也获取窗口标题
                 try:
                     title = main_window.window_text()
                     if title and title.strip():
                         ui_text_lines.insert(0, f"[窗口标题] {title.strip()}")
-                except Exception:
-                    pass
-                # 获取状态栏文本
-                try:
-                    for ctrl in main_window.descendants():
-                        try:
-                            if ctrl.element_info.control_type == "StatusBar":
-                                status = ctrl.window_text()
-                                if status and status.strip():
-                                    ui_text_lines.append(f"[状态栏] {status.strip()}")
-                        except Exception:
-                            continue
                 except Exception:
                     pass
 
