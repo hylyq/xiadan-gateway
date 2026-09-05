@@ -184,6 +184,8 @@ class PositionService:
 
         流程：Ctrl+C → 验证码弹窗 → OCR 识别 → 读剪贴板，最多 2 次
         （内层 _solve_captcha 已有 max_retry 次 OCR 重试，外层无需 3 次）。
+        未检测到验证码弹窗时兜底校验剪贴板：无验证码会话/弹窗漏检时
+        有效表格直接采用，避免把数据当失败丢弃。
         """
         max_attempts = 2
         for attempt in range(max_attempts):
@@ -211,9 +213,18 @@ class PositionService:
                         captcha_found = True
                         break
                 if not captcha_found:
+                    # 兜底：无验证码会话/弹窗漏检时剪贴板可能已有有效表格——
+                    # 不读就 continue 会把有效数据当失败丢弃（白等两轮后误报 OCR 失败）
+                    data = self.window_service.get_clipboard()
+                    if self._is_valid_table_data(data):
+                        self.logger.info(
+                            f"第 {attempt + 1} 次未检测到验证码弹窗，"
+                            f"但剪贴板已有有效表格数据，直接使用"
+                        )
+                        return self._format_table_data(data)
                     self.logger.warning(
                         f"第 {attempt + 1} 次 Ctrl+C 后未检测到验证码弹窗"
-                        f"（已扫描 4 次），可能焦点丢失"
+                        f"（已扫描 4 次），剪贴板也无有效数据，可能焦点丢失"
                     )
                     continue
 
@@ -238,11 +249,12 @@ class PositionService:
                     f"第 {attempt + 1} 次剪贴板内容无效: {repr(data[:100]) if data else '空'}"
                 )
 
-        # 所有尝试失败，截图诊断 + 返回 OCR 错误
+        # 所有尝试失败，截图诊断 + 显式报错
         DiagnosticUtil().snapshot("query_empty_clipboard")
         raise ApiError(
             ErrorCode.OCR_FAILED,
-            "验证码识别失败，已重试 3 次",
+            f"查询失败：{max_attempts} 次尝试内未获得有效表格数据"
+            "（验证码未通过/弹窗检测失败，或剪贴板内容无效）",
             suggestion="可稍后重试查询，或检查交易窗口是否被遮挡"
         )
 

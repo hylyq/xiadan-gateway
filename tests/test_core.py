@@ -1025,3 +1025,28 @@ class TestWindowServiceSingleton:
             assert ws2._cached_hwnd == 123456
         finally:
             ws1._cached_hwnd = None
+
+
+class TestIsValidTableData:
+    """剪贴板表格数据校验测试（#2 兜底读取的判定依据）"""
+
+    def setup_method(self):
+        self.service = PositionService.__new__(PositionService)
+
+    def test_valid_table(self):
+        assert self.service._is_valid_table_data("代码\t名称\n000001\t平安银行") is True
+
+    def test_header_only(self):
+        """仅表头无数据行（当日无数据）→ 有效"""
+        assert self.service._is_valid_table_data("代码\t名称\t数量") is True
+
+    def test_empty(self):
+        assert self.service._is_valid_table_data("") is False
+        assert self.service._is_valid_table_data(None) is False
+
+    def test_no_tab_in_header(self):
+        assert self.service._is_valid_table_data("单列内容") is False
+
+    def test_data_row_missing_tab(self):
+        """数据行缺制表符（复制不完整）→ 无效"""
+        assert self.service._is_valid_table_data("代码\t名称\r\n000001") is False
