@@ -33,7 +33,7 @@ Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──�
 3. **UI automation**: pywinauto (UIA backend) manipulates controls — reading text, filling inputs, clicking buttons
 4. **OCR captcha**: Ctrl+C always triggers a captcha popup; a lightweight template-matching engine recognizes it automatically (see [Captcha OCR — lightweight template matching](#captcha-ocr--lightweight-template-matching))
 5. **Window monitoring**: a background thread periodically checks the trading window state and restores it if minimized
-6. **Order latency optimization**: by reusing UIA control-tree traversals, pipelined mode switching, and consecutive-clean-skip, a single order dropped from ~13.7s to: buy ~7.8s (cold) / ~5.5s (same-direction) / ~6.0s (cross-direction), cancel ~6.0s / 2.2s (consecutive), positions ~7.9s / 5.5s (consecutive), trades ~9.2s / 6.6s (consecutive)
+6. **Order latency optimization**: by reusing UIA control-tree traversals, pipelined mode switching, and consecutive-clean-skip, a single order dropped from ~13.7s to: buy ~7.8s (cold) / ~5.5s (same-direction) / ~6.0s (cross-direction), cancel ~6.0s / 2.2s (consecutive), positions ~7.9s / 5.5s (consecutive), trades ~9.2s / 6.6s (consecutive) **Re-measured 2026-09-05** (after cross-request window-handle caching): buy ~6.9s (cold) / ~6.0s (same-direction), cancel ~4.9s / 1.8s (consecutive), positions ~6.4s (consecutive), trades ~5.8s (consecutive), balance ~2.2s (consecutive); first query after service restart 17.0s → 9.0s (`WindowService` is now a singleton — the handle cache is reused across requests, eliminating the ~2s global window scan per request)
 
 ## Core Features
 
@@ -53,6 +53,7 @@ Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──�
 | Startup config validation | Validates config types/ranges (port/timeouts/paths) at startup; aborts with fix guidance on invalid config |
 | Screenshot auto-cleanup | Cleans expired screenshots at startup (keeps 200 / last 7 days) |
 | Auth security | Token compared with `hmac.compare_digest` (constant-time) |
+| Cross-site defense | Requests carrying an `Origin` header are rejected (browser cross-site requests always carry it; script clients never do) — prevents malicious web pages from firing trades at the local gateway; active even when auth is disabled |
 | Runtime stats | Per-error-code success rates (1-hour window, via `/health`); log alert after 3 consecutive failures |
 | Window position self-healing | Before each task, checks window/workarea intersection (60% threshold); auto-moves the window back if it was dragged off-screen (`click_input`/screenshots are coordinate-based and fail off-screen) |
 
@@ -108,7 +109,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
   "task_queue": {
     "max_size": 50,
     "watchdog_timeout_seconds": 30,
-    "query_timeout_seconds": 15,
+    "query_timeout_seconds": 30,
     "confirm_timeout_seconds": 10
   },
   "idempotency": { "order_dedup_window_seconds": 60 },
@@ -389,7 +390,7 @@ xiadan-gateway/
 | Component | Purpose |
 |-----------|---------|
 | **Python 3.11+** / **uv** | Language / package manager |
-| **Flask** + **flask-cors** | HTTP routing (modular Blueprints) |
+| **Flask** | HTTP routing (modular Blueprints) |
 | **waitress** | Production-grade WSGI server |
 | **pywinauto** (UIA) | Window/control automation |
 | **pywin32** | Windows APIs (keys, windows, mutex) |
@@ -533,6 +534,8 @@ All queries enter the query panel via `_prepare_query_panel()` (sends F4 to swit
 
 **Fake-data defense**: clipboard is cleared before Ctrl+C (so a failed copy never reads residue from the previous task); after copying, results are validated against feature columns (positions=`成本价`+`股票余额`, trades=`成交时间`+`成交编号`, orders=`委托价格`+`委托数量` — **measured headers**: the order table has no 「委托编号」 column; this version uses 「合同编号」, but the trades table also has 「合同编号」 so it lacks discrimination — the order table's unique features are 「委托价格/委托数量」). If page switching failed (window obscured/minimized, focus never entered the table, etc.) the copy comes from another query table; validation retries once and records the actual headers, and if it still fails, reports an explicit error (`INTERNAL_ERROR`) — never silently returns fake data.
 
+**Navigation & captcha double fallback** (2026-09-05): (1) after clicking a tree node, the selection state is verified via `is_selected()` and the click is retried when it did not register — on the simulated account, `click_input` occasionally failed to register, leaving the window on 「当日委托」 while an empty table bypassed feature-column validation and positions were silently returned as an empty list; this fix closes that path. (2) when no captcha popup is detected after Ctrl+C, the clipboard is validated as a fallback — for sessions without a captcha (or a missed popup), valid table data is adopted directly instead of spinning through retries and mis-reporting OCR failure.
+
 ## Known Limitations and Defenses
 
 ### Menu Bar Cannot Be Automated
@@ -612,7 +615,7 @@ When interacting with the broker server (querying price after entering code, swi
 | Switching price mode | Same as above (server unresponsive) | Detect popup after timeout → `SERVER_UNAVAILABLE` |
 | Clicking buy/sell | 提交失败：清算中 / 当前时间不允许委托 / … | Extract text → classified error |
 
-Keywords are centralized in `constants.py:SERVER_ERROR_POPUP_KEYWORDS`. `WindowService.dismiss_blocking_popup()` defaults to bilingual keywords (`"失败"` / `"failed"` / `"事务处理机"`); all callers (after Trader code entry, after price-mode-switch timeout, F4 query panel, F3 cancel screen) share the same detection logic.
+Keywords are centralized in `constants.py:SERVER_ERROR_POPUP_KEYWORDS` (blocking popup keywords in `constants.py:BLOCKING_POPUP_KEYWORDS`). `WindowService.dismiss_blocking_popup()` defaults to bilingual keywords (`"失败"` / `"failed"` / `"事务处理机"`); all callers (after Trader code entry, after price-mode-switch timeout, F4 query panel, F3 cancel screen) share the same detection logic.
 
 ### Logger Constraint
 
