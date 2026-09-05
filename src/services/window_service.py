@@ -17,13 +17,19 @@ from config.key_config import KEY_MAP
 from src.constants import TRADING_WINDOW_TITLE
 from src.utils.logger import Logger
 from src.utils.poll import timed
+from src.utils.singleton import Singleton
 from src.utils.uia import safe_control_type, safe_text
 
 
-class WindowService:
-    """窗口操作服务"""
+class WindowService(Singleton):
+    """窗口操作服务（单例：跨请求共享窗口句柄缓存）
 
-    def __init__(self):
+    路由层每个请求都会构造 WindowService——若各自为政，_cached_hwnd 缓存
+    永远为空，每次请求首查都走 Desktop(backend="uia").windows() 的 ~2s
+    全局扫描。单例化后句柄缓存跨请求复用，首查降为 connect(handle) 快路径。
+    """
+
+    def _init(self):
         self.logger = Logger.get_instance()
         self._cached_hwnd = None  # 缓存窗口句柄，避免重复 Desktop().windows() 开销
 

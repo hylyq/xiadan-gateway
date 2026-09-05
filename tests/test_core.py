@@ -1003,3 +1003,25 @@ class TestCaptchaImageValidation:
     def test_missing_file_assumed_valid(self):
         """文件不存在无法判断 → 假定有效（保持原行为，不阻断流程）"""
         assert PositionService._is_captcha_image_valid("nonexistent.png") is True
+
+
+class TestWindowServiceSingleton:
+    """WindowService 单例测试（#1：跨请求共享句柄缓存的前提）"""
+
+    def test_same_instance(self):
+        """多次构造返回同一实例（路由层每请求 WindowService() 不再各自为政）"""
+        from src.services.window_service import WindowService
+        ws1 = WindowService()
+        ws2 = WindowService()
+        assert ws1 is ws2
+
+    def test_shared_hwnd_cache(self):
+        """一处更新句柄缓存，另一处引用可见（缓存真正跨请求生效）"""
+        from src.services.window_service import WindowService
+        ws1 = WindowService()
+        ws2 = WindowService()
+        ws1._cached_hwnd = 123456
+        try:
+            assert ws2._cached_hwnd == 123456
+        finally:
+            ws1._cached_hwnd = None
