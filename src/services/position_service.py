@@ -670,7 +670,20 @@ class PositionService:
         return False
 
     def _verify_captcha_success(self, window) -> bool:
-        """验证验证码是否成功（输入框消失=成功）"""
+        """验证验证码是否成功（输入框消失=成功）
+
+        优先扫描验证码弹窗子树（独立弹窗仅 ~20 个控件，~10ms），
+        弹窗已销毁（descendants 抛异常）视为成功——剪贴板校验仍会兜底。
+        弹窗未知时回退主窗口全树扫描（数百控件，~0.8s）。
+        """
+        captcha_win = self._captcha_window
+        if captcha_win is not None:
+            try:
+                input_element = self.window_service.find_element_in_window(
+                    captcha_win, CAPTCHA_VERIFY_ID)
+                return input_element is None
+            except Exception:
+                return True
         input_element = self.window_service.find_element_in_window(window, CAPTCHA_VERIFY_ID)
         return input_element is None
 
