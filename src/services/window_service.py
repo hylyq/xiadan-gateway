@@ -85,28 +85,43 @@ class WindowService(Singleton):
             paths = list(app_path)
         paths_lower = [p.lower() for p in paths]
 
-        # 一轮扫描收集所有匹配窗口
-        # 不要求 IsWindowVisible — 窗口可能被隐藏到系统托盘
-        # 优先按主窗口标题匹配，子窗口作为 fallback
         found_windows = {}  # exe_lower -> hwnd
 
-        def callback(hwnd, extra):
-            _, pid = win32process.GetWindowThreadProcessId(hwnd)
-            try:
-                proc = psutil.Process(pid)
-                exe = proc.exe().lower()
-                if exe in paths_lower:
-                    title = win32gui.GetWindowText(hwnd)
-                    # 主窗口标题优先覆盖（如"网上股票交易系统5.0"）
-                    if title == TRADING_WINDOW_TITLE:
-                        found_windows[exe] = hwnd
-                    elif exe not in found_windows:
-                        found_windows[exe] = hwnd
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+        # 快速路径：标题精确匹配（GetWindowText 微秒级；原实现为每个顶层
+        # 窗口创建 psutil.Process 查 exe，整轮枚举 ~百毫秒）
+        title_matches = []
+
+        def title_callback(hwnd, extra):
+            if win32gui.GetWindowText(hwnd) == TRADING_WINDOW_TITLE:
+                title_matches.append(hwnd)
             return True
 
-        win32gui.EnumWindows(callback, None)
+        win32gui.EnumWindows(title_callback, None)
+
+        for hwnd in title_matches:
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            try:
+                exe = psutil.Process(pid).exe().lower()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            if exe in paths_lower:
+                found_windows[exe] = hwnd
+
+        # 兜底：主窗口标题不匹配（券商升级改标题）或窗口隐藏到托盘时，
+        # 才退回全量扫描（为每个窗口查 exe）
+        if not found_windows:
+            def callback(hwnd, extra):
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                try:
+                    proc = psutil.Process(pid)
+                    exe = proc.exe().lower()
+                    if exe in paths_lower:
+                        found_windows.setdefault(exe, hwnd)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+                return True
+
+            win32gui.EnumWindows(callback, None)
 
         if found_windows:
             # 按配置顺序选优先级最高的（第一个匹配的路径）
