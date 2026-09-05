@@ -696,6 +696,26 @@ class PositionService:
     # 树形菜单导航兜底
     # ------------------------------------------------------------
 
+    def _click_tree_item_verified(self, item, page_name: str, retries: int = 2) -> None:
+        """点击树节点并确认选中生效，点击未注册时重试
+
+        页面切换依赖树节点点击真正生效；click_input 偶发未注册时界面
+        停留在旧页面，后续 Ctrl+C 会复制到其他查询表——空表还会绕过
+        特征列验证静默返回错误数据（实测：点击'资金股票'未生效，窗口
+        留在当日委托页，持仓查询返回空列表）。is_selected 校验堵住此洞。
+        """
+        for attempt in range(retries):
+            item.click_input()
+            time.sleep(0.15)
+            try:
+                if item.is_selected():
+                    return
+            except Exception:
+                return  # 无法判断选中态时保持原行为（假定成功）
+            self.logger.warning(
+                f"树节点 '{page_name}' 点击后未选中（尝试 {attempt + 1}/{retries}），重试"
+            )
+
     def _navigate_to_query_page(self, window, page_name: str) -> None:
         """导航到查询页面
 
@@ -727,9 +747,8 @@ class PositionService:
                     current = found
 
                 if found is not None and page_name in (found.window_text() or ""):
-                    found.click_input()
+                    self._click_tree_item_verified(found, page_name)
                     self.logger.info(f"已通过树形路径点击 '{page_name}'")
-                    time.sleep(0.15)
                     self._check_blocking_popup(_descendants, window)
                     return
 
@@ -738,9 +757,8 @@ class PositionService:
             for el in _descendants:
                 if safe_control_type(el) == "TreeItem":
                     if page_name in safe_text(el):
-                        el.click_input()
+                        self._click_tree_item_verified(el, page_name)
                         self.logger.info(f"已通过 TreeItem 匹配点击 '{page_name}'")
-                        time.sleep(0.15)
                         self._check_blocking_popup(_descendants, window)
                         return
 
