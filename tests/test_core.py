@@ -1050,3 +1050,75 @@ class TestIsValidTableData:
     def test_data_row_missing_tab(self):
         """数据行缺制表符（复制不完整）→ 无效"""
         assert self.service._is_valid_table_data("代码\t名称\r\n000001") is False
+
+
+class TestIdempotencyRecordRetention:
+    """幂等记录保留判定测试（#7：任务可能仍在执行时不清除，防重复下单）"""
+
+    def _checker(self):
+        from src.api.idempotency import IdempotencyChecker
+        chk = IdempotencyChecker.__new__(IdempotencyChecker)
+        chk._records = {}
+        import threading
+        chk._records_lock = threading.Lock()
+
+        class _Cfg:
+            def get_idempotency_config(self):
+                return {"order_dedup_window_seconds": 60}
+
+        class _Logger:
+            def info(self, msg):
+                pass
+
+            def warning(self, msg):
+                pass
+        chk.config = _Cfg()
+        chk.logger = _Logger()
+        return chk
+
+    def test_keep_on_task_timeout(self):
+        """看门狗超时：任务可能仍在执行 → 保留"""
+        from src.api.idempotency import should_keep_record_on_error
+        from src.exceptions import TaskTimeoutError
+        e = TaskTimeoutError("place_order", {}, elapsed=30.0)
+        assert should_keep_record_on_error(e) is True
+
+    def test_keep_on_queue_timeout(self):
+        """队列超时：任务仍在队列稍后会执行 → 保留"""
+        from src.api.idempotency import should_keep_record_on_error
+        from src.exceptions import ApiError, ErrorCode
+        e = ApiError(ErrorCode.QUEUE_TIMEOUT, "任务排队或执行超时")
+        assert should_keep_record_on_error(e) is True
+
+    def test_clear_on_business_error(self):
+        """业务失败（任务确定未执行）→ 清除以便重试"""
+        from src.api.idempotency import should_keep_record_on_error
+        from src.exceptions import ApiError, ErrorCode
+        for code in (ErrorCode.QUEUE_FULL, ErrorCode.MODE_SWITCH_FAILED,
+                     ErrorCode.VALIDATION_ERROR, ErrorCode.OCR_FAILED):
+            e = ApiError(code, "x")
+            assert should_keep_record_on_error(e) is False, code
+
+    def test_clear_on_unknown_error(self):
+        from src.api.idempotency import should_keep_record_on_error
+        assert should_keep_record_on_error(ValueError("x")) is False
+
+    def test_duplicate_rejected_then_cleared_allows_retry(self):
+        """记录→重复被拒→清除→可重新记录（失败重试路径）"""
+        from src.exceptions import ApiError, ErrorCode
+        chk = self._checker()
+        chk.check_and_record("601991", "1", "100", "10.50", "limit")
+        with pytest.raises(ApiError) as exc_info:
+            chk.check_and_record("601991", "1", "100", "10.50", "limit")
+        assert exc_info.value.error_code == ErrorCode.DUPLICATE_ORDER
+        # 不同参数不受影响
+        chk.check_and_record("601991", "2", "100", None, "market")
+        # 清除后同参数可再次记录
+        assert chk.clear_record("601991", "1", "100", "10.50", "limit") is True
+        chk.check_and_record("601991", "1", "100", "10.50", "limit")
+
+    def test_expired_window_allows_retry(self):
+        """超过去重窗口后允许再次下单"""
+        chk = self._checker()
+        chk._records["601991_1_100__limit"] = 0  # 1970 年 → 必然过期
+        chk.check_and_record("601991", "1", "100", "10.50", "limit")

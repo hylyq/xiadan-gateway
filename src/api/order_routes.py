@@ -15,7 +15,7 @@ from src.api.response import (
 )
 from src.api.task_queue import TaskQueue
 from src.core.trader import Trader
-from src.exceptions import ApiError, ErrorCode, TaskTimeoutError
+from src.exceptions import ApiError, ErrorCode
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
 from src.utils.logger import Logger
@@ -130,7 +130,9 @@ def xiadan():
         )
         return success_response(result, request_id, duration_ms=(time.time() - _start) * 1000)
     except Exception as e:
-        if not isinstance(e, TaskTimeoutError):
+        # 任务可能仍在执行/排队（看门狗超时、队列超时）时保留幂等记录，
+        # 防止客户端立即重试导致重复下单
+        if not idempotency.should_keep_record_on_error(e):
             idempotency.clear_record(code, status, amount, price, price_type)
         return error_response_from_exception(e, request_id)
 

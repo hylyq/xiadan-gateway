@@ -7,10 +7,28 @@ import time
 from threading import Lock
 from typing import Optional
 
-from src.exceptions import ApiError, ErrorCode
+from src.exceptions import ApiError, ErrorCode, TaskTimeoutError
 from src.models.config import AppConfig
 from src.utils.logger import Logger
 from src.utils.singleton import Singleton
+
+
+def should_keep_record_on_error(e: Exception) -> bool:
+    """异常发生后，幂等记录是否应保留（下单可能仍会执行时保留）
+
+    防重复下单的关键判定：
+    - TaskTimeoutError（看门狗超时）：任务可能仍在执行 → 保留
+    - QUEUE_TIMEOUT：submit 等待超时返回错误，但任务仍在队列中、
+      稍后仍会被执行——此时清除记录并让客户端重试，两单都会成交 → 保留
+    - 其余失败（业务报错/参数校验/队列满）：任务确定未执行 → 清除以便重试
+    """
+    if isinstance(e, TaskTimeoutError):
+        return True
+    return getattr(e, "error_code", None) in (
+        ErrorCode.TASK_TIMEOUT,
+        ErrorCode.TASK_TIMEOUT_RECOVERY_FAILED,
+        ErrorCode.QUEUE_TIMEOUT,
+    )
 
 
 class IdempotencyChecker(Singleton):
@@ -62,7 +80,7 @@ class IdempotencyChecker(Singleton):
                 self.logger.warning(f"重复下单被拒绝: {key}, 距上次 {elapsed}s")
                 raise ApiError(
                     error_code=ErrorCode.DUPLICATE_ORDER,
-                    message=f"60秒内已提交相同订单（{elapsed}秒前），请勿重复下单",
+                    message=f"{window}秒内已提交相同订单（{elapsed}秒前），请勿重复下单",
                     suggestion=(
                         "请先确认上一笔订单状态: "
                         "1) 调用 GET /trades/today 查询订单是否已成交；"
