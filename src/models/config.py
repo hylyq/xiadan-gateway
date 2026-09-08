@@ -44,6 +44,10 @@ DEFAULT_CONFIG = {
     "query": {
         "copy_method": "keyboard"  # keyboard=Ctrl+C 键盘法（默认）; message=WM_COMMAND 消息级复制（实验）
     },
+    "order": {
+        "capture_entrust_no": False,      # 下单后截获右下角横幅回传委托号（需 ddddocr，启用占 ~150MB 内存）
+        "entrust_no_timeout_seconds": 3.0  # 横幅截获超时（横幅存活约 1-2s）
+    },
     "logging": {
         "level": "INFO",
         "file": "logs/app.log",
@@ -158,6 +162,12 @@ class AppConfig(Singleton):
     def get_query_config(self) -> dict:
         return self._config.get("query", {"copy_method": "keyboard"})
 
+    def get_order_config(self) -> dict:
+        return self._config.get("order", {
+            "capture_entrust_no": False,
+            "entrust_no_timeout_seconds": 3.0
+        })
+
     def get_logging_config(self) -> dict:
         # 返回副本：不原地改写单例里的配置字典——否则热重载对比失真，
         # 且 _save_config 会把 absolutize 后的路径写回 app_config.json
@@ -227,6 +237,15 @@ class AppConfig(Singleton):
             errors.append(
                 f"query.copy_method 必须是 'keyboard' 或 'message'，当前: {copy_method!r}"
             )
+
+        ocfg = self._config.get("order") or {}
+        v = ocfg.get("entrust_no_timeout_seconds")
+        if v is not None:
+            try:
+                if float(v) <= 0:
+                    errors.append(f"order.entrust_no_timeout_seconds 必须 > 0，当前: {v}")
+            except (TypeError, ValueError):
+                errors.append(f"order.entrust_no_timeout_seconds 必须是数字，当前: {v!r}")
 
         return errors
 

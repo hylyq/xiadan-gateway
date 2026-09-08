@@ -20,6 +20,7 @@ from src.constants import (
     CANCEL_CONFIRM_TEXT_ID,
     SERVER_ERROR_POPUP_KEYWORDS
 )
+from src.core.entrust_capture import EntrustNoCapture
 from src.core.popup_rules import match_popup_rule, match_submit_error
 from src.core.validation import sanitize_price
 from src.exceptions import ApiError, ErrorCode
@@ -72,7 +73,8 @@ class Trader:
                 "code": "601991",
                 "amount": "100",
                 "price": "10.50" or None,
-                "confirmed": True/False
+                "confirmed": True/False,
+                "entrust_no": "6246860043" or None  # capture_entrust_no 启用时回传
             }
         """
         self.logger.info(
@@ -205,6 +207,11 @@ class Trader:
                 time.sleep(0.05)
 
         # 8. 点击下单按钮并处理弹窗
+        # 横幅截获先行启动：横幅出现于提交后 ~0.3-0.5s、存活 1-2s，
+        # 必须与弹窗检测并行，否则 place_order 返回时横幅已消失
+        capture = EntrustNoCapture(self.config, self.logger)
+        if capture.enabled:
+            capture.start(window)
         with timed("点击下单按钮", self.logger):
             self.window_service.click_element(
                 window, CONTROL_ID_SUBMIT, descendants=_descendants)
@@ -449,6 +456,11 @@ class Trader:
             "price": price if price_type == "limit" else None,
             "confirmed": confirmed
         }
+        # 委托号回传：等待横幅截获线程（其内部超时自限，通常 0.5-1.5s 内已命中）
+        if capture.enabled:
+            result["entrust_no"] = capture.wait_result(
+                float(self.config.get_order_config()
+                      .get("entrust_no_timeout_seconds", 3.0)) + 0.5)
         self.logger.info(f"下单完成: {result}")
         return result
 

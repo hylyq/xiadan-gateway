@@ -24,6 +24,10 @@
   "query": {
     "copy_method": "keyboard"
   },
+  "order": {
+    "capture_entrust_no": false,
+    "entrust_no_timeout_seconds": 3.0
+  },
   "logging": {
     "level": "INFO",
     "file": "logs/app.log",
