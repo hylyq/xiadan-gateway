@@ -329,6 +329,46 @@ class WindowService(Singleton):
             self.logger.warning(f"窗口位置恢复失败: {e}")
             return False
 
+    def ensure_banner_strip_onscreen(self, hwnd: int) -> bool:
+        """确保窗口右下角横幅条带完整落在最近显示器工作区内（委托号截获依赖）
+
+        横幅贴窗口右缘（宽 45% × 底 32px）：右缘出屏会直接裁掉编号尾部。
+        ensure_window_onscreen 的 60% 交集阈值对此不敏感（右移 200px 仅
+        损失 ~14% 面积），需按右/下边缘单独检查。
+
+        Returns:
+            True=条带已在工作区（或已移回），False=获取信息失败
+        """
+        try:
+            monitor = win32api.MonitorFromWindow(
+                hwnd, win32con.MONITOR_DEFAULTTONEAREST)
+            info = win32api.GetMonitorInfo(monitor)
+            work = info["Work"]
+            l, t, r, b = win32gui.GetWindowRect(hwnd)
+        except Exception as e:
+            self.logger.warning(f"获取窗口/工作区信息失败: {e}")
+            return False
+
+        # 条带右/下缘贴窗口右/下缘，预留 8px 边框余量
+        shift_x = max(0, r - (work[2] - 8))
+        shift_y = max(0, b - (work[3] - 8))
+        if not shift_x and not shift_y:
+            return True
+
+        try:
+            win32gui.SetWindowPos(
+                hwnd, 0, l - shift_x, t - shift_y, 0, 0,
+                win32con.SWP_NOSIZE | win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE
+            )
+            self.logger.info(
+                f"横幅条带出屏（右缘超出 {shift_x}px / 底部超出 {shift_y}px），"
+                f"窗口已左/上移回工作区"
+            )
+            return True
+        except Exception as e:
+            self.logger.warning(f"横幅条带出屏移回失败: {e}")
+            return False
+
     # ------------------------------------------------------------
     # 弹窗处理（统一方法，供 PositionService / TradingService 共用）
     # ------------------------------------------------------------

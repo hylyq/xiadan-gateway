@@ -86,6 +86,18 @@ class Trader:
         self._had_any_dialog = False
         self._clean_dismiss = False
 
+        # 横幅截获器提前创建：启用时需在前置阶段（任何点击之前）确保
+        # 右下角条带在工作区内——窗口出屏时此刻移动是安全的
+        capture = EntrustNoCapture(self.config, self.logger)
+        if capture.enabled:
+            try:
+                _cap_win = self.window_service.get_trading_window()
+                if _cap_win is not None:
+                    self.window_service.ensure_banner_strip_onscreen(
+                        _cap_win.handle)
+            except Exception as e:
+                self.logger.warning(f"横幅条带出屏检查失败: {e}")
+
         # 0. 价格格式校验（A 股限 2 位小数）
         if price_type == "limit" and price:
             sanitized_price = sanitize_price(price)
@@ -207,9 +219,8 @@ class Trader:
                 time.sleep(0.05)
 
         # 8. 点击下单按钮并处理弹窗
-        # 横幅截获先行启动：横幅出现于提交后 ~0.3-0.5s、存活 1-2s，
+        # 横幅截获线程在点击前启动：横幅出现于提交后 ~0.3-0.5s、存活 1-2s，
         # 必须与弹窗检测并行，否则 place_order 返回时横幅已消失
-        capture = EntrustNoCapture(self.config, self.logger)
         if capture.enabled:
             capture.start(window)
         with timed("点击下单按钮", self.logger):

@@ -6,10 +6,18 @@
 
 截获方式（feat/entrust-no 探索结论，2026-09-09 模拟盘验证）：
 1. 提交前启动后台线程，对窗口右下角固定区域（宽 45% × 底部 32px）
-   以 ~12fps 连拍——只读屏幕像素，不碰 UIA（无 COM 线程问题）
+   以 ~12fps 屏幕抓取——只读屏幕像素，不碰 UIA（无 COM 线程问题）
 2. numpy 黄色掩码定位横幅条带（黄底红字，与状态栏背景区分度极高）
 3. BannerDigitOCR 模板匹配提取 8 位以上合同编号（~35ms，零外部依赖，
    10 个数字已经真实横幅样本逐位验证，见 scripts/test_template_ocr.py）
+
+可见性要求（实测量化）：
+- 横幅是状态栏上的自绘覆盖层，PrintWindow(WM_PRINT) 渲染主窗口不包含
+  它（实测从未命中，见 scripts/test_dual_probe.py），屏幕抓取是唯一
+  可行路线——因此要求条带区域落在屏幕工作区内且未被其他窗口遮挡；
+  place_order 前置阶段会调 ensure_banner_strip_onscreen 自愈出屏场景
+- 窗口最小化 / 遮挡 / 出屏裁切时截获失败，place_order 正常返回
+  entrust_no=None，不影响下单本身
 
 注意: 横幅号即客户端提交时显示的合同编号；极端情况（券商服务器
 维护窗口）下与最终落表号可能不一致，关键操作前应以当日委托查询复核。
@@ -68,8 +76,16 @@ class EntrustNoCapture:
         timeout = float(self.config.get_order_config()
                         .get("entrust_no_timeout_seconds", 3.0))
         t0 = time.perf_counter()
+        warned = False
         while time.perf_counter() - t0 < timeout:
             try:
+                if win32gui.IsIconic(hwnd) or not win32gui.IsWindowVisible(hwnd):
+                    if not warned:
+                        warned = True
+                        self.logger.info("交易窗口最小化/不可见，横幅无法截获，"
+                                         "本次委托号截获将跳过")
+                    time.sleep(0.1)
+                    continue
                 digits = self._grab_banner_digits(hwnd)
                 if digits:
                     self._result = digits
@@ -80,10 +96,10 @@ class EntrustNoCapture:
             except Exception as e:
                 self.logger.warning(f"横幅截获异常: {e}")
             time.sleep(0.08)
-        self.logger.info("横幅截获超时，未获得委托号（窗口最小化或横幅未出现）")
+        self.logger.info("横幅截获超时，未获得委托号（横幅未出现或区域被遮挡/出屏）")
 
     def _grab_banner_digits(self, hwnd):
-        """截取右下角区域 → 黄色掩码定位条带 → 模板匹配数字，无横幅返回 None"""
+        """屏幕抓取右下角条带 → 黄色掩码定位 → 模板匹配数字"""
         l, t, r, b = win32gui.GetWindowRect(hwnd)
         box = (l + int((r - l) * 0.55), b - 34, r - 4, b - 2)
         img = ImageGrab.grab(bbox=box)
