@@ -47,6 +47,16 @@ BALANCE_FIELDS = {
 }
 
 # ============================================================
+# 消息级复制表格 (PositionService, 实验特性 perf/wmcopy)
+# ============================================================
+
+WM_COMMAND = 0x0111              # Windows 命令消息
+GRID_COPY_COMMAND_ID = 0xE122    # 客户端内置"复制"命令 ID（同 easytrader WMCopy）
+GRID_CLASS_NAME = "CVirtualGridCtrl"  # 查询表格控件类名
+GRID_CONTROL_ID = 1047           # 查询表格控件 ID（各查询页共用，同 easytrader COMMON_GRID_CONTROL_ID）
+MESSAGE_COPY_TIMEOUT_SECONDS = 8.0    # 单轮消息级复制超时（需容纳验证码 OCR 求解）
+
+# ============================================================
 # 验证码弹窗控件 (PositionService)
 # ============================================================
 

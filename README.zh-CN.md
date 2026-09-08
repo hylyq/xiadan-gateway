@@ -43,6 +43,7 @@
 | 顺序执行 | 单 worker 线程任务队列，避免 `xiadan.exe` 并发冲突 |
 | 连续干净跳过 | 上笔干净退出→跳过 `_reset_trading_window`+激活。**同组内同向完全跳过，交叉方向只按 F1/F2**。有弹窗/失败/跨组则完整准备。操作分组：`trade`(买/卖)、`cancel`(撤单)、`query`(查询) |
 | 查询复用遍历 | 持仓/成交/委托查询：一次 `descendants` 遍历同时用于 Tree 查找+弹窗检测+兜底扫描，减少 ~40% 导航耗时 |
+| 消息级复制查询（实验） | `query.copy_method=message` 时表格复制走 `WM_COMMAND(0xE122)` 消息，免前台激活/免真实键盘。免验证码会话 copy 阶段 5.5s→0.5s；验证码会话与键盘法持平（验证码由复制动作触发，与发起方式无关）。失败自动回退键盘法 |
 | 模式切换流水线 | 限价↔市价切换时先点按钮不等待，立即填数量——数量填充的 ~0.7s 与标签变化重叠，验证在填数量之后自然就绪 |
 | 弹窗分类处理 | 委托确认→点Y/N；警告→点Y继续；**价格超限→点N取消+返回`PRICE_OUT_OF_RANGE`**；错误→关闭+报错 |
 | 看门狗恢复 | 任务超时自动截图 + 激活 + ESC×5，重置后返回错误 |
@@ -114,6 +115,7 @@ uv run python main.py --dev       # 开发模式（热加载）
   },
   "idempotency": { "order_dedup_window_seconds": 60 },
   "ocr": { "warmup_on_start": true, "max_retry": 3, "ddddocr_enabled": false },
+  "query": { "copy_method": "keyboard" },
   "auth": { "enabled": false, "token": "" },
   "logging": { "level": "INFO", "file": "logs/app.log", "screenshot_dir": "logs/screenshots" }
 }

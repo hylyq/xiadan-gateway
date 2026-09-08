@@ -14,7 +14,9 @@ from src.constants import (
     CAPTCHA_IMAGE_ID, CAPTCHA_INPUT_ID, CAPTCHA_OK_BUTTON_ID,
     CAPTCHA_CANCEL_BUTTON_ID, CAPTCHA_VERIFY_ID,
     CAPTCHA_DIALOG_TITLE, CAPTCHA_TEXT_KEYWORDS,
-    MAIN_WINDOW_TITLE_KEYWORD
+    MAIN_WINDOW_TITLE_KEYWORD,
+    WM_COMMAND, GRID_COPY_COMMAND_ID, GRID_CLASS_NAME, GRID_CONTROL_ID,
+    MESSAGE_COPY_TIMEOUT_SECONDS
 )
 from src.exceptions import ApiError, ErrorCode
 from src.models.config import AppConfig
@@ -43,6 +45,7 @@ class PositionService:
         self.logger = Logger.get_instance()
         self._cached_window = None   # 用于窗口引用刷新
         self._captcha_window = None  # 验证码弹窗引用（可能是独立顶层窗口）
+        self._cached_grid_hwnd = None  # 表格控件句柄（消息级复制用，导航时顺带缓存）
 
     def _send_ctrl_c(self):
         """激活窗口 → keybd_event 发送两次 Ctrl+C（绕过中文输入法）
@@ -137,14 +140,18 @@ class PositionService:
         return bool(required_columns & keys)
 
     def _copy_table_verified(self, table_name: str, required_columns: set,
+                             page_name: Optional[str] = None,
                              require_all: bool = True) -> list:
         """复制表格 + 特征列验证，失败重试一次，仍失败显式报错
 
         防御场景：非交易时段/服务器异常时树节点点击不触发页面切换，
         Ctrl+C 复制到的是其他查询表——不验证会静默返回假数据。
+
+        重试时若提供 page_name 则重新导航（真实点击页面切换事件），
+        而非对旧页面重复制——旧页面重复制只会得到同一张错表。
         """
         for attempt in range(2):
-            data = self._copy_table_via_clipboard()
+            data = self._copy_table()
             if self._is_table_matching(data, required_columns, require_all=require_all):
                 return data
             actual_keys = set(data[0].keys()) if data else set()
@@ -152,12 +159,180 @@ class PositionService:
                 f"第 {attempt + 1} 次复制到的不是{table_name}表"
                 f"（页面切换失败），实际表头: {sorted(actual_keys)}，重试"
             )
+            if attempt == 0 and page_name is not None:
+                try:
+                    self.logger.info(f"重试前重新导航到 '{page_name}'")
+                    self._renavigate(page_name)
+                except Exception as e:
+                    self.logger.warning(f"重新导航失败: {e}")
+            else:
+                time.sleep(0.4)  # 未重新导航时给页面渲染留出时间
         DiagnosticUtil().snapshot(f"{table_name}_page_switch_failed")
         raise ApiError(
             ErrorCode.INTERNAL_ERROR,
             f"{table_name}查询失败：未检测到{table_name}表特征列"
             "（页面切换异常——窗口可能被遮挡/最小化，或焦点未进入表格）",
             suggestion="请确认券商窗口完整可见后重试"
+        )
+
+    # ------------------------------------------------------------
+    # 消息级复制（query.copy_method=message，实验特性）
+    # ------------------------------------------------------------
+
+    def _use_message_copy(self) -> bool:
+        return self.config.get_query_config().get("copy_method", "keyboard") == "message"
+
+    def _copy_table(self) -> list:
+        """按配置选择表格复制方式
+
+        message: WM_COMMAND 消息级复制（免前台激活、免真实键盘），失败自动
+                 回退 keyboard，保证可用性优先。
+        keyboard: 现有 keybd_event 双 Ctrl+C 路径（默认）。
+        """
+        if self._use_message_copy():
+            try:
+                return self._copy_table_via_message()
+            except Exception as e:
+                self.logger.warning(f"消息级复制失败，回退键盘法: {e}")
+        return self._copy_table_via_clipboard()
+
+    def _get_cached_grid_valid(self) -> bool:
+        """缓存句柄是否仍指向当前活动（可见）的查询表格
+
+        各查询页各有一个 CVirtualGridCtrl 叠放，页面切换后旧页网格只是
+        隐藏并未销毁——只校验 IsWindow 会拿到隐藏网格复制出旧表
+        （实测：资金股票页缓存的句柄切到当日成交后复制回持仓表）。
+        必须校验可见性 + control_id=1047。
+        """
+        import win32con
+        import win32gui
+
+        hwnd = self._cached_grid_hwnd
+        if not hwnd:
+            return False
+        try:
+            return bool(
+                win32gui.IsWindow(hwnd)
+                and win32gui.IsWindowVisible(hwnd)
+                and win32gui.GetClassName(hwnd) == GRID_CLASS_NAME
+                and win32gui.GetWindowLong(hwnd, win32con.GWL_ID) == GRID_CONTROL_ID
+            )
+        except Exception:
+            return False
+
+    def _pick_grid_hwnd_from_descendants(self, descendants) -> Optional[int]:
+        """从控件树中选出当前活动的查询表格句柄
+
+        优先级：control_id=1047 且可见 > 仅 control_id=1047 > 仅可见 > 第一个匹配类名。
+        """
+        import win32gui
+
+        fallback = None
+        for el in descendants:
+            try:
+                if el.class_name() != GRID_CLASS_NAME:
+                    continue
+                hwnd = el.handle
+                if fallback is None:
+                    fallback = hwnd
+                is_visible = bool(win32gui.IsWindowVisible(hwnd))
+                is_query_grid = el.control_id() == GRID_CONTROL_ID
+                if is_query_grid and is_visible:
+                    return hwnd
+                if is_query_grid or (is_visible and fallback != hwnd):
+                    # 记住更优候选：1047 网格优先于任意可见网格
+                    if is_query_grid:
+                        fallback = hwnd
+            except Exception:
+                continue
+        return fallback
+
+    def _get_grid_hwnd(self) -> Optional[int]:
+        """获取查询表格控件 HWND（优先缓存，失效时重找）
+
+        缓存来源：_navigate_to_query_page 在既有遍历中顺带重选（零额外
+        成本，且每次导航后必然对应当前活动页）。此处兜底重找。
+        """
+        if self._get_cached_grid_valid():
+            return self._cached_grid_hwnd
+
+        window = self.window_service.get_trading_window_fast()
+        if window is None:
+            return None
+        hwnd = self._pick_grid_hwnd_from_descendants(window.descendants())
+        if hwnd is not None:
+            self._cached_grid_hwnd = hwnd
+            self.logger.info(f"已缓存表格控件句柄: {hwnd:#x}")
+        return hwnd
+
+    def _copy_table_via_message(self) -> list:
+        """消息级复制表格：post WM_COMMAND(0xE122) 触发客户端内置复制命令
+
+        免前台激活、免真实键盘（不受输入法拦截/GetAsyncKeyState 延迟影响）。
+        模拟盘实测（2026-09-09，perf/wmcopy）：
+        - 免验证码会话 ~0.5s 出数据；验证码会话每次复制都触发，含 OCR 解题 ~3.8s
+        - 对照键盘法 copy 阶段 5.54s（激活 0.42 + 双Ctrl+C 0.92 + 验证码扫描空等最多 4.2）
+        验证码由复制动作本身触发，与复制发起方式无关——OCR 求解流程完全复用。
+
+        轮询策略：剪贴板快查 + 验证码快检（~10ms）每轮都做，完整扫描（~0.8s）
+        降频兜底，避免弹窗漏检时傻等到超时。
+        """
+        import win32gui
+
+        max_attempts = 2
+        for attempt in range(max_attempts):
+            hwnd = self._get_grid_hwnd()
+            if hwnd is None:
+                raise Exception("未找到表格控件 CVirtualGridCtrl（消息级复制不可用）")
+
+            self.logger.info(f"第 {attempt + 1}/{max_attempts} 次尝试消息级复制(0xE122)")
+            # 复制前清空剪贴板：与键盘法同理，防读到上次任务残留数据
+            self.window_service.clear_clipboard()
+            win32gui.PostMessage(hwnd, WM_COMMAND, GRID_COPY_COMMAND_ID, 0)
+
+            deadline = time.time() + MESSAGE_COPY_TIMEOUT_SECONDS
+            poll_count = 0
+            ocr_failed = False
+            while time.time() < deadline:
+                # retries=1：弹窗挂起期间剪贴板常被客户端锁住，快速失败
+                # 避免每轮卡 0.3s（默认 3 次×0.1s）拖慢验证码检测
+                data = self.window_service.get_clipboard(retries=1, delay=0.02)
+                if self._is_valid_table_data(data or ""):
+                    self.logger.info("消息级复制成功")
+                    return self._format_table_data(data)
+
+                window = self.window_service.get_trading_window_fast()
+                if window is not None:
+                    found = self._detect_captcha(window)
+                    poll_count += 1
+                    # 完整扫描（~0.8s）每 2 轮一次：验证码是主窗口内嵌对话框，
+                    # 顶层窗口快检扫不到，降频兜底会拖慢检测 1-2s（实测）
+                    if not found and poll_count % 2 == 0:
+                        found = self._detect_captcha_full(window)
+                    if found:
+                        try:
+                            self._solve_captcha(self._captcha_window or window)
+                        except ApiError as e:
+                            if e.error_code == ErrorCode.OCR_FAILED:
+                                self.logger.warning(f"消息级复制验证码解题失败: {e.message}")
+                                ocr_failed = True
+                                break  # 外层重试：重新触发复制产生新验证码
+                            raise
+                        continue
+
+                time.sleep(0.1)
+
+            if not ocr_failed:
+                # 超时且非验证码问题：客户端未响应复制命令，重发无意义，
+                # 直接交由上层 _copy_table 回退键盘法
+                break
+
+        DiagnosticUtil().snapshot("message_copy_failed")
+        raise ApiError(
+            ErrorCode.OCR_FAILED,
+            f"消息级复制失败：{max_attempts} 次尝试内未获得有效表格数据"
+            "（验证码未通过/表格控件未响应复制命令）",
+            suggestion="可稍后重试；若持续失败，可在 config 中将 query.copy_method 改回 keyboard"
         )
 
     def _is_valid_table_data(self, data: str) -> bool:
@@ -445,8 +620,9 @@ class PositionService:
             self._navigate_to_query_page(window, "资金股票")
 
         # 特征列验证：页面切换失败时（非交易时段）复制到的是其他查询表，
-        # 验证失败重试一次，仍失败显式报错，绝不静默返回假数据
-        return self._copy_table_verified("持仓", self.POSITION_TABLE_COLUMNS)
+        # 验证失败重试一次（含重新导航），仍失败显式报错，绝不静默返回假数据
+        return self._copy_table_verified("持仓", self.POSITION_TABLE_COLUMNS,
+                                         page_name="资金股票")
 
     # ------------------------------------------------------------
     # 今日成交（树形菜单 + Ctrl+C + OCR 兜底）
@@ -464,7 +640,8 @@ class PositionService:
             window = self._cached_window
             self._navigate_to_query_page(window, "当日成交")
 
-        return self._copy_table_verified("成交", self.TRADES_TABLE_COLUMNS)
+        return self._copy_table_verified("成交", self.TRADES_TABLE_COLUMNS,
+                                         page_name="当日成交")
 
     # ------------------------------------------------------------
     # 当日委托（树形菜单 + Ctrl+C + OCR 兜底）
@@ -486,7 +663,8 @@ class PositionService:
             window = self._cached_window
             self._navigate_to_query_page(window, "当日委托")
 
-        return self._copy_table_verified("委托", self.ORDERS_TABLE_COLUMNS)
+        return self._copy_table_verified("委托", self.ORDERS_TABLE_COLUMNS,
+                                         page_name="当日委托")
 
     # ------------------------------------------------------------
     # OCR 验证码处理
@@ -703,6 +881,9 @@ class PositionService:
         停留在旧页面，后续 Ctrl+C 会复制到其他查询表——空表还会绕过
         特征列验证静默返回错误数据（实测：点击'资金股票'未生效，窗口
         留在当日委托页，持仓查询返回空列表）。is_selected 校验堵住此洞。
+
+        click_input 重试耗尽后降级 item.select()（UIA SelectionItemPattern，
+        消息级选中，不经真实鼠标）——借鉴 easytrader 树导航思路。
         """
         for attempt in range(retries):
             item.click_input()
@@ -716,6 +897,34 @@ class PositionService:
                 f"树节点 '{page_name}' 点击后未选中（尝试 {attempt + 1}/{retries}），重试"
             )
 
+        try:
+            item.select()
+            time.sleep(0.15)
+            if item.is_selected():
+                # 注意: select() 只改变树节点选中态，不触发客户端页面切换事件，
+                # 页面可能仍停留旧页——选中态仅作为中间确认，继续真实点击兜底
+                self.logger.info(f"树节点 '{page_name}' select() 选中，再补一次真实点击触发页面切换")
+        except Exception:
+            pass
+        # select() 不触发页面切换，最后再给一次真实点击机会
+        try:
+            item.click_input()
+            time.sleep(0.15)
+            if item.is_selected():
+                return
+        except Exception:
+            pass
+        self.logger.warning(
+            f"树节点 '{page_name}' click/select 均未确认选中，交由表格特征列验证兜底"
+        )
+
+    def _renavigate(self, page_name: str) -> None:
+        """重新导航到查询页面（重试路径用，页面切换失败后真实点击重试）"""
+        window = self.window_service.get_trading_window()
+        if window is None:
+            raise Exception("重新导航失败：未找到交易窗口")
+        self._navigate_to_query_page(window, page_name)
+
     def _navigate_to_query_page(self, window, page_name: str) -> None:
         """导航到查询页面
 
@@ -726,6 +935,15 @@ class PositionService:
 
         with timed(f"导航到 {page_name}", self.logger):
             _descendants = list(window.descendants())  # 唯一一次遍历
+
+            # 消息级复制启用时，顺带重选查询表格句柄（零额外遍历成本）。
+            # 每次导航都必选当前可见的 1047 网格——页面切换后旧页网格
+            # 只是隐藏，沿用旧句柄会复制到旧表
+            if self._use_message_copy():
+                hwnd = self._pick_grid_hwnd_from_descendants(_descendants)
+                if hwnd is not None and hwnd != self._cached_grid_hwnd:
+                    self.logger.info(f"已缓存表格控件句柄: {hwnd:#x}")
+                self._cached_grid_hwnd = hwnd
 
             # 策略1: 树形路径导航
             tree_root = None

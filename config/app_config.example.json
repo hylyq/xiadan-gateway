@@ -21,6 +21,9 @@
     "max_retry": 3,
     "ddddocr_enabled": false
   },
+  "query": {
+    "copy_method": "keyboard"
+  },
   "logging": {
     "level": "INFO",
     "file": "logs/app.log",

@@ -43,6 +43,7 @@ Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──�
 | Sequential execution | Single-worker task queue avoids concurrent conflicts on `xiadan.exe` |
 | Consecutive clean skip | Clean exit from previous task → skip `_reset_trading_window` + activation. **Fully skipped within the same group and direction; cross-direction only re-presses F1/F2.** Full preparation on popups/failures/cross-group. Groups: `trade` (buy/sell), `cancel`, `query` |
 | Query traversal reuse | Position/trades/orders queries: one `descendants` traversal serves tree lookup + popup detection + fallback scan, cutting ~40% of navigation time |
+| Message-based table copy (experimental) | With `query.copy_method=message`, table copy is sent as a `WM_COMMAND(0xE122)` message — no foreground activation, no synthetic keystrokes. Copy stage 5.5s→0.5s in captcha-free sessions; on par with keyboard in captcha sessions (the captcha is triggered by the copy action itself, regardless of how it's invoked). Falls back to keyboard automatically on failure |
 | Pipelined mode switching | Click the limit/market toggle without waiting, immediately fill the quantity — the ~0.7s fill overlaps the label change; verification is naturally ready after filling |
 | Classified popup handling | Order confirm → Y/N; warning → Y to continue; **price out of range → N to cancel + `PRICE_OUT_OF_RANGE`**; error → close + report |
 | Watchdog recovery | On task timeout: screenshot + activate + ESC×5, reset, then return an error |
@@ -114,6 +115,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
   },
   "idempotency": { "order_dedup_window_seconds": 60 },
   "ocr": { "warmup_on_start": true, "max_retry": 3, "ddddocr_enabled": false },
+  "query": { "copy_method": "keyboard" },
   "auth": { "enabled": false, "token": "" },
   "logging": { "level": "INFO", "file": "logs/app.log", "screenshot_dir": "logs/screenshots" }
 }
