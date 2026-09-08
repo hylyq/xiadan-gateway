@@ -45,7 +45,7 @@ DEFAULT_CONFIG = {
         "copy_method": "keyboard"  # keyboard=Ctrl+C 键盘法（默认）; message=WM_COMMAND 消息级复制（实验）
     },
     "order": {
-        "capture_entrust_no": False,      # 下单后截获右下角横幅回传委托号（需 ddddocr，启用占 ~150MB 内存）
+        "capture_entrust_no": False,      # 下单后截获右下角横幅回传委托号（模板匹配，零额外依赖）
         "entrust_no_timeout_seconds": 3.0  # 横幅截获超时（横幅存活约 1-2s）
     },
     "logging": {

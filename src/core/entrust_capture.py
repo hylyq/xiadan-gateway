@@ -7,13 +7,13 @@
 截获方式（feat/entrust-no 探索结论，2026-09-09 模拟盘验证）：
 1. 提交前启动后台线程，对窗口右下角固定区域（宽 45% × 底部 32px）
    以 ~12fps 连拍——只读屏幕像素，不碰 UIA（无 COM 线程问题）
-2. numpy 黄色掩码定位横幅条带（黄底黑字，与状态栏背景区分度极高）
-3. ddddocr 识别条带文本（~80ms），正则提取 8 位以上合同编号
+2. numpy 黄色掩码定位横幅条带（黄底红字，与状态栏背景区分度极高）
+3. BannerDigitOCR 模板匹配提取 8 位以上合同编号（~35ms，零外部依赖，
+   10 个数字已经真实横幅样本逐位验证，见 scripts/test_template_ocr.py）
 
-实测: 横幅出现于提交后 ~0.3-0.5s，截获总耗时 ~0.5-0.9s，命中率 100%。
+注意: 横幅号即客户端提交时显示的合同编号；极端情况（券商服务器
+维护窗口）下与最终落表号可能不一致，关键操作前应以当日委托查询复核。
 """
-import io
-import re
 import threading
 import time
 
@@ -21,12 +21,12 @@ import numpy as np
 import win32gui
 from PIL import ImageGrab
 
+from src.core.banner_ocr import BannerDigitOCR
 from src.utils.logger import Logger
 
-ENTRUST_RE = re.compile(r"合同编号\D*(\d{8,})")
-FALLBACK_DIGITS_RE = re.compile(r"(\d{8,})")
+ENTRUST_LEN_MIN = 8
 
-# 横幅黄色掩码阈值（黄底黑字，采样自模拟盘实测截图）
+# 横幅黄色掩码阈值（黄底红字，采样自模拟盘实测截图）
 _YELLOW_R, _YELLOW_G, _YELLOW_B = 200, 180, 120
 
 
@@ -36,7 +36,7 @@ class EntrustNoCapture:
     def __init__(self, config, logger=None):
         self.config = config
         self.logger = logger or Logger.get_instance()
-        self._ocr = None
+        self._ocr = BannerDigitOCR()
         self._thread = None
         self._result = None
 
@@ -70,22 +70,20 @@ class EntrustNoCapture:
         t0 = time.perf_counter()
         while time.perf_counter() - t0 < timeout:
             try:
-                text = self._grab_banner_text(hwnd)
-                if text:
-                    m = ENTRUST_RE.search(text) or FALLBACK_DIGITS_RE.search(text)
-                    if m:
-                        self._result = m.group(1)
-                        self.logger.info(
-                            f"横幅截获委托号: {self._result}"
-                            f"（耗时 {time.perf_counter() - t0:.2f}s）")
-                        return
+                digits = self._grab_banner_digits(hwnd)
+                if digits:
+                    self._result = digits
+                    self.logger.info(
+                        f"横幅截获委托号: {digits}"
+                        f"（耗时 {time.perf_counter() - t0:.2f}s）")
+                    return
             except Exception as e:
                 self.logger.warning(f"横幅截获异常: {e}")
             time.sleep(0.08)
         self.logger.info("横幅截获超时，未获得委托号（窗口最小化或横幅未出现）")
 
-    def _grab_banner_text(self, hwnd):
-        """截取右下角区域 → 黄色掩码定位条带 → OCR 文本，无横幅返回 None"""
+    def _grab_banner_digits(self, hwnd):
+        """截取右下角区域 → 黄色掩码定位条带 → 模板匹配数字，无横幅返回 None"""
         l, t, r, b = win32gui.GetWindowRect(hwnd)
         box = (l + int((r - l) * 0.55), b - 34, r - 4, b - 2)
         img = ImageGrab.grab(bbox=box)
@@ -97,17 +95,7 @@ class EntrustNoCapture:
             return None
         rows = np.where(mask.sum(axis=1) > 30)[0]
         cols = np.where(mask.sum(axis=0) > 5)[0]
-        if len(rows) == 0 or len(cols) == 0:
-            return None
-        band = img.crop((int(cols.min()), int(rows.min()),
-                         int(cols.max()) + 1, int(rows.max()) + 1))
-        buf = io.BytesIO()
-        band.save(buf, format="PNG")
-        return self._get_ocr().classification(buf.getvalue())
-
-    def _get_ocr(self):
-        """懒加载 ddddocr（仅 capture_entrust_no=true 时占用 ~150MB 内存）"""
-        if self._ocr is None:
-            import ddddocr
-            self._ocr = ddddocr.DdddOcr(show_ad=False)
-        return self._ocr
+        band = np.asarray(img.crop((int(cols.min()), int(rows.min()),
+                                    int(cols.max()) + 1, int(rows.max()) + 1)))
+        digits, _conf = self._ocr.read_digits(band)
+        return digits if len(digits) >= ENTRUST_LEN_MIN else None
