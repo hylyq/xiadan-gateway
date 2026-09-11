@@ -65,7 +65,11 @@ class BannerDigitOCR:
             self._templates[d] = variants
 
     def read_digits(self, band_rgb: np.ndarray) -> tuple:
-        """输入条带 RGB 数组，返回 (数字串, 最低单字置信度)；无数字返回 ("", 0.0)"""
+        """输入条带 RGB 数组，返回 (数字串, 最低单字置信度)；无数字返回 ("", 0.0)
+
+        粘连处理: 相邻数字可能共用边缘列（如 "64" 黏成 17px 宽字形），
+        先按预估字宽拆分为多个子字形，再逐个分类，最后取最长连续数字串。
+        """
         self._ensure_templates()
         if band_rgb.ndim != 3 or band_rgb.shape[2] < 3:
             return "", 0.0
@@ -79,18 +83,49 @@ class BannerDigitOCR:
         # 行高 = 最高字形（汉字/数字同高）；句号、冒号仅约半高，据此排除
         tallest = max(g.shape[0] for _, _, g in glyphs)
         min_h = tallest * DIGIT_H_RATIO
-        best_run = self._longest_digit_run(glyphs, min_h)
-        if len(best_run) < MIN_RUN_LEN:
-            return "", 0.0
 
-        digits, confs = [], []
-        for g in best_run:
-            d, conf = self._classify(g)
-            if d is None:
-                return "", 0.0
-            digits.append(str(d))
-            confs.append(conf)
-        return "".join(digits), float(min(confs))
+        # 先分类再找串：拆分子字形进入候选序列，非数字字形打断连续性
+        seq = []  # (digit, conf) 或 None（打断）
+        for x0, x1, g in glyphs:
+            subs = self._digit_subglyphs(g, x1 - x0, min_h)
+            if not subs:
+                seq.append(None)
+                continue
+            for sub in subs:
+                d, c = self._classify(sub)
+                seq.append((d, c) if d is not None else None)
+
+        best, cur = [], []
+        for item in seq:
+            if item is None:
+                if len(cur) > len(best):
+                    best = cur
+                cur = []
+            else:
+                cur.append(item)
+        if len(cur) > len(best):
+            best = cur
+        if len(best) < MIN_RUN_LEN:
+            return "", 0.0
+        digits = "".join(str(d) for d, _ in best)
+        conf = min(c for _, c in best)
+        return digits, conf
+
+    def _digit_subglyphs(self, g: np.ndarray, w: int, min_h: float):
+        """单字形 → 数字子字形列表（粘连数字拆分）；非数字返回空列表"""
+        if DIGIT_W_MIN <= w <= DIGIT_W_MAX:
+            return [g] if g.shape[0] >= min_h else []
+        if not (DIGIT_W_MAX < w <= 30):
+            return []
+        n = max(2, round(w / 7.5))  # 实测数字字宽 ~7-9px
+        bounds = np.linspace(0, w, n + 1).astype(int)
+        subs = []
+        for i in range(n):
+            sub = g[:, bounds[i]:bounds[i + 1]]
+            ys = np.where(sub.any(axis=1))[0]
+            if len(ys) and sub.shape[0] >= min_h:
+                subs.append(sub[ys.min():ys.max() + 1])
+        return subs if len(subs) == n else []  # 拆分不完整视为非数字
 
     # ------------------------------------------------------------
 
@@ -121,27 +156,6 @@ class BannerDigitOCR:
                 continue
             out.append((x0, x1, g[ys.min():ys.max() + 1]))
         return out
-
-    @staticmethod
-    def _longest_digit_run(glyphs, min_h: float):
-        """最长连续数字字形组（宽度+高度过滤，非数字字形打断连续性）"""
-        longest, cur, prev_x1 = [], [], None
-        for x0, x1, g in glyphs:
-            is_digit = (DIGIT_W_MIN <= x1 - x0 <= DIGIT_W_MAX
-                        and g.shape[0] >= min_h)
-            if is_digit:
-                if prev_x1 is not None and x0 - prev_x1 > 12 and len(cur) > len(longest):
-                    longest = cur
-                    cur = []
-                cur.append(g)
-                prev_x1 = x1
-            else:
-                if len(cur) > len(longest):
-                    longest = cur
-                cur, prev_x1 = [], None
-        if len(cur) > len(longest):
-            longest = cur
-        return longest
 
     def _classify(self, g: np.ndarray):
         """单字形分类，返回 (digit, iou) 或 (None, 0.0)"""

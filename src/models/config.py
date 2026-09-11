@@ -46,7 +46,7 @@ DEFAULT_CONFIG = {
     },
     "order": {
         "capture_entrust_no": False,      # 下单后截获右下角横幅回传委托号（模板匹配，零额外依赖）
-        "entrust_no_timeout_seconds": 3.0  # 横幅截获超时（横幅存活约 1-2s）
+        "entrust_no_timeout_seconds": 5.0  # 横幅截获超时（成功即返回，超时仅拖慢失败路径）
     },
     "logging": {
         "level": "INFO",
@@ -165,7 +165,7 @@ class AppConfig(Singleton):
     def get_order_config(self) -> dict:
         return self._config.get("order", {
             "capture_entrust_no": False,
-            "entrust_no_timeout_seconds": 3.0
+            "entrust_no_timeout_seconds": 5.0
         })
 
     def get_logging_config(self) -> dict:

@@ -22,6 +22,7 @@
 注意: 横幅号即客户端提交时显示的合同编号；极端情况（券商服务器
 维护窗口）下与最终落表号可能不一致，关键操作前应以当日委托查询复核。
 """
+import os
 import threading
 import time
 
@@ -47,6 +48,7 @@ class EntrustNoCapture:
         self._ocr = BannerDigitOCR()
         self._thread = None
         self._result = None
+        self._band_dumped = False
 
     @property
     def enabled(self) -> bool:
@@ -57,6 +59,7 @@ class EntrustNoCapture:
         if not self.enabled or window is None:
             return
         self._result = None
+        self._band_dumped = False
         self._thread = threading.Thread(
             target=self._run, args=(window.handle,), daemon=True)
         self._thread.start()
@@ -114,4 +117,20 @@ class EntrustNoCapture:
         band = np.asarray(img.crop((int(cols.min()), int(rows.min()),
                                     int(cols.max()) + 1, int(rows.max()) + 1)))
         digits, _conf = self._ocr.read_digits(band)
-        return digits if len(digits) >= ENTRUST_LEN_MIN else None
+        if len(digits) >= ENTRUST_LEN_MIN:
+            return digits
+        # 条带可见但读数不足：留存样本供排查（每次下单最多存 1 张）
+        if not self._band_dumped:
+            self._band_dumped = True
+            try:
+                from PIL import Image
+                os.makedirs("logs/banner_samples", exist_ok=True)
+                path = os.path.join(
+                    "logs/banner_samples",
+                    f"unreadable_{time.strftime('%H%M%S')}.png")
+                Image.fromarray(band).save(path)
+                self.logger.info(
+                    f"横幅可见但读数不足（{len(digits)} 位），已存样 {path}")
+            except Exception:
+                pass
+        return None
