@@ -76,6 +76,11 @@ class Trader:
                 "confirmed": True/False,
                 "entrust_no": "6246860043" or None  # capture_entrust_no 启用时回传
             }
+
+        entrust_no=None 的语义是"订单成功（推断），编号未知"——成败判定基于
+        弹窗检测，与横幅截获解耦：截获失败（横幅未出现/被遮挡/窗口最小化）
+        不影响 confirmed，策略端不应据此重试（会重复下单），需要编号时用
+        当日委托查询按 代码+价格+数量+时间 反查。
         """
         self.logger.info(
             f"开始下单: code={code}, status={status}, amount={amount}, "

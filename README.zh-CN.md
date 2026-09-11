@@ -282,6 +282,20 @@ curl -X POST http://localhost:5000/orders \
   -d '{"code":"601991","status":"2","amount":"100","price_type":"market"}'
 ```
 
+**响应**（`data` 字段）：
+
+| 字段 | 说明 |
+|------|------|
+| `action` / `mode` / `code` / `amount` / `price` | 回显下单参数 |
+| `confirmed` | `true`=已提交（快速交易模式下无错误弹窗即判定成功） |
+| `entrust_no` | 合同编号（委托号）。仅启用 `order.capture_entrust_no` 后返回，截获失败或未启用时为 `null` |
+
+> **`entrust_no: null` 不代表下单失败**——成败判定基于弹窗检测，与横幅截获解耦。
+> `null` 的语义是"已提交（推断），编号未知"（横幅未出现/被遮挡/窗口最小化）。
+> 此时**不要重试**（会重复下单），需要编号时用 `GET /orders/pending`
+> 按 代码+价格+数量+时间 反查。另注意：券商服务器维护窗口等极端情况下
+> 横幅号与最终落表号可能不一致，按单操作前应以当日委托查询复核。
+
 ### POST /orders/cancel-all — 撤单
 
 | 参数 | 必填 | 说明 |

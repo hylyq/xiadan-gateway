@@ -282,6 +282,23 @@ curl -X POST http://localhost:5000/orders \
   -d '{"code":"601991","status":"2","amount":"100","price_type":"market"}'
 ```
 
+**Response** (`data` fields):
+
+| Field | Description |
+|-------|-------------|
+| `action` / `mode` / `code` / `amount` / `price` | Echo of order parameters |
+| `confirmed` | `true`=submitted (in fast-trade mode, no error popup means success) |
+| `entrust_no` | Contract number. Returned only when `order.capture_entrust_no` is enabled; `null` on capture failure or when disabled |
+
+> **`entrust_no: null` does NOT mean the order failed** — success is judged by
+> popup detection and is decoupled from banner capture. `null` means "submitted
+> (inferred), number unknown" (banner absent / occluded / window minimized).
+> **Do not retry** in that case (it would duplicate the order); if you need the
+> number, look it up via `GET /orders/pending` by code+price+amount+time.
+> Note: under extreme conditions (broker server maintenance windows) the banner
+> number may differ from the final booked number — re-verify via the day's
+> order query before per-order operations (e.g. cancel by number).
+
 ### POST /orders/cancel-all — Cancel Orders
 
 | Parameter | Required | Description |
