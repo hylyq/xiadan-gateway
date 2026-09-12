@@ -287,6 +287,49 @@ class WindowService(Singleton):
             return 0.0
         return max(0, inter_w) * max(0, inter_h) / (win_w * win_h)
 
+    def close_process_dialogs(self, hwnd: int) -> int:
+        """关闭同进程内残留的可见 #32770 对话框（验证码弹窗外壳等）
+
+        场景: 脚本/任务异常退出时验证码弹窗未关闭，空标题 #32770 对话框
+        挡在前台导致主窗口 SetForegroundWindow 失败（实测多次）。
+        Returns: 关闭的对话框数量
+        """
+        import win32process
+
+        try:
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        except Exception:
+            return 0
+        targets = []
+
+        def cb(h, acc):
+            try:
+                _, wpid = win32process.GetWindowThreadProcessId(h)
+                if (wpid == pid and h != hwnd and win32gui.IsWindowVisible(h)
+                        and win32gui.GetClassName(h) == "#32770"):
+                    acc.append(h)
+            except Exception:
+                pass
+            return True
+
+        try:
+            win32gui.EnumWindows(cb, targets)
+        except Exception:
+            return 0
+        closed = 0
+        for h in targets:
+            try:
+                win32gui.PostMessage(h, 0x0010, 0, 0)  # WM_CLOSE
+                closed += 1
+                self.logger.warning(
+                    f"已关闭同进程残留对话框: hwnd={h:#x} "
+                    f"title={win32gui.GetWindowText(h)!r}")
+            except Exception:
+                continue
+        if closed:
+            time.sleep(0.5)
+        return closed
+
     def ensure_window_onscreen(self, hwnd: int) -> bool:
         """确保窗口在屏幕工作区内（被误拖出屏幕时自动移回）
 

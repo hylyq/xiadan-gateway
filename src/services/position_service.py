@@ -96,10 +96,21 @@ class PositionService:
                 self.logger.warning(f"激活后前台句柄 {win32gui.GetForegroundWindow():#x} ≠ 目标 {target_handle:#x}，重试")
 
         if win32gui.GetForegroundWindow() != target_handle:
-            self.logger.error(
-                f"无法将交易窗口带到前台，前台={win32gui.GetForegroundWindow():#x} 目标={target_handle:#x}"
-            )
-            raise Exception("无法将交易窗口带到前台，放弃发送 Ctrl+C 避免按键泄漏")
+            # 激活失败常见原因: 上次异常退出残留的空标题 #32770 对话框
+            # （验证码弹窗外壳）挡在前台——关闭后重试一次
+            closed = self.window_service.close_process_dialogs(target_handle)
+            if closed:
+                try:
+                    win32gui.SetForegroundWindow(target_handle)
+                    time.sleep(0.15)
+                except Exception:
+                    pass
+            if win32gui.GetForegroundWindow() != target_handle:
+                self.logger.error(
+                    f"无法将交易窗口带到前台，前台={win32gui.GetForegroundWindow():#x} "
+                    f"目标={target_handle:#x}"
+                )
+                raise Exception("无法将交易窗口带到前台，放弃发送 Ctrl+C 避免按键泄漏")
 
         with timed("keybd_event Ctrl+C ×2", self.logger):
             VK_CONTROL = win32con.VK_CONTROL  # 0x11

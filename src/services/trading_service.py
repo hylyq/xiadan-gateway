@@ -1,9 +1,11 @@
 """撤单服务
 
-通过 F3 打开撤单界面，点击对应按钮:
-- 30001: 全部撤单
-- 30002: 撤买
-- 30003: 撤卖
+F1/F2/F3 页面均有 全撤/撤买/撤卖/撤最后 按钮（cid 跨页一致，实测
+30001/30002/30003/1946），当前页面直接点击即可，无需切换到 F3 撤单页:
+- 30001: 全部撤单（type=A）
+- 30002: 撤买（type=X）
+- 30003: 撤卖（type=C）
+- 1946:  撤最后（type=L，撤销最近一笔委托）
 
 每次点击撤单按钮后都会弹出确认框（cid=1040 提示文字 + cid=6 "是(Y)" 按钮），
 脚本自动点击"是(Y)"确认，无需依赖"撤单不需要确认"复选框。
@@ -47,6 +49,7 @@ class TradingService:
                 - 'A': 全部撤单（默认）
                 - 'X': 撤买
                 - 'C': 撤卖
+                - 'L': 撤最后（撤销最近一笔委托）
 
         Returns:
             {
@@ -58,7 +61,9 @@ class TradingService:
         """
         cancel_type = (cancel_type or "A").upper()
         if cancel_type not in CANCEL_TYPE_MAP:
-            raise Exception(f"无效的撤单类型: {cancel_type}，可选: A(全部)/X(撤买)/C(撤卖)")
+            raise Exception(
+                f"无效的撤单类型: {cancel_type}，"
+                f"可选: A(全部)/X(撤买)/C(撤卖)/L(撤最后)")
 
         control_id, operation_name = CANCEL_TYPE_MAP[cancel_type]
         self.logger.info(f"开始撤单: {operation_name}")
@@ -66,74 +71,41 @@ class TradingService:
         # 重置弹窗标志：本次执行过程中若遇到弹窗，设为 True
         self._had_dialog = False
 
-        # 连续同向跳过：上次撤单成功后窗口仍在 F3，无需重置/激活/按键
-        from src.api.task_queue import TaskQueue
-        _task_queue = TaskQueue.get_instance()
-        _skip_setup = _task_queue.skip_window_setup
-        if _skip_setup:
-            self.logger.info("连续同向撤单，跳过窗口激活与 F3 导航")
-            _task_queue.skip_window_setup = False
-        else:
-            with timed("激活窗口", self.logger):
-                trading_paths = self.config.get_trading_app_paths()
-                if not trading_paths:
-                    raise Exception("未配置 xiadan.exe 路径")
-                self.window_service.activate_window(trading_paths)
-
+        # 撤单统一在 F3 页操作: 该页已勾选"撤单不需要确认"（客户端设置），
+        # 点击按钮直接生效；F1/F2 页的同类按钮会弹确认框（结构未知），
+        # 且四按钮 cid 跨页一致（实测 30001/30002/30003/1946），F3 一次
+        # 按键即可到达。按钮灰显 = 当前无可撤委托。
         window = self.window_service.get_trading_window()
         if window is None:
             raise Exception("未找到交易窗口")
-        _descendants = list(window.descendants())
 
-        if not _skip_setup:
-            # 刷新数据（窗口已在激活步骤置前，用 background 跳过冗余激活）
-            self.window_service.send_key("F5", background=True)
-            time.sleep(0.1)
+        self.window_service.send_key("F3", background=True)
+        btn = None
+        for attempt in range(3):
+            time.sleep(0.15 if attempt == 0 else 0.3)
+            window = self.window_service.get_trading_window()
+            if window is None:
+                continue
+            if self._has_blocking_text(list(window.descendants()))                     and self._dismiss_blocking_popup(window):
+                window = self.window_service.get_trading_window()
+            btn = self.window_service.find_element_in_window(window, control_id)
+            if btn is not None:
+                break
+        if btn is None:
+            raise Exception(
+                f"未找到 {operation_name} 按钮 control_id={control_id}（F3 界面未加载）")
 
-            # F3 打开撤单界面（带重试）
-            # 非交易时段首次 F3 可能弹出 "Begin failed!" 弹窗导致撤单界面未加载，
-            # 关闭弹窗后需重试 F3。以撤单按钮是否出现为成功判据。
-            with timed("F3 打开撤单界面", self.logger):
-                for f3_attempt in range(3):
-                    self.window_service.send_key("F3", background=True)
-                    self.logger.info(f"已发送 F3 打开委托撤单界面 (尝试 {f3_attempt + 1}/3)")
-                    time.sleep(0.15)  # F3 界面切换 <0.1s
+        if not self._is_button_enabled(btn):
+            self.logger.info(f"{operation_name} 按钮灰显（当前无可撤委托）")
+            return {
+                "cancel_type": operation_name,
+                "success": False,
+                "cancelled_count": 0,
+                "reason": "当前无可撤委托",
+            }
 
-                    window = self.window_service.get_trading_window()
-                    if window is None:
-                        raise Exception("打开撤单界面后窗口消失")
-                    _descendants = list(window.descendants())
-
-                    # 检查阻塞型弹窗（复用已有 descendants，无需重遍历）
-                    _has_blocking = self._has_blocking_text(_descendants)
-                    if _has_blocking and self._dismiss_blocking_popup(window):
-                        window = self.window_service.get_trading_window()
-                        if window is None:
-                            raise Exception("弹窗关闭后窗口消失")
-                        _descendants = list(window.descendants())
-
-                    btn = self.window_service.find_element_in_window(
-                        window, control_id, descendants=_descendants)
-                    if btn is not None:
-                        if not self._is_button_enabled(btn):
-                            self.logger.info(f"撤单按钮 {control_id} 已存在但灰显（无委托可撤）")
-                            return {
-                                "cancel_type": operation_name,
-                                "success": False,
-                                "cancelled_count": 0,
-                                "reason": "当前无可撤委托",
-                            }
-                        self.logger.info("撤单界面加载成功，撤单按钮已就绪")
-                        break
-                    self.logger.warning(f"撤单界面未加载（未找到撤单按钮），将重试 F3")
-                else:
-                    raise Exception(
-                        f"打开撤单界面失败，未找到撤单按钮 control_id={control_id}（已重试 3 次）"
-                    )
-
-        # 点击对应的撤单按钮（复用缓存的 descendants）
         with timed("点击撤单按钮", self.logger):
-            self.window_service.click_element(window, control_id, descendants=_descendants)
+            self.window_service.click_element(window, control_id)
             self.logger.info(f"已点击 {operation_name} 按钮")
 
         # 统一弹窗检测与处理：sleep(0.2) 等待渲染 + 一次 descendants 遍历

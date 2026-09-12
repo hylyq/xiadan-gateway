@@ -303,7 +303,7 @@ curl -X POST http://localhost:5000/orders \
 
 | Parameter | Required | Description |
 |-----------|:---:|-------------|
-| `type` | | `A`=all (default), `X`=cancel buys, `C`=cancel sells |
+| `type` | | `A`=all (default), `X`=cancel buys, `C`=cancel sells, `L`=cancel last order |
 
 ```bash
 curl -X POST http://localhost:5000/orders/cancel-all

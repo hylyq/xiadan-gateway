@@ -298,9 +298,11 @@ curl -X POST http://localhost:5000/orders \
 
 ### POST /orders/cancel-all — 撤单
 
+撤单在 F3 撤单页操作（该页已勾选"撤单不需要确认"，点击直接生效），F1/F2/F3 页的 全撤/撤买/撤卖/撤最后 按钮 control_id 跨页一致。
+
 | 参数 | 必填 | 说明 |
 |------|:---:|------|
-| `type` | | `A`=全部(默认), `X`=撤买, `C`=撤卖 |
+| `type` | | `A`=全部(默认), `X`=撤买, `C`=撤卖, `L`=撤最后（撤销最近一笔委托） |
 
 ```bash
 curl -X POST http://localhost:5000/orders/cancel-all

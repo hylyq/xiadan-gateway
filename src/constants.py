@@ -77,12 +77,14 @@ CAPTCHA_TEXT_KEYWORDS = ["检测到您正在拷贝数据", "请先输入验证�
 CANCEL_BUTTON_ALL = 30001       # 全部撤单按钮
 CANCEL_BUTTON_BUY = 30002       # 撤买按钮
 CANCEL_BUTTON_SELL = 30003      # 撤卖按钮
+CANCEL_BUTTON_LAST = 1946       # 撤最后按钮（F1/F2/F3 页均有，撤最近一笔委托）
 
 # 撤单类型映射
 CANCEL_TYPE_MAP = {
     "A": (CANCEL_BUTTON_ALL, "全部撤单"),
     "X": (CANCEL_BUTTON_BUY, "撤买"),
     "C": (CANCEL_BUTTON_SELL, "撤卖"),
+    "L": (CANCEL_BUTTON_LAST, "撤最后"),
 }
 
 # 撤单确认弹窗
