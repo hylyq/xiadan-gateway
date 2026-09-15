@@ -41,7 +41,10 @@ class Logger(Singleton):
 
             # 默认日志路径基于项目根目录
             # 不依赖 AppConfig（会循环依赖），使用约定路径
-            log_file = os.path.join(BASE_DIR, "logs", "app.log")
+            # 测试经 XIADAN_LOG_FILE 环境变量重定向到临时目录（见 tests/conftest.py），
+            # 避免 pytest 运行污染生产 logs/app.log（连续失败告警失去可信度）
+            log_file = os.environ.get(
+                "XIADAN_LOG_FILE") or os.path.join(BASE_DIR, "logs", "app.log")
 
             os.makedirs(os.path.dirname(log_file), exist_ok=True)
 
