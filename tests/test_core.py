@@ -472,6 +472,110 @@ class TestAuthMiddleware:
         assert "trading_app_paths" not in body["data"]
 
 
+class TestRouteErrorPaths:
+    """路由层错误路径测试（Flask test client + monkeypatch 任务失败）
+
+    锚定 2026-09-15 模拟盘实测发现的 P0 回归：下单路由 except 分支误调
+    IdempotencyChecker 实例上不存在的 should_keep_record_on_error（实为
+    模块级函数），任务一失败 except 自身抛 AttributeError → Flask HTML
+    500，且幂等记录不清除（失败订单 60s 内重试被 DUPLICATE_ORDER 误拦）。
+    纯函数单测覆盖不到这条集成路径，此测试类专职堵住。
+    """
+
+    @staticmethod
+    def _make_client(monkeypatch, tmp_path):
+        import json
+
+        from src.models import config as config_module
+
+        p = tmp_path / "app_config.json"
+        p.write_text(json.dumps({}, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(config_module, "CONFIG_PATH", str(p))
+        config_module.AppConfig._reset_instance()
+
+        from src.api.routes import create_app
+        app = create_app()
+        app.config["TESTING"] = True
+        return app.test_client()
+
+    @staticmethod
+    def _fail_submit(monkeypatch, exc):
+        """让 TaskQueue.submit 直接抛指定异常（模拟任务执行失败/超时）"""
+        from src.api.task_queue import TaskQueue
+
+        def _raise(self, *args, **kwargs):
+            raise exc
+
+        monkeypatch.setattr(TaskQueue, "submit", _raise)
+
+    def test_order_failure_returns_json_and_clears_record(self, monkeypatch, tmp_path):
+        """下单任务失败（干净退出类错误）→ 统一 JSON + 幂等记录清除允许重试"""
+        from src.api.idempotency import IdempotencyChecker
+        from src.exceptions import ApiError, ErrorCode
+
+        client = self._make_client(monkeypatch, tmp_path)
+        self._fail_submit(monkeypatch, ApiError(
+            ErrorCode.PRICE_OUT_OF_RANGE, "价格超出涨跌停限制", suggestion="调整价格"))
+        IdempotencyChecker._reset_instance()
+
+        r = client.post("/orders", json={
+            "code": "601991", "status": "1", "amount": "100", "price": "1.00"})
+
+        body = r.get_json()
+        assert body is not None, "失败响应必须是 JSON（曾回归为 Flask HTML 500）"
+        assert body["status"] == "error"
+        assert body["error_code"] == "PRICE_OUT_OF_RANGE"
+        # 失败订单必须清除幂等记录：60s 内重试不被 DUPLICATE_ORDER 误拦
+        assert IdempotencyChecker.get_instance()._records == {}
+
+    def test_order_timeout_keeps_record(self, monkeypatch, tmp_path):
+        """看门狗超时（TASK_TIMEOUT）→ JSON 错误 + 幂等记录保留（防重试重复下单）"""
+        from src.api.idempotency import IdempotencyChecker
+        from src.exceptions import ApiError, ErrorCode
+
+        client = self._make_client(monkeypatch, tmp_path)
+        self._fail_submit(monkeypatch, ApiError(
+            ErrorCode.TASK_TIMEOUT, "任务执行超时", suggestion="检查订单状态"))
+        IdempotencyChecker._reset_instance()
+
+        r = client.post("/orders", json={
+            "code": "601991", "status": "1", "amount": "100", "price": "1.00"})
+
+        body = r.get_json()
+        assert body is not None, "失败响应必须是 JSON（曾回归为 Flask HTML 500）"
+        assert body["status"] == "error"
+        assert body["error_code"] == "TASK_TIMEOUT"
+        # 超时订单可能仍在执行 → 记录必须保留
+        assert len(IdempotencyChecker.get_instance()._records) == 1
+
+    def test_query_failure_returns_json(self, monkeypatch, tmp_path):
+        """查询任务失败（OCR_FAILED）→ 统一 JSON 错误"""
+        from src.exceptions import ApiError, ErrorCode
+
+        client = self._make_client(monkeypatch, tmp_path)
+        self._fail_submit(monkeypatch, ApiError(
+            ErrorCode.OCR_FAILED, "验证码识别失败", suggestion="稍后重试"))
+
+        r = client.get("/positions")
+
+        body = r.get_json()
+        assert body is not None, "失败响应必须是 JSON"
+        assert body["status"] == "error"
+        assert body["error_code"] == "OCR_FAILED"
+
+    def test_cancel_generic_failure_returns_json(self, monkeypatch, tmp_path):
+        """撤单任务未知异常 → 统一 JSON（INTERNAL_ERROR），不泄漏 HTML 500"""
+        client = self._make_client(monkeypatch, tmp_path)
+        self._fail_submit(monkeypatch, Exception("窗口操作意外失败"))
+
+        r = client.post("/orders/cancel-all", json={"type": "A"})
+
+        body = r.get_json()
+        assert body is not None, "失败响应必须是 JSON"
+        assert body["status"] == "error"
+        assert body["error_code"] == "INTERNAL_ERROR"
+
+
 class TestWindowStateReporting:
     """窗口状态通道测试（#6 重构锚定）
 

@@ -8,7 +8,7 @@ from typing import Optional
 from flask import Blueprint, request
 
 from src.api.helpers import get_param
-from src.api.idempotency import IdempotencyChecker
+from src.api.idempotency import IdempotencyChecker, should_keep_record_on_error
 from src.api.response import (
     generate_request_id,
     success_response, error_response, error_response_from_exception
@@ -132,7 +132,7 @@ def xiadan():
     except Exception as e:
         # 任务可能仍在执行/排队（看门狗超时、队列超时）时保留幂等记录，
         # 防止客户端立即重试导致重复下单
-        if not idempotency.should_keep_record_on_error(e):
+        if not should_keep_record_on_error(e):
             idempotency.clear_record(code, status, amount, price, price_type)
         return error_response_from_exception(e, request_id)
 
