@@ -932,6 +932,64 @@ class TestPopupTextExtraction:
         assert "12345" not in result
 
 
+class TestUiBaselineSelfLearning:
+    """UI 标签自学习黑名单测试（安静态快照 → 兜底提取动态过滤）
+
+    place_order 开始时（重置后/干净退出后、无弹窗）对主窗口全部可见
+    文本拍快照，兜底全局扫描时用作动态黑名单：券商升级新增的界面标签
+    只要被快照收录即被过滤，错误分类不再依赖人工补硬编码清单。
+    """
+
+    def test_new_label_filtered_via_baseline(self):
+        """快照收录的新标签（券商升级新增，不在硬编码清单）被过滤"""
+        from src.core.trader import Trader
+        baseline = Trader._snapshot_ui_texts(
+            [_FakeEl("智能盯盘"), _FakeEl("证券代码"), _FakeEl("买入数量")])
+        descendants = [
+            _FakeEl("智能盯盘"),  # 仅存在于快照（不在硬编码清单）
+            _FakeEl("提交失败：可用资金不足"),
+        ]
+        result = Trader._extract_popup_error_text(
+            descendants, ui_baseline=baseline)
+        assert "提交失败：可用资金不足" in result
+        assert "智能盯盘" not in result
+
+    def test_static_floor_still_applies_without_baseline(self):
+        """无快照（ui_baseline=None）→ 硬编码清单仍兜底（原行为不变）"""
+        from src.core.trader import Trader
+        descendants = [_FakeEl("证券代码"), _FakeEl("清算中")]
+        result = Trader._extract_popup_error_text(descendants)
+        assert "清算中" in result
+        assert "证券代码" not in result
+
+    def test_snapshot_collects_and_skips_empty(self):
+        """快照收集非空文本，跳过空文本"""
+        from src.core.trader import Trader
+        snapshot = Trader._snapshot_ui_texts(
+            [_FakeEl("撤买"), _FakeEl(""), _FakeEl("买入[F1]")])
+        assert snapshot == {"撤买", "买入[F1]"}
+
+    def test_baseline_plus_floor_combined(self):
+        """快照与硬编码清单叠加过滤（新标签 + 老标签同时在场）"""
+        from src.core.trader import Trader
+        descendants = [
+            _FakeEl("智能盯盘"),   # 仅快照（新标签）
+            _FakeEl("证券代码"),   # 仅硬编码清单（老标签）
+            _FakeEl("提交失败：清算中"),
+        ]
+        result = Trader._extract_popup_error_text(
+            descendants, ui_baseline={"智能盯盘"})
+        assert result == "提交失败：清算中"
+
+    def test_popup_text_not_in_baseline_survives(self):
+        """弹窗错误文本不在快照中（弹窗出现于快照之后）→ 正常保留"""
+        from src.core.trader import Trader
+        descendants = [_FakeEl("提交失败：事务处理机转发数据失败")]
+        result = Trader._extract_popup_error_text(
+            descendants, ui_baseline={"证券代码", "买入价格"})
+        assert "事务处理机转发数据失败" in result
+
+
 class TestOnscreenRatio:
     """窗口与工作区交集比例计算测试（窗口位置自愈）"""
 

@@ -45,6 +45,10 @@ class Trader:
         #                 True 时窗口状态仍可信，TaskQueue 不清除连续跳过状态
         self._had_any_dialog = False
         self._clean_dismiss = False
+        # 安静态 UI 文本快照（自学习黑名单）：place_order 开始时拍下主窗口
+        # 全部可见文本，兜底弹窗提取时用作动态过滤——券商升级新增的界面
+        # 标签自动被收录，无需人工补 _ui_labels 硬编码清单
+        self._ui_text_baseline: Optional[set] = None
 
     @report_window_state
     def place_order(
@@ -145,6 +149,10 @@ class Trader:
         if window is None:
             raise Exception("未找到交易窗口 '网上股票交易系统5.0'")
         _descendants = list(window.descendants())
+        # 安静态 UI 文本快照：此刻（重置后/连续跳过的干净退出后）无弹窗，
+        # 主窗口全部可见文本即 UI 装饰标签全集。搭既有遍历的便车，零额外
+        # 遍历成本；兜底弹窗提取时用作动态黑名单（见 _extract_popup_error_text）
+        self._ui_text_baseline = self._snapshot_ui_texts(_descendants)
 
         # 4. 填写股票代码（必须先填代码，否则价格模式切换可能被禁用）
         with timed("填写股票代码", self.logger):
@@ -311,7 +319,8 @@ class Trader:
                         # 组合文本检测：primary（cid=1040）+ 全控件扫描兜底，
                         # 避免 cid=1040 提取不完整时错误弹窗被当通用警告点「是(Y)」
                         _extract_text = self._extract_popup_error_text(
-                            _descendants, title_el=title_el)
+                            _descendants, title_el=title_el,
+                            ui_baseline=self._ui_text_baseline)
                         _rule = match_popup_rule(order_detail_text or "", _extract_text)
 
                         if _rule is not None and _rule.action == "click_no":
@@ -434,7 +443,8 @@ class Trader:
                         # 排除"委托确认"弹窗（正常流程中已处理）
                         if "委托确认" not in title_text:
                             _popup_text = self._extract_popup_error_text(
-                                _descendants, title_el=title_el)
+                                _descendants, title_el=title_el,
+                                ui_baseline=self._ui_text_baseline)
                             _error_code, _message, _suggestion = self._classify_submit_error(_popup_text)
                             self.logger.warning(
                                 f"检测到提交失败弹窗: {title_text}, "
@@ -554,7 +564,8 @@ class Trader:
             if self._dismiss_server_error_popup(window):
                 try:
                     _desc = list(window.descendants()) if window else []
-                    _text = self._extract_popup_error_text(_desc)
+                    _text = self._extract_popup_error_text(
+                        _desc, ui_baseline=self._ui_text_baseline)
                 except Exception:
                     _text = ""
                 _code, _msg, _sug = self._classify_submit_error(_text)
@@ -611,15 +622,37 @@ class Trader:
             return ""
 
     @staticmethod
-    def _extract_popup_error_text(descendants, title_el=None) -> str:
-        """从弹窗提取错误文本（黑名单降级为兜底防线）
+    def _snapshot_ui_texts(descendants) -> set:
+        """安静态主窗口文本快照（自学习 UI 标签黑名单）
+
+        在确定无弹窗的时刻（place_order 开始，重置后/干净退出后）收集
+        主窗口全部可见文本——即 UI 装饰标签全集。兜底弹窗提取时用作动态
+        黑名单：券商升级新增的界面标签只要被快照收录即被过滤，错误分类
+        不再依赖人工补 _ui_labels 硬编码清单（快照失效时硬编码清单仍是
+        二次兜底）。与提取侧口径一致：跳过空文本与超长文本。
+        """
+        texts = set()
+        for el in descendants:
+            t = safe_text(el).strip()
+            if t and len(t) <= 200:
+                texts.add(t)
+        return texts
+
+    @staticmethod
+    def _extract_popup_error_text(descendants, title_el=None,
+                                  ui_baseline: Optional[set] = None) -> str:
+        """从弹窗提取错误文本（双层黑名单兜底防线）
 
         策略:
         1. title_el 提供时优先容器内提取（_extract_dialog_text，纯净，
-           不混入主窗口 UI 标签，不依赖硬编码黑名单——券商界面升级
+           不混入主窗口 UI 标签，不依赖任何黑名单——券商界面升级
            时容器提取不受影响）
-        2. 容器提取为空 → 全局扫描 + 黑名单过滤（兜底，仅此路径依赖
-           _ui_labels 硬编码标签）
+        2. 容器提取为空 → 全局扫描 + 双层黑名单过滤（兜底）：
+           a. ui_baseline：安静态主窗口文本快照（运行时自学习，覆盖
+              本机客户端版本的全部界面标签，含硬编码清单未收录的
+              新标签）
+           b. _ui_labels：硬编码标签清单（静态底线，快照缺失/失效时
+              仍能过滤历次已知标签）
 
         弹窗文本通常只有几行（标题 + 错误内容 + 按钮文字），
         全局扫描时过滤交易窗口的大量 UI 标签（证券代码、买入价格 等）。
@@ -630,7 +663,7 @@ class Trader:
             if container_text:
                 return container_text
 
-        # 策略2: 全局扫描 + 黑名单过滤（兜底）
+        # 策略2: 全局扫描 + 双层黑名单过滤（兜底）
         # 交易窗口 UI 标签 + 侧边栏菜单项（不应出现在弹窗文本中）
         _ui_labels = {
             "证券代码", "证券名称", "买入价格", "卖出价格", "买入数量",
@@ -658,6 +691,10 @@ class Trader:
             t = safe_text(el).strip()
             if not t or len(t) > 200:
                 continue
+            # 第一层：安静态快照（自学习，覆盖本机版本全部界面标签）
+            if ui_baseline and t in ui_baseline:
+                continue
+            # 第二层：硬编码清单（静态底线，快照缺失/失效时兜底）
             if t in _ui_labels:
                 continue
             if t in ("多", "少", "位置", "添加", "打开", "关闭",
