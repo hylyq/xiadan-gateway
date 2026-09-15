@@ -159,7 +159,7 @@ def cancel_all_orders():
     _start = time.time()
     try:
         from src.services.trading_service import TradingService
-        query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 15)
+        query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
         result = task_queue.submit(
             func=lambda: TradingService(WindowService()).cancel_all_orders(cancel_type),
             task_name="cancel_all_orders",

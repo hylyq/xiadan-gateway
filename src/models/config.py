@@ -46,7 +46,8 @@ DEFAULT_CONFIG = {
     },
     "order": {
         "capture_entrust_no": False,      # 下单后截获右下角横幅回传委托号（模板匹配，零额外依赖）
-        "entrust_no_timeout_seconds": 5.0  # 横幅截获超时（成功即返回，超时仅拖慢失败路径）
+        "entrust_no_timeout_seconds": 5.0,  # 横幅截获超时（成功即返回，超时仅拖慢失败路径）
+        "reject_outside_trading_hours": False  # 非交易时段入口快速失败（默认关闭，保留收盘后挂单行为）
     },
     "logging": {
         "level": "INFO",

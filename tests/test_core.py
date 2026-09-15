@@ -9,7 +9,7 @@
 import pytest
 
 from src.core.popup_rules import match_popup_rule, match_submit_error
-from src.core.validation import sanitize_price
+from src.core.validation import check_trading_hours, sanitize_price
 from src.services.position_service import PositionService
 from src.services.trading_service import TradingService
 
@@ -42,6 +42,66 @@ class TestPriceSanitization:
         """无效价格抛异常"""
         with pytest.raises(Exception, match="价格格式无效"):
             sanitize_price("abc")
+
+
+class TestTradingHoursCheck:
+    """交易时段预检测试（order.reject_outside_trading_hours 开启时的快速失败）
+
+    纯函数注入时刻判定，不含节假日历——法定节假日需依赖券商报错兜底，
+    或临时关闭该开关。
+    """
+
+    @staticmethod
+    def _at(year, month, day, hour, minute):
+        from datetime import datetime
+        return datetime(year, month, day, hour, minute)
+
+    def test_weekday_morning_session(self):
+        """工作日上午盘（9:15-11:30）→ 允许"""
+        ok, _reason = check_trading_hours(self._at(2026, 9, 15, 10, 0))  # 周二
+        assert ok is True
+
+    def test_weekday_afternoon_session(self):
+        """工作日下午盘（13:00-15:00）→ 允许"""
+        ok, _reason = check_trading_hours(self._at(2026, 9, 15, 14, 30))  # 周二
+        assert ok is True
+
+    def test_pre_market_too_early(self):
+        """早于 9:15（集合竞价受理开始）→ 拒绝"""
+        ok, reason = check_trading_hours(self._at(2026, 9, 15, 9, 10))
+        assert ok is False
+        assert "非交易" in reason
+
+    def test_call_auction_open(self):
+        """9:15 集合竞价受理开始 → 允许"""
+        ok, _reason = check_trading_hours(self._at(2026, 9, 15, 9, 15))
+        assert ok is True
+
+    def test_lunch_break(self):
+        """午间休市（12:00）→ 拒绝"""
+        ok, _reason = check_trading_hours(self._at(2026, 9, 15, 12, 0))
+        assert ok is False
+
+    def test_after_close(self):
+        """收盘后（15:30）→ 拒绝"""
+        ok, _reason = check_trading_hours(self._at(2026, 9, 15, 15, 30))
+        assert ok is False
+
+    def test_market_close_boundary(self):
+        """15:00 收盘边界 → 允许（含端点）"""
+        ok, _reason = check_trading_hours(self._at(2026, 9, 15, 15, 0))
+        assert ok is True
+
+    def test_saturday_rejected(self):
+        """周六 → 拒绝"""
+        ok, reason = check_trading_hours(self._at(2026, 9, 12, 10, 0))
+        assert ok is False
+        assert "周末" in reason
+
+    def test_sunday_rejected(self):
+        """周日 → 拒绝"""
+        ok, _reason = check_trading_hours(self._at(2026, 9, 13, 14, 0))
+        assert ok is False
 
 
 class TestTableDataFormatting:
@@ -78,6 +138,24 @@ class TestTableDataFormatting:
         # 第一行3列不匹配2列表头，被跳过；第二行2列匹配
         assert len(result) == 1
         assert result[0]["代码"] == "600000"
+
+    def test_empty_header_column_dropped(self):
+        """空表头列被过滤——持仓/委托首列空表头不再产出 "" 键（实测数据质量问题）"""
+        data = "\t证券代码\t证券名称\n\t000001\t平安银行"
+        result = self.service._format_table_data(data)
+        assert result == [{"证券代码": "000001", "证券名称": "平安银行"}]
+
+    def test_empty_header_in_middle_dropped(self):
+        """中间位置的空表头列同样过滤，后续列值不错位"""
+        data = "证券代码\t\t证券名称\n000001\tX\t平安银行"
+        result = self.service._format_table_data(data)
+        assert result == [{"证券代码": "000001", "证券名称": "平安银行"}]
+
+    def test_whitespace_header_dropped(self):
+        """纯空白表头（"  "）同样过滤"""
+        data = "  \t证券代码\n\t000001"
+        result = self.service._format_table_data(data)
+        assert result == [{"证券代码": "000001"}]
 
 
 class TestCancelledCountParsing:

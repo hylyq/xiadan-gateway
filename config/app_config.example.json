@@ -26,7 +26,8 @@
   },
   "order": {
     "capture_entrust_no": false,
-    "entrust_no_timeout_seconds": 3.0
+    "entrust_no_timeout_seconds": 3.0,
+    "reject_outside_trading_hours": false
   },
   "logging": {
     "level": "INFO",

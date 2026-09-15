@@ -61,9 +61,10 @@ class TradingService:
         """
         cancel_type = (cancel_type or "A").upper()
         if cancel_type not in CANCEL_TYPE_MAP:
-            raise Exception(
-                f"无效的撤单类型: {cancel_type}，"
-                f"可选: A(全部)/X(撤买)/C(撤卖)/L(撤最后)")
+            raise ApiError(
+                ErrorCode.VALIDATION_ERROR,
+                f"无效的撤单类型: {cancel_type}，可选: A(全部)/X(撤买)/C(撤卖)/L(撤最后)"
+            )
 
         control_id, operation_name = CANCEL_TYPE_MAP[cancel_type]
         self.logger.info(f"开始撤单: {operation_name}")
@@ -77,7 +78,7 @@ class TradingService:
         # 按键即可到达。按钮灰显 = 当前无可撤委托。
         window = self.window_service.get_trading_window()
         if window is None:
-            raise Exception("未找到交易窗口")
+            raise ApiError(ErrorCode.WINDOW_NOT_FOUND, "未找到交易窗口")
 
         self.window_service.send_key("F3", background=True)
         btn = None
@@ -92,8 +93,11 @@ class TradingService:
             if btn is not None:
                 break
         if btn is None:
-            raise Exception(
-                f"未找到 {operation_name} 按钮 control_id={control_id}（F3 界面未加载）")
+            raise ApiError(
+                ErrorCode.CONTROL_NOT_FOUND,
+                f"未找到 {operation_name} 按钮 control_id={control_id}（F3 界面未加载）",
+                suggestion="F3 撤单页未就绪，请稍后重试或人工确认券商界面正常"
+            )
 
         if not self._is_button_enabled(btn):
             self.logger.info(f"{operation_name} 按钮灰显（当前无可撤委托）")

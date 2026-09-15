@@ -22,7 +22,7 @@ from src.constants import (
 )
 from src.core.entrust_capture import EntrustNoCapture
 from src.core.popup_rules import match_popup_rule, match_submit_error
-from src.core.validation import sanitize_price
+from src.core.validation import check_trading_hours, sanitize_price
 from src.exceptions import ApiError, ErrorCode
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
@@ -91,6 +91,20 @@ class Trader:
             f"price={price}, price_type={price_type}, confirm={confirm}"
         )
 
+        # 0a. 交易时段预检（可选，默认关闭）：收盘后下单会走完整 UI 流程
+        # ~11s 才得到券商报错（如模式切换静默失败）；开启后在入口快速失败。
+        # 默认关闭以保留「收盘后挂单挂在列表」的既有行为（周末模拟盘实测）
+        if self.config.get_order_config().get("reject_outside_trading_hours", False):
+            ok, reason = check_trading_hours()
+            if not ok:
+                self.logger.warning(f"交易时段预检拒绝下单: {reason}")
+                raise ApiError(
+                    ErrorCode.OUTSIDE_TRADING_HOURS,
+                    f"{reason}（order.reject_outside_trading_hours 已启用，入口快速失败）",
+                    suggestion="请在交易时段内下单（9:15-11:30 / 13:00-15:00），"
+                               "或关闭该预检开关以保留收盘后挂单行为"
+                )
+
         # 重置弹窗标志：place_order 执行过程中若遇到任何弹窗，设为 True
         self._had_any_dialog = False
         self._clean_dismiss = False
@@ -135,7 +149,10 @@ class Trader:
             with timed("激活窗口", self.logger):
                 trading_paths = self.config.get_trading_app_paths()
                 if not trading_paths:
-                    raise Exception("未配置 xiadan.exe 路径，请检查 config/app_config.json")
+                    raise ApiError(
+                        ErrorCode.WINDOW_NOT_FOUND, "未配置 xiadan.exe 路径，无法激活交易窗口",
+                        suggestion="请在 config/app_config.json 配置 trading_app_paths 后重启服务"
+                    )
                 self.window_service.activate_window(trading_paths)
                 time.sleep(0.2)
 
@@ -147,7 +164,10 @@ class Trader:
         # 3. 获取交易窗口 + 缓存 descendants（下单流程中 input/click 共用）
         window = self.window_service.get_trading_window()
         if window is None:
-            raise Exception("未找到交易窗口 '网上股票交易系统5.0'")
+            raise ApiError(
+                ErrorCode.WINDOW_NOT_FOUND, "未找到交易窗口 '网上股票交易系统5.0'",
+                suggestion="请确认券商程序已启动且窗口可见，或调用 /diagnostic/snapshot 排查"
+            )
         _descendants = list(window.descendants())
         # 安静态 UI 文本快照：此刻（重置后/连续跳过的干净退出后）无弹窗，
         # 主窗口全部可见文本即 UI 装饰标签全集。搭既有遍历的便车，零额外
@@ -185,7 +205,7 @@ class Trader:
                 if dismissed:
                     window = self.window_service.get_trading_window()
                     if window is None:
-                        raise Exception("关闭弹窗后窗口消失")
+                        raise ApiError(ErrorCode.WINDOW_NOT_FOUND, "关闭弹窗后交易窗口消失")
                     _descendants = list(window.descendants())
 
         # 5. 确保价格模式匹配
@@ -221,7 +241,7 @@ class Trader:
                         window, want_market, descendants=_descendants)
                     window = self.window_service.get_trading_window()
                     if window is None:
-                        raise Exception("切换价格模式后窗口消失")
+                        raise ApiError(ErrorCode.WINDOW_NOT_FOUND, "切换价格模式后交易窗口消失")
                     _descendants = list(window.descendants())
 
         # 7. 填写价格（仅限价，此时模式已确认）
@@ -500,7 +520,10 @@ class Trader:
         label = self.window_service.find_element_in_window(
             window, CONTROL_ID_PRICE_TYPE, descendants=descendants)
         if label is None:
-            raise Exception(f"未找到价格类型控件 control_id={CONTROL_ID_PRICE_TYPE}")
+            raise ApiError(
+                ErrorCode.CONTROL_NOT_FOUND, f"未找到价格类型控件 control_id={CONTROL_ID_PRICE_TYPE}",
+                suggestion="券商界面可能已升级（控件 ID 变化），请运行诊断 /diagnostic/snapshot 排查"
+            )
         label.click_input()
 
     def _verify_price_type_switch(self, want_market: bool):
@@ -536,7 +559,10 @@ class Trader:
             label = self.window_service.find_element_in_window(
                 window, CONTROL_ID_PRICE_TYPE, descendants=descendants)
             if label is None:
-                raise Exception(f"未找到价格类型控件 control_id={CONTROL_ID_PRICE_TYPE}")
+                raise ApiError(
+                    ErrorCode.CONTROL_NOT_FOUND, f"未找到价格类型控件 control_id={CONTROL_ID_PRICE_TYPE}",
+                    suggestion="券商界面可能已升级（控件 ID 变化），请运行诊断 /diagnostic/snapshot 排查"
+                )
             label.click_input()
 
             # 标签切换在 <0.2s 内完成，用短 sleep + 新鲜窗口检查
@@ -560,7 +586,7 @@ class Trader:
             # 标签不变 → 罕见路径：服务器可能拒绝了切换（弹窗）
             window = self.window_service.get_trading_window()
             if window is None:
-                raise Exception("切换价格模式时窗口消失")
+                raise ApiError(ErrorCode.WINDOW_NOT_FOUND, "切换价格模式时交易窗口消失")
             if self._dismiss_server_error_popup(window):
                 try:
                     _desc = list(window.descendants()) if window else []

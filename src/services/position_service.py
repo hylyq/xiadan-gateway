@@ -68,7 +68,7 @@ class PositionService:
         self._refresh_window_ref()
         window = self._cached_window
         if window is None:
-            raise Exception("交易窗口未找到，无法发送 Ctrl+C")
+            raise ApiError(ErrorCode.WINDOW_NOT_FOUND, "交易窗口未找到，无法发送 Ctrl+C")
 
         target_handle = window.handle
 
@@ -110,7 +110,10 @@ class PositionService:
                     f"无法将交易窗口带到前台，前台={win32gui.GetForegroundWindow():#x} "
                     f"目标={target_handle:#x}"
                 )
-                raise Exception("无法将交易窗口带到前台，放弃发送 Ctrl+C 避免按键泄漏")
+                raise ApiError(
+                    ErrorCode.WINDOW_NOT_FOUND, "无法将交易窗口带到前台，放弃发送 Ctrl+C 避免按键泄漏",
+                    suggestion="请检查是否有窗口遮挡券商程序，或人工点击一次交易窗口"
+                )
 
         with timed("keybd_event Ctrl+C ×2", self.logger):
             VK_CONTROL = win32con.VK_CONTROL  # 0x11
@@ -299,7 +302,7 @@ class PositionService:
         for attempt in range(max_attempts):
             hwnd = self._get_grid_hwnd()
             if hwnd is None:
-                raise Exception("未找到表格控件 CVirtualGridCtrl（消息级复制不可用）")
+                raise ApiError(ErrorCode.CONTROL_NOT_FOUND, "未找到表格控件 CVirtualGridCtrl（消息级复制不可用）")
 
             self.logger.info(f"第 {attempt + 1}/{max_attempts} 次尝试消息级复制(0xE122)")
             # 复制前清空剪贴板：与键盘法同理，防读到上次任务残留数据
@@ -686,7 +689,7 @@ class PositionService:
         with timed("control_id 批量读取", self.logger):
             window = self.window_service.get_trading_window()
             if window is None:
-                raise Exception("未找到交易窗口 '网上股票交易系统5.0'")
+                raise ApiError(ErrorCode.WINDOW_NOT_FOUND, "未找到交易窗口 '网上股票交易系统5.0'")
             result = self._read_balance_fields(window)
 
             if all(v is None for v in result.values()):
@@ -1037,7 +1040,7 @@ class PositionService:
         """重新导航到查询页面（重试路径用，页面切换失败后真实点击重试）"""
         window = self.window_service.get_trading_window()
         if window is None:
-            raise Exception("重新导航失败：未找到交易窗口")
+            raise ApiError(ErrorCode.WINDOW_NOT_FOUND, "重新导航失败：未找到交易窗口")
         self._navigate_to_query_page(window, page_name)
 
     def _navigate_to_query_page(self, window, page_name: str) -> None:
@@ -1095,8 +1098,10 @@ class PositionService:
                         self._check_blocking_popup(_descendants, window)
                         return
 
-        raise Exception(
-            f"导航到 '{page_name}' 失败：树形路径和 TreeItem 扫描均未找到目标页面"
+        raise ApiError(
+            ErrorCode.CONTROL_NOT_FOUND,
+            f"导航到 '{page_name}' 失败：树形路径和 TreeItem 扫描均未找到目标页面",
+            suggestion="查询页树节点缺失，券商界面可能已升级，请运行 /diagnostic/snapshot 排查"
         )
 
     def _check_blocking_popup(self, descendants, window) -> None:
@@ -1129,7 +1134,10 @@ class PositionService:
             values = line.split("\t")
             if len(values) != len(headers):
                 continue
-            row = {headers[i]: values[i] for i in range(len(headers))}
+            # 空表头列（如持仓/委托表首列）不产出 "" 键——无名列无法语义化，
+            # 特征列验证只认有名列，过滤不影响页面切换校验
+            row = {headers[i]: values[i] for i in range(len(headers))
+                   if headers[i].strip()}
             # 过滤空占位行：关键字段全为空则跳过
             key_fields = ["证券代码", "委托时间", "时间", "代码"]
             if any(row.get(k, "").strip() for k in key_fields):

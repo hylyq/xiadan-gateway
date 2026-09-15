@@ -116,6 +116,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
   "idempotency": { "order_dedup_window_seconds": 60 },
   "ocr": { "warmup_on_start": true, "max_retry": 3, "ddddocr_enabled": false },
   "query": { "copy_method": "keyboard" },
+  "order": { "capture_entrust_no": false, "reject_outside_trading_hours": false },
   "auth": { "enabled": false, "token": "" },
   "logging": { "level": "INFO", "file": "logs/app.log", "screenshot_dir": "logs/screenshots" }
 }
@@ -130,6 +131,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
 | `task_queue.max_size` | 50 | Max queue length |
 | `idempotency.order_dedup_window_seconds` | 60 | Order dedup window (seconds) |
 | `ocr.max_retry` | 3 | Max captcha OCR retries |
+| `order.reject_outside_trading_hours` | false | Fail fast at `place_order` entry outside trading hours (weekday + 9:15-11:30 / 13:00-15:00, no holiday calendar — broker errors remain the fallback). Off by default to preserve after-hours order queuing |
 | `ocr.ddddocr_enabled` | false | ddddocr debug switch (dual-engine verification + template extraction; requires `uv sync --extra ocr`) |
 | `window_monitor.enabled` | true | Window-minimized monitoring switch |
 | `auth.enabled` | false | Token auth switch |
@@ -395,7 +397,8 @@ xiadan-gateway/
 │   ├── diagnose_settings.py     # broker UI structure diagnostic
 │   ├── generate_templates.py    # OCR template management (view/extract/batch-annotate)
 │   ├── train_ocr.py             # iterative OCR training (auto-triggers captchas, tracks accuracy)
-│   └── test_*_menu.py           # menu-structure exploration scripts (dev leftovers)
+│   ├── test_*_menu.py           # menu-structure exploration scripts (dev leftovers)
+│   └── legacy/                  # one-off manual test scripts moved out of tests/ (not collected by pytest)
 ├── assets/
 │   ├── digit_templates/          # digit templates (git-tracked, produced by offline training)
 │   └── captcha_archive/          # failed-captcha archive (gitignored, for offline training)
@@ -424,6 +427,8 @@ xiadan-gateway/
 ### Task Queue and Watchdog
 
 All operations run sequentially on a single worker thread (`TaskQueue`) to avoid concurrent conflicts on `xiadan.exe`. By default `WindowService.reset_window_state()` runs before each task, resetting the window to the F1-buy baseline (including window position self-healing — auto-returns the window if dragged off-screen); consecutive clean exits in the same group skip the reset (see 「Consecutive clean skip」 in Core Features). On task timeout, the watchdog performs 「screenshot archive → activate window → ESC×5 reset」 recovery and **returns the error only after all recovery completes**, guaranteeing that when the caller receives `TASK_TIMEOUT`, `xiadan.exe` is already back to its initial state.
+
+> **Watchdog concurrency boundary**: recovery (ESC reset) runs on the watchdog timer thread while the timed-out task's worker thread may still be executing. The guarantee covers the window's final state, not the side effects of the abandoned task — a zombie task can still drive the UI (e.g. click buy) *after* recovery completed and the error was returned. The single-worker design ensures the next queued task only starts after the zombie returns; treat TASK_TIMEOUT as "order state unknown, verify before retrying" (see the idempotency rule that keeps dedup records on timeout).
 
 ### Event-Driven Waiting
 

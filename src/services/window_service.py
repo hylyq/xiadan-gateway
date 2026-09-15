@@ -15,6 +15,7 @@ from pywinauto import Application, Desktop
 
 from config.key_config import KEY_MAP
 from src.constants import TRADING_WINDOW_TITLE, BLOCKING_POPUP_KEYWORDS
+from src.exceptions import ApiError, ErrorCode
 from src.utils.logger import Logger
 from src.utils.poll import timed
 from src.utils.singleton import Singleton
@@ -141,7 +142,8 @@ class WindowService(Singleton):
                         self._set_foreground(hwnd)
                     return hwnd
 
-        raise Exception(f"未找到匹配窗口，路径: {paths}")
+        raise ApiError(ErrorCode.WINDOW_NOT_FOUND, f"未找到匹配窗口，路径: {paths}",
+                       suggestion="请确认 xiadan.exe 已启动且已登录")
 
     def activate_window_by_pid(self, pid: int, retries: int = 3, delay: float = 0.5) -> int:
         """根据进程 ID 激活窗口"""
@@ -170,7 +172,7 @@ class WindowService(Singleton):
             else:
                 time.sleep(delay)
 
-        raise Exception(f"未找到匹配窗口，PID: {pid}")
+        raise ApiError(ErrorCode.WINDOW_NOT_FOUND, f"未找到匹配窗口，PID: {pid}")
 
     def _set_foreground(self, hwnd: int) -> None:
         """将窗口置于前台（带降级方案）"""
@@ -185,9 +187,9 @@ class WindowService(Singleton):
                 app = Application(backend="uia").connect(handle=hwnd)
                 app.window(handle=hwnd).set_focus()
             except Exception as e2:
-                raise Exception(
-                    f"设置前台窗口失败，句柄: {hwnd}，"
-                    f"错误1: {str(e)}，错误2: {str(e2)}"
+                raise ApiError(
+                    ErrorCode.WINDOW_NOT_FOUND,
+                    f"设置前台窗口失败，句柄: {hwnd}，错误1: {str(e)}，错误2: {str(e2)}"
                 )
 
     # ------------------------------------------------------------
@@ -654,7 +656,8 @@ class WindowService(Singleton):
                 # 缓存未命中：控件树可能已变化，降级走 fresh scan
                 element = self.find_element_in_window(window, control_id)
             if element is None:
-                raise Exception(f"未找到 control_id={control_id} 的输入框")
+                raise ApiError(ErrorCode.CONTROL_NOT_FOUND, f"未找到 control_id={control_id} 的输入框",
+                              suggestion="控件树可能已变化，券商界面升级时请运行诊断排查")
             element.set_focus()
             time.sleep(0.08)
 
@@ -917,7 +920,8 @@ class WindowService(Singleton):
             self.logger.error(
                 f"交易窗口未找到，禁止发送按键 '{keys}'（防止泄漏到桌面/其他窗口）"
             )
-            raise Exception(
+            raise ApiError(
+                ErrorCode.WINDOW_NOT_FOUND,
                 f"交易窗口未找到，无法发送按键 '{keys}'。"
                 f"请确认券商程序（网上股票交易系统5.0）已启动且窗口可见。"
             )
@@ -957,9 +961,9 @@ class WindowService(Singleton):
                 f"无法将交易窗口带到前台，前台={win32gui.GetForegroundWindow():#x} "
                 f"目标={hwnd:#x}，禁止发送按键 '{keys}'"
             )
-            raise Exception(
-                f"无法激活交易窗口到前台，无法发送按键 '{keys}'。"
-                f"当前前台窗口不是交易窗口。"
+            raise ApiError(
+                ErrorCode.WINDOW_NOT_FOUND,
+                f"无法激活交易窗口到前台，无法发送按键 '{keys}'。当前前台窗口不是交易窗口。"
             )
 
         self._send_key_foreground(keys)
@@ -984,7 +988,7 @@ class WindowService(Singleton):
         """
         window = self.get_trading_window()
         if window is None:
-            raise Exception("交易窗口未找到，无法关闭子面板")
+            raise ApiError(ErrorCode.WINDOW_NOT_FOUND, "交易窗口未找到，无法关闭子面板")
 
         self.logger.info(
             f"关闭子面板 '{dialog_title}'：发送 F4 切换到查询视图"
@@ -1026,9 +1030,9 @@ class WindowService(Singleton):
         """
         window = self.get_trading_window()
         if window is None:
-            raise Exception(
-                "未找到交易窗口 '网上股票交易系统5.0'。"
-                "请确认券商程序已启动且窗口可见。"
+            raise ApiError(
+                ErrorCode.WINDOW_NOT_FOUND,
+                "未找到交易窗口 '网上股票交易系统5.0'。请确认券商程序已启动且窗口可见。"
             )
 
         # 窗口位置自愈：被误拖出屏幕时移回（click_input/截图依赖屏幕坐标）

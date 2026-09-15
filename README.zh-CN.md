@@ -116,6 +116,7 @@ uv run python main.py --dev       # 开发模式（热加载）
   "idempotency": { "order_dedup_window_seconds": 60 },
   "ocr": { "warmup_on_start": true, "max_retry": 3, "ddddocr_enabled": false },
   "query": { "copy_method": "keyboard" },
+  "order": { "capture_entrust_no": false, "reject_outside_trading_hours": false },
   "auth": { "enabled": false, "token": "" },
   "logging": { "level": "INFO", "file": "logs/app.log", "screenshot_dir": "logs/screenshots" }
 }
@@ -130,6 +131,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `task_queue.max_size` | 50 | 队列最大长度 |
 | `idempotency.order_dedup_window_seconds` | 60 | 下单去重窗口（秒） |
 | `ocr.max_retry` | 3 | 验证码识别最大重试次数 |
+| `order.reject_outside_trading_hours` | false | 下单入口交易时段预检（工作日 + 9:15-11:30 / 13:00-15:00 粗判，不含节假日历，节假日由券商报错兜底）。开启后非交易时段秒级返回 `OUTSIDE_TRADING_HOURS`，免走完整 UI 流程 ~11s；默认关闭以保留收盘后挂单行为 |
 | `ocr.ddddocr_enabled` | false | ddddocr 调试开关（开启后可启用双引擎质检+模板提取，需 `uv sync --extra ocr`） |
 | `window_monitor.enabled` | true | 窗口最小化监控开关 |
 | `auth.enabled` | false | Token 认证开关 |
@@ -394,7 +396,8 @@ xiadan-gateway/
 │   ├── diagnose_settings.py     # 券商 UI 结构诊断脚本
 │   ├── generate_templates.py    # OCR 模板管理（查看/提取/批量标注）
 │   ├── train_ocr.py             # OCR 迭代训练（自动触发验证码 + 追踪准确率）
-│   └── test_*_menu.py           # 菜单结构探索调试脚本（开发期遗留）
+│   ├── test_*_menu.py           # 菜单结构探索调试脚本（开发期遗留）
+│   └── legacy/                  # 从 tests/ 移出的一次性手工测试脚本（pytest 不收集）
 ├── assets/
 │   ├── digit_templates/          # 数字模板（Git 跟踪，离线训练生成）
 │   └── captcha_archive/          # 失败验证码存档（gitignore，供离线训练使用）
@@ -423,6 +426,8 @@ xiadan-gateway/
 ### 任务队列与看门狗
 
 所有操作通过单 worker 线程 `TaskQueue` 顺序执行，避免 `xiadan.exe` 并发冲突。默认每个任务前调用 `WindowService.reset_window_state()` 重置窗口到 F1 买入基准态（含窗口位置自愈——被误拖出屏幕时自动移回）；连续同组干净退出时跳过重置（见核心特性表「连续干净跳过」）。任务超时后看门狗执行「截图存档 → 激活窗口 → ESC×5 重置」恢复流程，**完成所有恢复后才返回错误**，确保调用方收到 `TASK_TIMEOUT` 时 `xiadan.exe` 已恢复初始状态。
+
+> **看门狗并发边界**：恢复流程（ESC 重置）在看门狗定时器线程执行，而超时任务的 worker 线程可能仍在跑。该保证只覆盖窗口最终状态，不覆盖被弃任务本身的副作用——僵尸任务可能在恢复完成、错误已返回之后仍驱动 UI（如点出下单按钮）。单 worker 设计确保下一个排队任务在僵尸任务返回前不会开始；调用方应把 `TASK_TIMEOUT` 视为"订单状态未知，先核实再重试"（幂等规则在超时场景保留去重记录正是为此）。
 
 ### 事件驱动等待
 

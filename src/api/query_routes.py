@@ -34,7 +34,7 @@ def get_balance():
     config = AppConfig()
     task_queue = TaskQueue.get_instance()
     try:
-        query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 15)
+        query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
         result = task_queue.submit(
             func=lambda: _get_position_service().get_balance(),
             task_name="get_balance",
@@ -57,7 +57,7 @@ def get_position():
     config = AppConfig()
     task_queue = TaskQueue.get_instance()
     try:
-        query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 15)
+        query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
         result = task_queue.submit(
             func=lambda: _get_position_service().get_position(),
             task_name="get_position",
@@ -80,7 +80,7 @@ def get_today_trades():
     config = AppConfig()
     task_queue = TaskQueue.get_instance()
     try:
-        query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 15)
+        query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
         result = task_queue.submit(
             func=lambda: _get_position_service().get_today_trades(),
             task_name="get_today_trades",
@@ -105,7 +105,7 @@ def get_today_orders():
     config = AppConfig()
     task_queue = TaskQueue.get_instance()
     try:
-        query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 15)
+        query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
         result = task_queue.submit(
             func=lambda: _get_position_service().get_today_orders(),
             task_name="get_today_orders",
