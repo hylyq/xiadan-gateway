@@ -14,6 +14,7 @@ from src.api.response import (
     success_response, error_response, error_response_from_exception
 )
 from src.api.task_queue import TaskQueue
+from src.constants import CANCEL_TYPE_MAP
 from src.core.trader import Trader
 from src.exceptions import ApiError, ErrorCode
 from src.models.config import AppConfig
@@ -146,6 +147,7 @@ def cancel_all_orders():
             - 'A' 或不传: 全部撤单
             - 'X': 撤买
             - 'C': 撤卖
+            - 'L': 撤最后（撤销最近一笔委托）
 
     示例:
         POST /orders/cancel-all                  # 全部撤单
@@ -154,7 +156,15 @@ def cancel_all_orders():
     request_id = generate_request_id()
     config = AppConfig()
     task_queue = TaskQueue.get_instance()
-    cancel_type = get_param("type") or "A"
+    cancel_type = (get_param("type") or "A").upper()
+
+    # 参数校验前置到路由层（与 /orders 对齐）：非法类型不再入队后
+    # 在服务层报错，队列资源不被无效任务占用
+    if cancel_type not in CANCEL_TYPE_MAP:
+        return error_response(
+            ErrorCode.VALIDATION_ERROR, f"无效的撤单类型: {cancel_type}", request_id,
+            "type 只能是 A(全部)/X(撤买)/C(撤卖)/L(撤最后)，或不传默认全部撤单"
+        )
 
     _start = time.time()
     try:

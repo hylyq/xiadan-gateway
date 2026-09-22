@@ -1403,3 +1403,79 @@ class TestCrossSiteRejection:
         client = self._make_client(monkeypatch, tmp_path)
         r = client.get("/health", headers={"Origin": "http://evil.example"})
         assert r.get_json()["status"] == "success"
+
+
+class TestCancelValidation:
+    """撤单参数校验测试
+
+    锚定 2026-09-22 发现的回归：trading_service.py 使用 ApiError/ErrorCode
+    但从未 import——非法 type / 窗口丢失时服务层抛 NameError，被路由
+    except 兜成 INTERNAL_ERROR + traceback，错误语义丢失。
+    现校验前置到路由层，且服务层 import 补齐。
+    """
+
+    @staticmethod
+    def _make_client(monkeypatch, tmp_path):
+        import json
+
+        from src.models import config as config_module
+
+        p = tmp_path / "app_config.json"
+        p.write_text(json.dumps({}, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(config_module, "CONFIG_PATH", str(p))
+        config_module.AppConfig._reset_instance()
+
+        from src.api.routes import create_app
+        app = create_app()
+        app.config["TESTING"] = True
+        return app.test_client()
+
+    @staticmethod
+    def _forbid_submit(monkeypatch):
+        """让 TaskQueue.submit 被调用即失败（校验必须发生在入队之前）"""
+        from src.api.task_queue import TaskQueue
+
+        def _no(self, *args, **kwargs):
+            raise AssertionError("参数校验失败的任务不应入队")
+
+        monkeypatch.setattr(TaskQueue, "submit", _no)
+
+    @pytest.mark.parametrize("bad_type", ["Q", "B", "买", "  "])
+    def test_invalid_cancel_type_rejected_before_queue(self, monkeypatch, tmp_path, bad_type):
+        """非法撤单类型 → VALIDATION_ERROR，且任务不入队（空串视为默认 A，不在此列）"""
+        client = self._make_client(monkeypatch, tmp_path)
+        self._forbid_submit(monkeypatch)
+
+        r = client.post("/orders/cancel-all", json={"type": bad_type})
+
+        body = r.get_json()
+        assert body["status"] == "error"
+        assert body["error_code"] == "VALIDATION_ERROR"
+
+    def test_lowercase_type_normalized(self, monkeypatch, tmp_path):
+        """小写类型自动大写（'x' 视为 'X'），正常入队不报校验错"""
+        client = self._make_client(monkeypatch, tmp_path)
+
+        from src.api.task_queue import TaskQueue
+
+        def _fake_submit(self, func, task_name, params, timeout=None):
+            assert params["type"] == "X"
+            return {"cancel_type": "撤买", "success": True}
+
+        monkeypatch.setattr(TaskQueue, "submit", _fake_submit)
+        r = client.post("/orders/cancel-all", json={"type": "x"})
+        assert r.get_json()["status"] == "success"
+
+    def test_service_raises_structured_error_not_nameerror(self):
+        """服务层非法类型 → 结构化 ApiError(VALIDATION_ERROR)，不再 NameError
+
+        直接实例化（跳过 __init__ 的 WindowService 依赖）：校验分支在
+        触碰任何窗口服务之前就应抛出。
+        """
+        from src.exceptions import ApiError, ErrorCode
+        from src.services.trading_service import TradingService
+
+        service = TradingService.__new__(TradingService)
+        with pytest.raises(ApiError) as exc_info:
+            service.cancel_all_orders("Q")
+        assert exc_info.value.error_code == ErrorCode.VALIDATION_ERROR

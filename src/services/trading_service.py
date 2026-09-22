@@ -22,6 +22,7 @@ from src.constants import (
     CANCEL_CONFIRM_TEXT_KEYWORD,
     BLOCKING_POPUP_KEYWORDS,
 )
+from src.exceptions import ApiError, ErrorCode
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
 from src.utils.logger import Logger
