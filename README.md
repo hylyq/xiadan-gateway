@@ -47,7 +47,7 @@ Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──�
 | Pipelined mode switching | Click the limit/market toggle without waiting, immediately fill the quantity — the ~0.7s fill overlaps the label change; verification is naturally ready after filling |
 | Classified popup handling | Order confirm → Y/N; warning → Y to continue; **price out of range → N to cancel + `PRICE_OUT_OF_RANGE`**; error → close + report |
 | Watchdog recovery | On task timeout: screenshot + activate + ESC×5, reset, then return an error |
-| Idempotency | Orders with identical parameters within a 60s window are rejected, preventing duplicate orders from HTTP timeout retries |
+| Idempotency | Orders with identical parameters within a 60s window are rejected, preventing duplicate orders from HTTP timeout retries; optional client `Idempotency-Key` header deduplicates by key |
 | OCR captcha | Lightweight template-matching engine; failures auto-archived; optional ddddocr offline training |
 | Production server | `waitress` WSGI + graceful shutdown (SIGINT/SIGTERM) |
 | Hot config reload | `POST /admin/reload-config` without restart |
@@ -55,7 +55,7 @@ Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──�
 | Screenshot auto-cleanup | Cleans expired screenshots at startup (keeps 200 / last 7 days) |
 | Auth security | Token compared with `hmac.compare_digest` (constant-time) |
 | Cross-site defense | Requests carrying an `Origin` header are rejected (browser cross-site requests always carry it; script clients never do) — prevents malicious web pages from firing trades at the local gateway; active even when auth is disabled |
-| Runtime stats | Per-error-code success rates (1-hour window, via `/health`); log alert after 3 consecutive failures |
+| Runtime stats | Per-error-code success rates (1-hour window, via `/health`); log alert after 3 consecutive failures; tracks order-confirm-dialog behavior and warns when the client's fast-trade setting appears reset (behavior flip) |
 | Window position self-healing | Before each task, checks window/workarea intersection (60% threshold); auto-moves the window back if it was dragged off-screen (`click_input`/screenshots are coordinate-based and fail off-screen) |
 
 ## Prerequisites: Broker Software Settings
@@ -116,7 +116,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
   "idempotency": { "order_dedup_window_seconds": 60 },
   "ocr": { "warmup_on_start": true, "max_retry": 3, "ddddocr_enabled": false },
   "query": { "copy_method": "keyboard" },
-  "order": { "capture_entrust_no": false, "reject_outside_trading_hours": false },
+  "order": { "capture_entrust_no": false, "verify_entrust_no": false, "reject_outside_trading_hours": false },
   "auth": { "enabled": false, "token": "" },
   "logging": { "level": "INFO", "file": "logs/app.log", "screenshot_dir": "logs/screenshots" }
 }
@@ -131,7 +131,8 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
 | `task_queue.max_size` | 50 | Max queue length |
 | `idempotency.order_dedup_window_seconds` | 60 | Order dedup window (seconds) |
 | `ocr.max_retry` | 3 | Max captcha OCR retries |
-| `order.reject_outside_trading_hours` | false | Fail fast at `place_order` entry outside trading hours (weekday + 9:15-11:30 / 13:00-15:00, no holiday calendar — broker errors remain the fallback). Off by default to preserve after-hours order queuing |
+| `order.reject_outside_trading_hours` | false | Fail fast at `place_order` entry outside trading hours (weekday + statutory holidays via chinesecalendar + 9:15-11:30 / 13:00-15:00; degrades to weekday-only when the package is missing or its data doesn't cover the year — broker errors remain the fallback). Off by default to preserve after-hours order queuing |
+| `order.verify_entrust_no` | false | After a successful order with a captured entrust number, automatically query today's orders to reconcile (response gains `entrust_no_verified`). Adds one query to the response time — enlarge client timeout accordingly. Requires `order.capture_entrust_no` |
 | `ocr.ddddocr_enabled` | false | ddddocr debug switch (dual-engine verification + template extraction; requires `uv sync --extra ocr`) |
 | `window_monitor.enabled` | true | Window-minimized monitoring switch |
 | `auth.enabled` | false | Token auth switch |
@@ -251,7 +252,7 @@ PopupRule(
 | POST | `/actions/click` | Mouse click at coordinates | ✓ | 30s |
 | POST | `/actions/close-dialog` | Close the buy/sell sub-panel | ✓ | 30s |
 | GET | `/ocr/quality` | OCR quality report (accuracy/templates/coverage) | | 5s |
-| GET | `/diagnostic/snapshot` | Screenshot + UI text + OCR | | 10s |
+| GET | `/diagnostic/snapshot` | Screenshot + UI text + OCR (yields to a busy worker for up to 2s, then runs anyway; response carries a `worker_busy` flag) | | 10s |
 | GET | `/diagnostic/history` | Diagnostic history of the last N tasks | | 5s |
 
 > POST endpoints accept both JSON body and query-string parameters.
@@ -291,6 +292,7 @@ curl -X POST http://localhost:5000/orders \
 | `action` / `mode` / `code` / `amount` / `price` | Echo of order parameters |
 | `confirmed` | `true`=submitted (in fast-trade mode, no error popup means success) |
 | `entrust_no` | Contract number. Returned only when `order.capture_entrust_no` is enabled; `null` on capture failure or when disabled |
+| `entrust_no_verified` | Reconciliation result. Returned only when `order.verify_entrust_no` is enabled and a banner number was captured: `true`=matched in today's booked orders / `false`=not matched (banner number may be wrong, trust the query) / `null`=reconciliation query failed (order-result semantics unchanged) |
 
 > **`entrust_no: null` does NOT mean the order failed** — success is judged by
 > popup detection and is decoupled from banner capture. `null` means "submitted
@@ -299,7 +301,9 @@ curl -X POST http://localhost:5000/orders \
 > number, look it up via `GET /orders/pending` by code+price+amount+time.
 > Note: under extreme conditions (broker server maintenance windows) the banner
 > number may differ from the final booked number — re-verify via the day's
-> order query before per-order operations (e.g. cancel by number).
+> order query before per-order operations, or enable `order.verify_entrust_no`
+> to get the reconciliation result (`entrust_no_verified`) directly in the
+> order response.
 
 ### POST /orders/cancel-all — Cancel Orders
 
@@ -550,6 +554,7 @@ Popups during order/cancel are auto-detected and handled by type: order-confirm 
 ### Idempotency and Price Validation
 
 - **Idempotency**: orders with the same `code+status+amount+price+price_type` within 60s are rejected (`DUPLICATE_ORDER`). A failed order clears its record to allow retry; a timed-out order does not (prevents duplicate submission).
+- **Client idempotency key**: `POST /orders` accepts an optional `Idempotency-Key` header (≤128 chars) — when present, dedup is keyed by it: retrying after an HTTP timeout with the same key is safe (neither mis-rejected nor duplicated), and identical parameters from different strategies no longer collide. Without the header, the parameter fingerprint applies (backward compatible).
 - **Price**: the API layer rejects prices with more than 2 decimals (`VALIDATION_ERROR`); the order layer auto-formats via `sanitize_price()` to 2 decimals.
 
 ### Query Panel Standardization

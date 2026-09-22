@@ -47,7 +47,7 @@
 | 模式切换流水线 | 限价↔市价切换时先点按钮不等待，立即填数量——数量填充的 ~0.7s 与标签变化重叠，验证在填数量之后自然就绪 |
 | 弹窗分类处理 | 委托确认→点Y/N；警告→点Y继续；**价格超限→点N取消+返回`PRICE_OUT_OF_RANGE`**；错误→关闭+报错 |
 | 看门狗恢复 | 任务超时自动截图 + 激活 + ESC×5，重置后返回错误 |
-| 幂等检查 | 60s 窗口内相同参数的下单被拒绝，防 HTTP 超时重试重复下单 |
+| 幂等检查 | 60s 窗口内相同参数的下单被拒绝，防 HTTP 超时重试重复下单；支持客户端 `Idempotency-Key` 请求头按键去重 |
 | OCR 验证码 | 轻量模板匹配引擎，失败自动存档，可选 ddddocr 离线训练 |
 | 生产级服务器 | `waitress` WSGI + 优雅关闭（SIGINT/SIGTERM） |
 | 配置热更新 | `POST /admin/reload-config` 无需重启 |
@@ -55,7 +55,7 @@
 | 截图自动清理 | 启动时清理过期截图（保留 200 张 / 7 天内） |
 | 认证安全 | Token 使用 `hmac.compare_digest` 常量时间比较 |
 | 跨站防御 | 拒绝携带 `Origin` 头的请求（浏览器跨站请求必带，脚本客户端不带）——防恶意网页向本机网关发起交易，未开认证时同样生效 |
-| 运行统计 | 按错误码聚合成功率（最近 1 小时窗口，`/health` 返回），连续 3 次失败日志告警 |
+| 运行统计 | 按错误码聚合成功率（最近 1 小时窗口，`/health` 返回），连续 3 次失败日志告警；跟踪下单弹窗行为，客户端「快速交易」设置被重置（弹窗行为翻转）时告警 |
 | 窗口位置自愈 | 任务开始前检查窗口与工作区交集（阈值 60%），窗口被误拖出屏幕时自动移回（`click_input`/截图按屏幕坐标工作，出屏会失效） |
 
 ## 前置准备：券商软件设置
@@ -116,7 +116,7 @@ uv run python main.py --dev       # 开发模式（热加载）
   "idempotency": { "order_dedup_window_seconds": 60 },
   "ocr": { "warmup_on_start": true, "max_retry": 3, "ddddocr_enabled": false },
   "query": { "copy_method": "keyboard" },
-  "order": { "capture_entrust_no": false, "reject_outside_trading_hours": false },
+  "order": { "capture_entrust_no": false, "verify_entrust_no": false, "reject_outside_trading_hours": false },
   "auth": { "enabled": false, "token": "" },
   "logging": { "level": "INFO", "file": "logs/app.log", "screenshot_dir": "logs/screenshots" }
 }
@@ -131,7 +131,8 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `task_queue.max_size` | 50 | 队列最大长度 |
 | `idempotency.order_dedup_window_seconds` | 60 | 下单去重窗口（秒） |
 | `ocr.max_retry` | 3 | 验证码识别最大重试次数 |
-| `order.reject_outside_trading_hours` | false | 下单入口交易时段预检（工作日 + 9:15-11:30 / 13:00-15:00 粗判，不含节假日历，节假日由券商报错兜底）。开启后非交易时段秒级返回 `OUTSIDE_TRADING_HOURS`，免走完整 UI 流程 ~11s；默认关闭以保留收盘后挂单行为 |
+| `order.reject_outside_trading_hours` | false | 下单入口交易时段预检（工作日 + 法定节假日 + 9:15-11:30 / 13:00-15:00 粗判，节假日历由 chinesecalendar 提供——依赖缺失或数据年份未覆盖时降级为仅工作日判断，节假日由券商报错兜底）。开启后非交易时段秒级返回 `OUTSIDE_TRADING_HOURS`，免走完整 UI 流程 ~11s；默认关闭以保留收盘后挂单行为 |
+| `order.verify_entrust_no` | false | 下单成功拿到委托号后自动追加一笔当日委托查询对账（响应附加 `entrust_no_verified`：命中/未命中/查询失败）。开启后接口耗时增加一次查询，调用方 timeout 需相应放大。需配合 `order.capture_entrust_no` 使用 |
 | `ocr.ddddocr_enabled` | false | ddddocr 调试开关（开启后可启用双引擎质检+模板提取，需 `uv sync --extra ocr`） |
 | `window_monitor.enabled` | true | 窗口最小化监控开关 |
 | `auth.enabled` | false | Token 认证开关 |
@@ -251,7 +252,7 @@ PopupRule(
 | POST | `/actions/click` | 鼠标点击坐标 | ✓ | 30s |
 | POST | `/actions/close-dialog` | 关闭买入/卖出子面板 | ✓ | 30s |
 | GET | `/ocr/quality` | OCR 质检报告（准确率/模板/覆盖） | | 5s |
-| GET | `/diagnostic/snapshot` | 截图 + UI 文本 + OCR | | 10s |
+| GET | `/diagnostic/snapshot` | 截图 + UI 文本 + OCR（worker 忙时让位等待 2s 后照常执行，响应带 `worker_busy` 标记） | | 10s |
 | GET | `/diagnostic/history` | 最近 N 步任务诊断历史 | | 5s |
 
 > POST 接口同时支持 JSON body 和 query string 传参。
@@ -291,12 +292,15 @@ curl -X POST http://localhost:5000/orders \
 | `action` / `mode` / `code` / `amount` / `price` | 回显下单参数 |
 | `confirmed` | `true`=已提交（快速交易模式下无错误弹窗即判定成功） |
 | `entrust_no` | 合同编号（委托号）。仅启用 `order.capture_entrust_no` 后返回，截获失败或未启用时为 `null` |
+| `entrust_no_verified` | 委托号对账结果。仅 `order.verify_entrust_no` 开启且拿到委托号时返回：`true`=当日委托落表命中 / `false`=未命中（横幅号可能不准，以查询为准）/ `null`=对账查询失败（不影响下单结果语义） |
 
 > **`entrust_no: null` 不代表下单失败**——成败判定基于弹窗检测，与横幅截获解耦。
 > `null` 的语义是"已提交（推断），编号未知"（横幅未出现/被遮挡/窗口最小化）。
 > 此时**不要重试**（会重复下单），需要编号时用 `GET /orders/pending`
 > 按 代码+价格+数量+时间 反查。另注意：券商服务器维护窗口等极端情况下
-> 横幅号与最终落表号可能不一致，按单操作前应以当日委托查询复核。
+> 横幅号与最终落表号可能不一致，按单操作前应以当日委托查询复核；
+> 开启 `order.verify_entrust_no` 可在下单响应中直接获得对账结果
+> （`entrust_no_verified`）。
 
 ### POST /orders/cancel-all — 撤单
 
@@ -549,6 +553,7 @@ Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 间隔 0.15s)
 ### 幂等与价格校验
 
 - **幂等**：60s 内相同 `code+status+amount+price+price_type` 下单被拒绝（`DUPLICATE_ORDER`）。下单失败清除记录允许重试，超时不清除（防止重复提交）。
+- **客户端幂等键**：`POST /orders` 支持可选请求头 `Idempotency-Key`（≤128 字符）——提供时优先按键去重，HTTP 超时重试携带同一 key 即安全（不会误拦也不会重复下单），不同策略同参数 60s 内不再互撞；缺省回退参数指纹（向后兼容）。
 - **价格**：API 层拦截超 2 位小数的价格（`VALIDATION_ERROR`），下单层自动 `sanitize_price()` 格式化为 2 位小数。
 
 ### 查询面板标准化
