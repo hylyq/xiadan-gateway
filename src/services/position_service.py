@@ -640,10 +640,8 @@ class PositionService:
         连续查询跳过时窗口已在 F4，无需重发 F4。
         """
         from src.api.task_queue import TaskQueue
-        _tq = TaskQueue.get_instance()
-        if _tq.skip_window_setup:
+        if TaskQueue.get_instance().consume_window_setup_skip():
             self.logger.info("连续查询跳过，窗口已在 F4 面板")
-            _tq.skip_window_setup = False
             return
         with timed("F4 打开查询面板", self.logger):
             self.window_service.send_key("F4", background=True)

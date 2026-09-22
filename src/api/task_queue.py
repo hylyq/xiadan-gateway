@@ -116,9 +116,11 @@ class TaskQueue(Singleton):
         self._last_order_had_dialog: Optional[bool] = None
 
         # 连续同向订单优化：跟踪上次任务状态，避免重复的准备操作
-        # 如 买入→买入 时跳过 _reset_trading_window + 激活 + F1
+        # 如 买入→买入 时跳过 _reset_trading_window + 激活 + F1。
+        # 业务代码通过 consume_window_setup_skip() / get_last_task_info()
+        # 访问，不直接读写内部属性
         self._last_task_info: Optional[dict] = None
-        self.skip_window_setup = False  # Trader 读取此标志决定是否跳过准备
+        self._skip_window_setup = False
 
         # 启动 worker 线程
         self._worker = threading.Thread(target=self._worker_loop, daemon=True, name="Task-Worker")
@@ -191,8 +193,8 @@ class TaskQueue(Singleton):
             try:
                 # 连续同向订单优化：买入→买入 或 卖出→卖出 跳过窗口准备
                 # 上次任务成功后窗口仍停留在对应界面，无需重置/激活/按键
-                self.skip_window_setup = self._can_skip_window_setup(task)
-                if not self.skip_window_setup:
+                self._skip_window_setup = self._can_skip_window_setup(task)
+                if not self._skip_window_setup:
                     self._reset_trading_window()
 
                 # 执行任务
@@ -257,6 +259,24 @@ class TaskQueue(Singleton):
         "get_today_trades": "query",
         "get_today_orders": "query",
     }
+
+    def consume_window_setup_skip(self) -> bool:
+        """读取并清除窗口准备跳过标志（单次消耗语义）
+
+        worker 在任务开始前依据「上笔同组干净退出」设置；业务方法
+        （Trader.place_order / PositionService._prepare_query_panel）
+        消费一次即复位，同一次任务内不会重复生效。
+        """
+        skip = self._skip_window_setup
+        self._skip_window_setup = False
+        return skip
+
+    def get_last_task_info(self) -> dict:
+        """上笔任务状态快照（只读副本；无记录时返回空 dict）
+
+        键：name / group / had_dialog / status（仅 place_order 有 status）。
+        """
+        return dict(self._last_task_info) if self._last_task_info else {}
 
     @classmethod
     def _get_operation_group(cls, task_name: str) -> str:

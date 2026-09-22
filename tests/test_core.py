@@ -1740,6 +1740,37 @@ class TestCrossSiteRejection:
         assert r.get_json()["status"] == "success"
 
 
+class TestWindowSetupSkipAccessors:
+    """TaskQueue 跳过状态公共访问器测试（收口私有属性直接读写）"""
+
+    def test_consume_is_single_shot(self):
+        """consume_window_setup_skip 消费一次即复位"""
+        from src.api.task_queue import TaskQueue
+        tq = TaskQueue.get_instance()
+        tq._skip_window_setup = True
+        try:
+            assert tq.consume_window_setup_skip() is True
+            assert tq.consume_window_setup_skip() is False
+        finally:
+            tq._skip_window_setup = False
+
+    def test_get_last_task_info_returns_copy(self):
+        """get_last_task_info 返回副本，外部修改不影响内部状态；无记录返回空"""
+        from src.api.task_queue import TaskQueue
+        tq = TaskQueue.get_instance()
+        tq._last_task_info = None
+        try:
+            assert tq.get_last_task_info() == {}
+
+            tq._last_task_info = {"name": "place_order", "group": "trade",
+                                  "had_dialog": False, "status": "1"}
+            snapshot = tq.get_last_task_info()
+            snapshot["status"] = "MUTATED"
+            assert tq.get_last_task_info()["status"] == "1"
+        finally:
+            tq._last_task_info = None
+
+
 class TestOrderDialogDrift:
     """下单确认弹窗行为跟踪测试：/health 统计 + 快速交易设置漂移告警"""
 

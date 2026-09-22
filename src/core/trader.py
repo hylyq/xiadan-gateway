@@ -132,9 +132,8 @@ class Trader:
 
         # 1. 激活窗口 + F1/F2（上笔干净退出时可跳过重置+激活）
         _task_queue = TaskQueue.get_instance()
-        if _task_queue.skip_window_setup:
-            _task_queue.skip_window_setup = False  # 单次消耗
-            _last_status = (_task_queue._last_task_info or {}).get("status")
+        if _task_queue.consume_window_setup_skip():
+            _last_status = _task_queue.get_last_task_info().get("status")
             if status != _last_status:
                 # 交叉方向（买→卖 或 卖→买）：只需按 F 键切换
                 self.logger.info(
