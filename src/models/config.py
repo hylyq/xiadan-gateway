@@ -36,6 +36,11 @@ DEFAULT_CONFIG = {
     "idempotency": {
         "order_dedup_window_seconds": 60
     },
+    "alerts": {
+        "webhook_url": "",        # 告警外推 webhook（空=禁用）：连续任务失败/下单弹窗漂移/任务超时时 POST
+        "format": "generic",      # generic=完整 JSON（自建 receiver）；text=企业微信/钉钉机器人文本格式
+        "timeout_seconds": 5
+    },
     "ocr": {
         "warmup_on_start": True,
         "max_retry": 3,
@@ -158,6 +163,13 @@ class AppConfig(Singleton):
     def get_idempotency_config(self) -> dict:
         return self._config.get("idempotency", {"order_dedup_window_seconds": 60})
 
+    def get_alerts_config(self) -> dict:
+        return self._config.get("alerts", {
+            "webhook_url": "",
+            "format": "generic",
+            "timeout_seconds": 5
+        })
+
     def get_ocr_config(self) -> dict:
         return self._config.get("ocr", {"warmup_on_start": True, "max_retry": 3})
 
@@ -249,6 +261,23 @@ class AppConfig(Singleton):
                     errors.append(f"order.entrust_no_timeout_seconds 必须 > 0，当前: {v}")
             except (TypeError, ValueError):
                 errors.append(f"order.entrust_no_timeout_seconds 必须是数字，当前: {v!r}")
+
+        acfg = self._config.get("alerts") or {}
+        url = acfg.get("webhook_url")
+        if url is not None and not isinstance(url, str):
+            errors.append(f"alerts.webhook_url 必须是字符串，当前: {url!r}")
+        elif url and not str(url).strip().startswith(("http://", "https://")):
+            errors.append(f"alerts.webhook_url 必须以 http:// 或 https:// 开头，当前: {url!r}")
+        fmt = acfg.get("format")
+        if fmt is not None and fmt not in ("generic", "text"):
+            errors.append(f"alerts.format 必须是 'generic' 或 'text'，当前: {fmt!r}")
+        v = acfg.get("timeout_seconds")
+        if v is not None:
+            try:
+                if float(v) <= 0:
+                    errors.append(f"alerts.timeout_seconds 必须 > 0，当前: {v}")
+            except (TypeError, ValueError):
+                errors.append(f"alerts.timeout_seconds 必须是数字，当前: {v!r}")
 
         return errors
 

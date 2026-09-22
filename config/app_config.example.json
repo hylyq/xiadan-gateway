@@ -16,6 +16,11 @@
   "idempotency": {
     "order_dedup_window_seconds": 60
   },
+  "alerts": {
+    "webhook_url": "",
+    "format": "generic",
+    "timeout_seconds": 5
+  },
   "ocr": {
     "warmup_on_start": true,
     "max_retry": 3,

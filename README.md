@@ -56,6 +56,7 @@ Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──�
 | Auth security | Token compared with `hmac.compare_digest` (constant-time) |
 | Cross-site defense | Requests carrying an `Origin` header are rejected (browser cross-site requests always carry it; script clients never do) — prevents malicious web pages from firing trades at the local gateway; active even when auth is disabled |
 | Runtime stats | Per-error-code success rates (1-hour window, via `/health`); log alert after 3 consecutive failures; tracks order-confirm-dialog behavior and warns when the client's fast-trade setting appears reset (behavior flip) |
+| Alert webhook | Consecutive task failures ≥3, order-dialog drift, and task timeouts → POST to a webhook (generic JSON or WeCom/DingTalk `text` format) on a background thread, never blocking the trading path |
 | Window position self-healing | Before each task, checks window/workarea intersection (60% threshold); auto-moves the window back if it was dragged off-screen (`click_input`/screenshots are coordinate-based and fail off-screen) |
 
 ## Prerequisites: Broker Software Settings
@@ -114,6 +115,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
     "confirm_timeout_seconds": 10
   },
   "idempotency": { "order_dedup_window_seconds": 60 },
+  "alerts": { "webhook_url": "", "format": "generic", "timeout_seconds": 5 },
   "ocr": { "warmup_on_start": true, "max_retry": 3, "ddddocr_enabled": false },
   "query": { "copy_method": "keyboard" },
   "order": { "capture_entrust_no": false, "verify_entrust_no": false, "reject_outside_trading_hours": false },
@@ -130,6 +132,9 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
 | `task_queue.confirm_timeout_seconds` | 10 | Confirm/keypress operation timeout (seconds) |
 | `task_queue.max_size` | 50 | Max queue length |
 | `idempotency.order_dedup_window_seconds` | 60 | Order dedup window (seconds) |
+| `alerts.webhook_url` | empty | Alert webhook (**empty=disabled**): consecutive task failures ≥3, order-dialog behavior drift, and watchdog timeouts POST JSON in the background; hot-reloadable |
+| `alerts.format` | generic | `generic`=full structured JSON (custom receiver); `text`=WeCom group-bot / DingTalk custom-bot text format |
+| `alerts.timeout_seconds` | 5 | Webhook POST timeout (seconds). Sent on a background daemon thread, never blocks the trading path |
 | `ocr.max_retry` | 3 | Max captcha OCR retries |
 | `order.reject_outside_trading_hours` | false | Fail fast at `place_order` entry outside trading hours (weekday + statutory holidays via chinesecalendar + 9:15-11:30 / 13:00-15:00; degrades to weekday-only when the package is missing or its data doesn't cover the year — broker errors remain the fallback). Off by default to preserve after-hours order queuing |
 | `order.verify_entrust_no` | false | After a successful order with a captured entrust number, automatically query today's orders to reconcile (response gains `entrust_no_verified`). Adds one query to the response time — enlarge client timeout accordingly. Requires `order.capture_entrust_no` |

@@ -1827,6 +1827,200 @@ class TestHealthLoggedIn:
         assert body["data"]["logged_in"] is False
 
 
+class TestAlertWebhook:
+    """告警 webhook 测试（无网络：同步线程捕获 payload / 校验门控）"""
+
+    @staticmethod
+    def _sync_threads(monkeypatch):
+        """把 alert 模块的 Thread 替换为同步执行（start 即跑 target）"""
+        from src.utils import alert as alert_mod
+
+        class SyncThread:
+            def __init__(self, target=None, args=None, kwargs=None,
+                         daemon=None, name=None):
+                self._target = target
+                self._args = args or ()
+                self._kwargs = kwargs or {}
+
+            def start(self):
+                self._target(*self._args, **self._kwargs)
+
+        monkeypatch.setattr(alert_mod.threading, "Thread", SyncThread)
+
+    @staticmethod
+    def _with_config(monkeypatch, tmp_path, alerts):
+        import json
+
+        from src.models import config as config_module
+
+        p = tmp_path / "app_config.json"
+        p.write_text(json.dumps({"alerts": alerts}, ensure_ascii=False),
+                     encoding="utf-8")
+        monkeypatch.setattr(config_module, "CONFIG_PATH", str(p))
+        config_module.AppConfig._reset_instance()
+
+    def test_disabled_when_url_empty(self, monkeypatch, tmp_path):
+        """webhook_url 为空（默认）→ 整体禁用，不发起任何请求"""
+        from src.utils import alert as alert_mod
+        self._with_config(monkeypatch, tmp_path, {"webhook_url": ""})
+
+        def _boom(*a, **k):
+            raise AssertionError("未配置 URL 不应发起请求")
+        monkeypatch.setattr(alert_mod, "_deliver", _boom)
+        self._sync_threads(monkeypatch)
+
+        alert_mod.send_alert("task_timeout", "t", "m")  # 不应触发 _boom
+
+    def test_generic_payload_fields(self, monkeypatch, tmp_path):
+        """generic 格式 → 完整结构化 JSON（alert_type/title/details/timestamp）"""
+        from src.utils import alert as alert_mod
+        self._with_config(monkeypatch, tmp_path,
+                          {"webhook_url": "http://127.0.0.1:9/hook",
+                           "format": "generic"})
+        captured = {}
+        monkeypatch.setattr(
+            alert_mod, "_deliver",
+            lambda url, timeout, payload: captured.update(
+                url=url, timeout=timeout, payload=payload))
+        self._sync_threads(monkeypatch)
+
+        alert_mod.send_alert("task_timeout", "任务超时", "正文",
+                             {"task": "place_order"}, level="error")
+
+        assert captured["url"] == "http://127.0.0.1:9/hook"
+        body = captured["payload"]
+        assert body["service"] == "xiadan-gateway"
+        assert body["alert_type"] == "task_timeout"
+        assert body["level"] == "error"
+        assert body["title"] == "任务超时"
+        assert body["details"] == {"task": "place_order"}
+        assert body["timestamp"]
+
+    def test_text_format_for_bots(self, monkeypatch, tmp_path):
+        """text 格式 → 企业微信/钉钉机器人 {"msgtype":"text"} 结构"""
+        from src.utils import alert as alert_mod
+        self._with_config(monkeypatch, tmp_path,
+                          {"webhook_url": "https://qyapi.weixin.qq.com/x",
+                           "format": "text"})
+        captured = {}
+        monkeypatch.setattr(
+            alert_mod, "_deliver",
+            lambda url, timeout, payload: captured.update(payload=payload))
+        self._sync_threads(monkeypatch)
+
+        alert_mod.send_alert("consecutive_failures", "连续失败", "正文",
+                             {"n": 3})
+        body = captured["payload"]
+        assert body["msgtype"] == "text"
+        assert "[xiadan-gateway] 连续失败" in body["text"]["content"]
+        assert "正文" in body["text"]["content"]
+
+    def test_unknown_format_not_sent(self, monkeypatch, tmp_path):
+        """未知 format → 不发送（启动校验也会拦，此处兜底）"""
+        from src.utils import alert as alert_mod
+        self._with_config(monkeypatch, tmp_path,
+                          {"webhook_url": "http://x/hook", "format": "xml"})
+
+        def _boom(*a, **k):
+            raise AssertionError("未知格式不应发送")
+        monkeypatch.setattr(alert_mod, "_deliver", _boom)
+        self._sync_threads(monkeypatch)
+        alert_mod.send_alert("task_timeout", "t", "m")
+
+    def test_deliver_never_raises(self, monkeypatch, tmp_path):
+        """webhook 不可达/非 2xx → 只记日志，异常绝不外泄"""
+        import urllib.request
+
+        from src.utils import alert as alert_mod
+
+        def _refuse(req, timeout=None):
+            raise OSError("connection refused")
+        monkeypatch.setattr(urllib.request, "urlopen", _refuse)
+        alert_mod._deliver("http://127.0.0.1:9/hook", 1, {"alert_type": "x"})
+
+        def _non2xx(req, timeout=None):
+            import io
+
+            class _Resp:
+                status = 500
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+            return _Resp()
+        monkeypatch.setattr(urllib.request, "urlopen", _non2xx)
+        alert_mod._deliver("http://127.0.0.1:9/hook", 1, {"alert_type": "x"})
+
+    def test_config_validation_rejects_bad_alerts(self, monkeypatch, tmp_path):
+        """启动校验：非法 format / 非 http URL / 非正超时 → 报错"""
+        import json
+
+        from src.models import config as config_module
+
+        cfg = {"alerts": {"webhook_url": "ftp://x", "format": "xml",
+                          "timeout_seconds": 0}}
+        p = tmp_path / "app_config.json"
+        p.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(config_module, "CONFIG_PATH", str(p))
+        config_module.AppConfig._reset_instance()
+
+        errors = config_module.AppConfig().validate()
+        joined = "\n".join(errors)
+        assert "alerts.webhook_url" in joined
+        assert "alerts.format" in joined
+        assert "alerts.timeout_seconds" in joined
+
+
+class TestAlertCallSites:
+    """告警调用点测试：连续失败 ≥3 与弹窗漂移触发 send_alert"""
+
+    @staticmethod
+    def _capture_alerts(monkeypatch):
+        import src.api.task_queue as tq_mod
+        captured = []
+        monkeypatch.setattr(tq_mod, "send_alert",
+                            lambda *a, **k: captured.append((a, k)))
+        return captured
+
+    def test_consecutive_failures_trigger_alert(self, monkeypatch):
+        """连续失败第 3 次 → send_alert(consecutive_failures)"""
+        from src.api.task_queue import TaskQueue
+        from src.exceptions import ApiError, ErrorCode
+        captured = self._capture_alerts(monkeypatch)
+        tq = TaskQueue.get_instance()
+        tq._recent_tasks.clear()
+        tq._consecutive_failures = 0
+        try:
+            for _ in range(3):
+                from src.api.task_queue import Task
+                task = Task(lambda: None, "get_balance", {}, 30)
+                task.error = ApiError(ErrorCode.WINDOW_NOT_FOUND, "窗口没了")
+                tq._record_task_outcome(task)
+
+            assert any(a[0] == "consecutive_failures" for a, k in captured)
+        finally:
+            tq._consecutive_failures = 0
+            tq._recent_tasks.clear()
+
+    def test_dialog_drift_triggers_alert(self, monkeypatch):
+        """弹窗行为翻转 → send_alert(order_dialog_drift)"""
+        from src.api.task_queue import Task, TaskQueue
+        captured = self._capture_alerts(monkeypatch)
+        tq = TaskQueue.get_instance()
+        tq._order_dialog_stats.clear()
+        tq._last_order_had_dialog = False
+        try:
+            task = Task(lambda: None, "place_order", {"status": "1"}, 30)
+            task.window_state = {"had_dialog": True, "clean": False}
+            tq._record_task_outcome(task)
+            assert any(a[0] == "order_dialog_drift" for a, k in captured)
+        finally:
+            tq._order_dialog_stats.clear()
+            tq._last_order_had_dialog = None
+
+
 class TestWindowSetupSkipAccessors:
     """TaskQueue 跳过状态公共访问器测试（收口私有属性直接读写）"""
 

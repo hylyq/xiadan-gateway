@@ -21,6 +21,7 @@ from typing import Callable, Any, Optional, List
 from src.exceptions import TaskTimeoutError, ApiError, ErrorCode
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
+from src.utils.alert import send_alert
 from src.utils.diagnostic import DiagnosticUtil
 from src.utils.logger import Logger
 from src.utils.screenshot import ScreenshotUtil
@@ -416,6 +417,21 @@ class TaskQueue(Singleton):
             f"xiadan.exe 已重置为初始状态，HTTP 错误已返回给调用方"
         )
 
+        # 任务超时意味着「订单状态未知」——即使连续失败计数为 0 也要外推
+        # （下一条成功任务会把计数清零，但这一单的风险不受影响）
+        send_alert(
+            "task_timeout",
+            f"任务超时: {task.name}",
+            f"任务 {task.name} 执行超时（{task.elapsed():.1f}s），"
+            f"已自动恢复窗口，订单状态未知请先核实再重试",
+            details={"task": task.name,
+                     "params": task.params,
+                     "elapsed_seconds": round(task.elapsed(), 2),
+                     "screenshot": screenshot_path,
+                     "recovery_error": recovery_error},
+            level="error",
+        )
+
     def _record_task_outcome(self, task: Task) -> None:
         """记录任务结果到运行统计（#12）
 
@@ -435,11 +451,26 @@ class TaskQueue(Singleton):
                         f"⚠ 连续 {self._consecutive_failures} 次任务失败"
                         f"（最近: {error_code}）——请检查 xiadan.exe/券商状态！"
                     )
+                    send_alert(
+                        "consecutive_failures",
+                        f"连续 {self._consecutive_failures} 次任务失败",
+                        f"最近错误: {error_code}，请检查 xiadan.exe/券商状态",
+                        details={"consecutive_failures": 3,
+                                 "last_error_code": error_code},
+                    )
                 elif (self._consecutive_failures > 3
                       and self._consecutive_failures % 10 == 0):
                     self.logger.warning(
                         f"⚠ 任务已连续失败 {self._consecutive_failures} 次"
                         f"（最近: {error_code}）——建议立即人工检查！"
+                    )
+                    send_alert(
+                        "consecutive_failures",
+                        f"任务已连续失败 {self._consecutive_failures} 次",
+                        f"最近错误: {error_code}，建议立即人工检查",
+                        details={"consecutive_failures": self._consecutive_failures,
+                                 "last_error_code": error_code},
+                        level="error",
                     )
             else:
                 self._consecutive_failures = 0
@@ -469,6 +500,13 @@ class TaskQueue(Singleton):
                 f"⚠ 下单确认弹窗行为变化: {old_mode} → {new_mode} ——"
                 f"客户端「快速交易」设置可能被重置/券商升级复原，"
                 f"请人工检查客户端设置（影响无弹窗=已提交的判定）"
+            )
+            send_alert(
+                "order_dialog_drift",
+                "下单确认弹窗行为变化",
+                f"{old_mode} → {new_mode}——客户端「快速交易」设置可能"
+                f"被重置/券商升级复原，请人工检查（影响无弹窗=已提交判定）",
+                details={"from": old_mode, "to": new_mode},
             )
 
     def get_stats(self, window_seconds: int = 3600) -> dict:
