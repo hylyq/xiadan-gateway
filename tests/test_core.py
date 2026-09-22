@@ -254,6 +254,13 @@ class TestSubmitErrorClassification:
         assert code == ErrorCode.INSUFFICIENT_BALANCE, f"期望 INSUFFICIENT_BALANCE，实际 {code}"
         assert "余额不足" in msg
 
+    def test_price_required(self):
+        """请输入委托价格 → ORDER_PRICE_REQUIRED（市价类型未选择/限价未传价格）"""
+        code, msg, suggestion = self._classify("请输入委托价格")
+        from src.exceptions import ErrorCode
+        assert code == ErrorCode.ORDER_PRICE_REQUIRED, f"期望 ORDER_PRICE_REQUIRED，实际 {code}"
+        assert "限价" in suggestion
+
     def test_insufficient_balance_counter(self):
         """余额不足（柜台余额不够变体）"""
         text = "提交失败：柜台：可用余额不够。还差：300.30。"
@@ -402,6 +409,10 @@ class TestPopupDispatchRules:
          "click_no", "PRICE_OUT_OF_RANGE", True),
         ("委托价格超出范围", "",
          "click_no", "PRICE_OUT_OF_RANGE", True),
+        # 券商要求填写委托价格（市价类型未选择/不受支持，或限价未传价格）
+        # → 必须先于价格超限规则命中（"价格"关键词会截胡），2026-09-22 实测回归
+        ("请输入委托价格", "",
+         "raise_error", "ORDER_PRICE_REQUIRED", True),
         # 通用警告 → 无规则命中（调用方点「是(Y)」继续）
         ("您确定要提交这笔委托吗？", "",
          None, None, False),

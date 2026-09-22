@@ -30,6 +30,7 @@ class ErrorCode:
     INSUFFICIENT_BALANCE = "INSUFFICIENT_BALANCE" # 可用资金/余额不足（买入）
     SHORT_SELLING_FORBIDDEN = "SHORT_SELLING_FORBIDDEN" # 不允许卖空（卖出时余额不足）
     PRICE_OUT_OF_RANGE = "PRICE_OUT_OF_RANGE"     # 价格超出涨跌停限制（干净退出）
+    ORDER_PRICE_REQUIRED = "ORDER_PRICE_REQUIRED" # 券商要求填写委托价格（市价类型未选择/不受支持，或限价未传价格）
     SERVER_UNAVAILABLE = "SERVER_UNAVAILABLE"       # 券商服务器不可用（维护中）
     OCR_FAILED = "OCR_FAILED"                       # 验证码识别失败
     INTERNAL_ERROR = "INTERNAL_ERROR"               # 未知异常
@@ -62,6 +63,7 @@ HTTP_STATUS = {
     ErrorCode.INSUFFICIENT_SHARES: 400,
     ErrorCode.INSUFFICIENT_BALANCE: 400,
     ErrorCode.SHORT_SELLING_FORBIDDEN: 400,
+    ErrorCode.ORDER_PRICE_REQUIRED: 400,
     ErrorCode.SERVER_UNAVAILABLE: 503,
     ErrorCode.OCR_FAILED: 500,
     ErrorCode.INTERNAL_ERROR: 500,

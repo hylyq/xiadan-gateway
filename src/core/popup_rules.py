@@ -109,6 +109,14 @@ SUBMIT_ERROR_RULES: Tuple[ErrorRule, ...] = (
         "请检查持仓的可卖数量（冻结数量/当日买入不可卖出）后调整委托数量。",
     ),
     ErrorRule(
+        _or("请输入委托价格", "请输入价格"),
+        ErrorCode.ORDER_PRICE_REQUIRED,
+        "券商要求填写委托价格: {text}",
+        "市价模式下该券商仍要求价格（市价类型未选择或不受支持），"
+        "建议改用限价模式 (price_type=limit + price)；"
+        "限价模式请检查 price 参数是否已传。",
+    ),
+    ErrorRule(
         _or("事务处理机", "转发数据失败"),
         ErrorCode.SERVER_UNAVAILABLE,
         "券商服务器不可用: {text}",
@@ -203,6 +211,19 @@ POPUP_RULES: Tuple[PopupRule, ...] = (
     PopupRule(
         _or("提交失败", "清算中", "暂不支持"),
         "raise_error",
+    ),
+    # 券商要求填写委托价格：市价模式下市价类型未选择/不受支持（实测模拟户
+    # 市价单提交即弹"请输入委托价格"），或限价模式调用方未传 price。
+    # 必须在价格超限规则（关键词"价格"）之前，否则被误判 PRICE_OUT_OF_RANGE
+    PopupRule(
+        _or("请输入委托价格", "请输入价格"),
+        "raise_error",
+        ErrorCode.ORDER_PRICE_REQUIRED,
+        "券商要求填写委托价格: {text}",
+        "市价模式下该券商仍要求价格（市价类型未选择或不受支持），"
+        "建议改用限价模式 (price_type=limit + price)；"
+        "限价模式请检查 price 参数是否已传。",
+        clean_dismiss=True,
     ),
     # 价格超限警告 → 点「否(N)」取消，干净退出（窗口状态可信，下次同向可跳过）
     PopupRule(
