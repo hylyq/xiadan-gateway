@@ -59,6 +59,7 @@ Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──�
 | Alert webhook | Consecutive task failures ≥3, order-dialog drift, and task timeouts → POST to a webhook (generic JSON or WeCom/DingTalk `text` format) on a background thread, never blocking the trading path |
 | Input read-back verification | After typing code/quantity (exact) and price (numeric), the field content is read back; on mismatch it clears and retypes once, then raises `INPUT_VERIFY_FAILED` — guards against silent truncation when focus is stolen mid-typing (measured: only 1-3 digits left with no error) |
 | Window position self-healing | Before each task, checks window/workarea intersection (60% threshold); auto-moves the window back if it was dragged off-screen (`click_input`/screenshots are coordinate-based and fail off-screen) |
+| MCP adapter | `scripts/mcp_server.py` exposes the gateway as standard MCP tools for LLM agents — read-only queries always registered; `place_order`/`cancel_orders` only with `XIADAN_MCP_TRADING=1`; raw `/actions/*` never exposed (see [MCP Server](#mcp-server-agent-access)) |
 
 ## Prerequisites: Broker Software Settings
 
@@ -377,6 +378,58 @@ resp = requests.post(
 print(resp.json())
 ```
 
+## MCP Server (Agent Access)
+
+A thin MCP adapter ([`scripts/mcp_server.py`](scripts/mcp_server.py)) exposes the gateway as standard MCP tools, so LLM agents (Claude Desktop, ZCode, or any stdio MCP client) can query and trade without knowing the REST details:
+
+```
+MCP client ──stdio──→ mcp_server.py ──HTTP──→ gateway (Flask) ──→ xiadan.exe
+```
+
+The exposure surface is deliberately layered:
+
+| Layer | Tools | Availability |
+|-------|-------|--------------|
+| Read-only queries | `gateway_health` `get_queue_status` `get_balance` `get_positions` `get_today_trades` `get_today_orders` | always registered |
+| Trading | `place_order` `cancel_orders` | only with `XIADAN_MCP_TRADING=1` |
+| Raw UI actions (`/actions/*`), `/admin/*` | — | never exposed to agents |
+
+Safety design:
+
+- The adapter imports nothing from `src/` and never touches the trading path — queue serialization, idempotency, and alerting are all inherited via the HTTP layer
+- `place_order` maps `buy`/`sell` to `1`/`2`, validates locally (6-digit code, positive integer amount, ≤2-decimal price), **requires an explicit numeric price for limit orders** ("latest price" is rejected), and its description forces a confirm-then-verify workflow: query positions/balance → repeat the parameters verbatim to the user and get consent → place → verify with `get_today_orders`
+- Gateway auth is reused: token from `XIADAN_MCP_TOKEN`, auto-read from `config/app_config.json` if unset; requests never carry an `Origin` header (compatible with the cross-site defense)
+- Gateway errors surface as MCP `isError` results formatted as `[ERROR_CODE] message | suggestion | request_id`; an unreachable gateway returns actionable guidance instead of a stack trace
+
+Setup:
+
+```bash
+uv sync --extra mcp
+```
+
+Client registration (Claude Desktop or any stdio MCP client, same shape):
+
+```json
+{"mcpServers": {"xiadan-gateway": {
+    "command": "uv",
+    "args": ["--directory", "C:/path/to/xiadan-gateway", "--extra", "mcp",
+             "run", "python", "scripts/mcp_server.py"],
+    "env": {"XIADAN_MCP_TRADING": "1"}
+}}}
+```
+
+> ⚠️ Enable trading tools only in MCP clients that support per-call human approval, and keep approval on for `place_order`/`cancel_orders`. An LLM deciding trade parameters on its own is exactly the failure mode the explicit-price rule and the confirm-then-verify workflow exist to prevent.
+
+Configuration (environment variables, all optional):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `XIADAN_MCP_URL` | from `config/app_config.json`, else `http://127.0.0.1:5000` | gateway base URL |
+| `XIADAN_MCP_TOKEN` | `auth.token` from the config file (when auth is enabled) | auth token |
+| `XIADAN_MCP_CONFIG` | `config/app_config.json` | gateway config file path |
+| `XIADAN_MCP_TRADING` | `0` | `1`/`true` registers `place_order`/`cancel_orders` |
+| `XIADAN_MCP_TIMEOUT_SECONDS` | `60` | HTTP timeout toward the gateway (recommended ≥40) |
+
 ## Project Structure
 
 ```
@@ -420,8 +473,10 @@ xiadan-gateway/
 │       ├── poll.py              # poll-based waiting (poll_until / timed)
 │       └── diagnostic.py        # diagnostic tools (screenshot + UI text + OCR)
 ├── tests/
-│   └── test_core.py             # core-logic unit tests (no real broker client needed)
+│   ├── test_core.py             # core-logic unit tests (no real broker client needed)
+│   └── test_mcp_server.py       # MCP adapter unit tests (HTTP stubbed, no live server needed)
 ├── scripts/
+│   ├── mcp_server.py           # MCP stdio adapter (read-only by default; trading tools behind XIADAN_MCP_TRADING=1)
 │   ├── diagnose_settings.py     # broker UI structure diagnostic
 │   ├── generate_templates.py    # OCR template management (view/extract/batch-annotate)
 │   ├── train_ocr.py             # iterative OCR training (auto-triggers captchas, tracks accuracy)
@@ -680,6 +735,7 @@ The project's custom Logger accepts only a single message argument — pass para
 ```bash
 uv run pytest                          # run all tests
 uv run pytest tests/test_core.py -v    # run unit tests
+uv run --extra mcp pytest tests/test_mcp_server.py -v  # MCP adapter tests (auto-skipped without the extra)
 uv run python main.py --dev            # dev mode (hot reload)
 uv run python scripts/diagnose_settings.py  # broker UI structure diagnostic
 uv run python scripts/generate_templates.py status  # OCR template coverage status

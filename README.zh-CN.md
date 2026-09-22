@@ -59,6 +59,7 @@
 | 告警外推 | 连续任务失败≥3、下单弹窗行为漂移、任务超时 → POST webhook（generic JSON 或企业微信/钉钉 `text` 格式），后台线程发送不阻塞交易路径 |
 | 输入回读校验 | 代码/数量（精确）与价格（数值）键入后回读字段内容，不符自动清空重输一次，仍不符报 `INPUT_VERIFY_FAILED`——防打字期间焦点被抢导致的静默截断（实测代码只留 1-3 位且无报错） |
 | 窗口位置自愈 | 任务开始前检查窗口与工作区交集（阈值 60%），窗口被误拖出屏幕时自动移回（`click_input`/截图按屏幕坐标工作，出屏会失效） |
+| MCP 适配器 | `scripts/mcp_server.py` 将网关暴露为标准 MCP 工具供大模型 agent 调用——只读查询恒注册；`place_order`/`cancel_orders` 需 `XIADAN_MCP_TRADING=1`；`/actions/*` 裸操作永不暴露（见 [MCP 服务](#mcp-服务agent-接入)） |
 
 ## 前置准备：券商软件设置
 
@@ -374,6 +375,58 @@ resp = requests.post(
 print(resp.json())
 ```
 
+## MCP 服务（agent 接入）
+
+轻量 MCP 适配器（[`scripts/mcp_server.py`](scripts/mcp_server.py)）将网关能力包装为标准 MCP 工具，大模型 agent（Claude Desktop、ZCode 等任意 stdio MCP 客户端）无需了解 REST 细节即可查询与交易：
+
+```
+MCP 客户端 ──stdio──→ mcp_server.py ──HTTP──→ 网关(Flask) ──→ xiadan.exe
+```
+
+暴露面刻意分层：
+
+| 层 | 工具 | 可用性 |
+|----|------|--------|
+| 只读查询 | `gateway_health` `get_queue_status` `get_balance` `get_positions` `get_today_trades` `get_today_orders` | 恒注册 |
+| 交易 | `place_order` `cancel_orders` | 仅 `XIADAN_MCP_TRADING=1` 时注册 |
+| 裸 UI 操作（`/actions/*`）、`/admin/*` | — | 永不暴露给 agent |
+
+安全设计：
+
+- 适配器不 import `src/` 任何模块、不进交易路径——队列串行化、幂等、告警全部经 HTTP 层自动继承
+- `place_order` 将 `buy`/`sell` 映射为 `1`/`2`，本地前置校验（6 位代码、正整数数量、价格最多 2 位小数），限价单**必须显式数值价格**（拒绝"最新价"等模糊语义），工具描述强制「先查询 → 向用户逐字复述参数并确认 → 下单 → `get_today_orders()` 核对」工作流
+- 认证复用网关 token：优先 `XIADAN_MCP_TOKEN` 环境变量，缺省自动回读 `config/app_config.json`；请求永不携带 `Origin` 头（与跨站防御兼容）
+- 网关错误以 MCP `isError` 结果返回，格式为 `[ERROR_CODE] message | 建议 | request_id`；网关未启动时返回带启动指引的提示而非堆栈
+
+安装：
+
+```bash
+uv sync --extra mcp
+```
+
+客户端注册（Claude Desktop 或任意 stdio MCP 客户端，结构相同）：
+
+```json
+{"mcpServers": {"xiadan-gateway": {
+    "command": "uv",
+    "args": ["--directory", "C:/path/to/xiadan-gateway", "--extra", "mcp",
+             "run", "python", "scripts/mcp_server.py"],
+    "env": {"XIADAN_MCP_TRADING": "1"}
+}}}
+```
+
+> ⚠️ 仅在支持「逐次工具调用人工确认」的 MCP 客户端中开启交易工具，且 `place_order`/`cancel_orders` 的确认不要关——显式价格规则与复述确认工作流，防的正是 LLM 自行决定交易参数这一失败模式。
+
+配置（环境变量，均可缺省）：
+
+| 变量 | 缺省值 | 含义 |
+|------|--------|------|
+| `XIADAN_MCP_URL` | 读 `config/app_config.json`，否则 `http://127.0.0.1:5000` | 网关基地址 |
+| `XIADAN_MCP_TOKEN` | 配置文件 `auth.token`（启用认证时） | 认证 token |
+| `XIADAN_MCP_CONFIG` | `config/app_config.json` | 网关配置文件路径 |
+| `XIADAN_MCP_TRADING` | `0` | `1`/`true` 注册 `place_order`/`cancel_orders` |
+| `XIADAN_MCP_TIMEOUT_SECONDS` | `60` | 对网关的 HTTP 超时（建议 ≥40） |
+
 ## 项目结构
 
 ```
@@ -417,8 +470,10 @@ xiadan-gateway/
 │       ├── poll.py              # 轮询等待（poll_until / timed）
 │       └── diagnostic.py        # 诊断工具（截图 + UI 文本 + OCR）
 ├── tests/
-│   └── test_core.py             # 核心逻辑单元测试（无需真实券商客户端）
+│   ├── test_core.py             # 核心逻辑单元测试（无需真实券商客户端）
+│   └── test_mcp_server.py       # MCP 适配层单元测试（桩掉 HTTP，不启动真实服务）
 ├── scripts/
+│   ├── mcp_server.py           # MCP stdio 适配器（缺省只读；交易工具需 XIADAN_MCP_TRADING=1）
 │   ├── diagnose_settings.py     # 券商 UI 结构诊断脚本
 │   ├── generate_templates.py    # OCR 模板管理（查看/提取/批量标注）
 │   ├── train_ocr.py             # OCR 迭代训练（自动触发验证码 + 追踪准确率）
@@ -677,6 +732,7 @@ Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 间隔 0.15s)
 ```bash
 uv run pytest                          # 运行全部测试
 uv run pytest tests/test_core.py -v    # 运行单元测试
+uv run --extra mcp pytest tests/test_mcp_server.py -v  # MCP 适配层测试（未装 extra 时自动跳过）
 uv run python main.py --dev            # 开发模式（热加载）
 uv run python scripts/diagnose_settings.py  # 券商 UI 结构诊断
 uv run python scripts/generate_templates.py status  # OCR 模板覆盖状态
