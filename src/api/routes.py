@@ -11,6 +11,7 @@ import hmac
 from flask import Flask, request
 
 from src.exceptions import ErrorCode
+from src.constants import TRADING_WINDOW_TITLE
 from src.api.response import (
     generate_request_id,
     success_response, error_response
@@ -122,10 +123,21 @@ def _register_system_routes(app: Flask) -> None:
             except Exception:
                 pass
 
+        # 登录态检测：主窗口存在 ≈ 已登录（登录前/会话断开时该窗口
+        # 不存在、仅进程在——旧版只报 xiadan_running 会漏掉这种断供场景）。
+        # FindWindow 精确标题匹配微秒级，适配监控探活频率调用
+        logged_in = False
+        try:
+            import win32gui
+            logged_in = bool(win32gui.FindWindow(None, TRADING_WINDOW_TITLE))
+        except Exception:
+            pass
+
         return success_response({
             "service": "xiadan-gateway",
             "version": "1.0.0",
             "xiadan_running": xiadan_running,
+            "logged_in": logged_in,
             # 注意: 不返回 trading_app_paths（本机路径不对未认证访客暴露）
             "queue_status": task_queue.get_status(),
             "stats": task_queue.get_stats(),

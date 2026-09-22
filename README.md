@@ -239,7 +239,7 @@ PopupRule(
 
 | Method | Path | Description | Queued | timeout |
 |--------|------|-------------|:---:|--------|
-| GET | `/health` | Health check + recommended client timeout + runtime stats (success rates / error-code aggregates / consecutive failures) | | 5s |
+| GET | `/health` | Health check + login state (`logged_in`) + recommended client timeout + runtime stats (success rates / error-code aggregates / consecutive failures / order-dialog stats) | | 5s |
 | GET | `/queue/status` | Task queue status | | 5s |
 | POST | `/admin/reload-config` | Hot reload config | | 5s |
 | GET | `/account/balance` | Account balance | ✓ | 40s |
@@ -459,11 +459,11 @@ All operations run sequentially on a single worker thread (`TaskQueue`) to avoid
 
 | Method | Needs foreground | Use case |
 |--------|:---:|----------|
-| `keybd_event` + `background=True` | ✗ | Function keys when the window is already confirmed foreground (skips redundant activation) |
+| `keybd_event` + `background=True` | ✗ | Function keys (self-verifies foreground: zero-overhead direct send when already foreground; auto-activates if the window was switched away — keys never leak into the wrong window) |
 | `keybd_event` | ✓ | Function keys F1–F12, Ctrl+C combos |
 | `PostMessage` | ✗ | Letter keys Y/N, ENTER (no focus stealing in background) |
 
-Function keys go through foreground sending by default (`PostMessage` cannot trigger window shortcuts), with `click_input()` + `GetForegroundWindow()` handle verification before sending to ensure the window is in the foreground. If the caller already activated the window (e.g. `place_order()` step 1), pass `background=True` to skip the redundant activation, saving `click_input()` + `sleep(0.3s)` ×2 (~0.6s).
+Function keys go through foreground sending by default (`PostMessage` cannot trigger window shortcuts), with `click_input()` + `GetForegroundWindow()` handle verification before sending to ensure the window is in the foreground. `background=True` means "the caller already activated the window" (e.g. `place_order()` step 1) and skips the redundant activation, saving `click_input()` + `sleep(0.3s)` ×2 (~0.6s) — but it first runs a handle-level foreground self-check (microseconds): if the window was switched away, the full activation flow runs before sending, so keys never go into the wrong window (measured: an F4 sent into the void left the query page wrong and tree-node clicks unregistered, adding ~1.5s of navigation retries).
 
 ### Ctrl+C Double-Send Mechanism
 

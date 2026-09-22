@@ -239,7 +239,7 @@ PopupRule(
 
 | 方法 | 路径 | 说明 | 入队 | timeout |
 |------|------|------|:---:|--------|
-| GET | `/health` | 健康检查 + 推荐客户端 timeout + 运行统计（成功率/错误码聚合/连续失败） | | 5s |
+| GET | `/health` | 健康检查 + 登录态（`logged_in`）+ 推荐客户端 timeout + 运行统计（成功率/错误码聚合/连续失败/下单弹窗统计） | | 5s |
 | GET | `/queue/status` | 任务队列状态 | | 5s |
 | POST | `/admin/reload-config` | 热重载配置 | | 5s |
 | GET | `/account/balance` | 资金余额 | ✓ | 40s |
@@ -456,11 +456,11 @@ xiadan-gateway/
 
 | 方式 | 依赖前台 | 适用场景 |
 |------|:---:|------|
-| `keybd_event` + `background=True` | ✗ | 已确认窗口在前台时的功能键（跳过冗余激活） |
+| `keybd_event` + `background=True` | ✗ | 功能键（自校验前台：已在前台零开销直发；被切走自动补激活，绝不发进错误窗口） |
 | `keybd_event` | ✓ | 功能键 F1-F12、Ctrl+C 组合键 |
 | `PostMessage` | ✗ | 字母键 Y/N、ENTER（后台不抢焦点） |
 
-功能键默认走前台发送（`PostMessage` 无法触发窗口快捷键），发送前用 `click_input()` + `GetForegroundWindow()` 句柄校验确保窗口在前台。若调用方已自行激活窗口（如 `place_order()` 步骤 1），可传 `background=True` 跳过冗余激活，省去 `click_input()` + `sleep(0.3s)` ×2 的开销（~0.6s）。
+功能键默认走前台发送（`PostMessage` 无法触发窗口快捷键），发送前用 `click_input()` + `GetForegroundWindow()` 句柄校验确保窗口在前台。`background=True` 表示"调用方已自行激活窗口"（如 `place_order()` 步骤 1），跳过冗余激活省 ~0.6s——但会先做句柄级前台自校验（微秒级）：窗口被切走时自动补完整激活流程再发，绝不把按键发进错误窗口（实测 F4 发空会导致查询页不对、树节点点击未注册，导航多花 ~1.5s）。
 
 ### Ctrl+C 双发机制
 
