@@ -18,6 +18,7 @@ from src.constants import CANCEL_TYPE_MAP
 from src.core.trader import Trader
 from src.exceptions import ApiError, ErrorCode
 from src.models.config import AppConfig
+from src.services.position_service import PositionService
 from src.services.window_service import WindowService
 from src.utils.logger import Logger
 
@@ -26,6 +27,56 @@ order_bp = Blueprint("order", __name__)
 
 def _get_trader() -> Trader:
     return Trader(WindowService())
+
+
+def _maybe_verify_entrust_no(config: AppConfig, task_queue: TaskQueue, result: dict) -> dict:
+    """entrust_no 可选自动对账（order.verify_entrust_no 门控）
+
+    横幅截获的委托号与券商最终落表号在极端场景（服务器维护窗口）可能
+    不一致（2026-09 模拟盘实测，README 有契约说明）。开启本选项后，
+    下单成功且拿到委托号时自动追加一笔当日委托查询核对——链式入队，
+    与其他任务同队列串行，不破坏 worker 单线程假设。
+
+    对账结果附加到 entrust_no_verified 字段：
+    - True  = 横幅号在当日委托落表号中命中
+    - False = 未命中（横幅号可能不准，应以查询落表为准）
+    - None  = 对账查询失败（网络/窗口/验证码等），下单结果语义不变
+
+    对账绝不改变下单成败判定，只附加信息；开启后接口总耗时增加一次
+    查询（~6s，队列繁忙时更久），调用方 timeout 需相应放大。
+    """
+    order_cfg = config.get_order_config()
+    if not (order_cfg.get("verify_entrust_no")
+            and result.get("confirmed") and result.get("entrust_no")):
+        return result
+
+    entrust_no = str(result["entrust_no"])
+    logger = Logger.get_instance()
+    try:
+        query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
+        orders = task_queue.submit(
+            func=lambda: PositionService(WindowService()).get_today_orders(),
+            task_name="get_today_orders",
+            params={"verify_entrust_no": entrust_no},
+            timeout=query_timeout,
+        )
+        booked = {
+            str(row[key]).strip()
+            for row in (orders or []) if isinstance(row, dict)
+            for key in ("合同编号", "委托编号") if row.get(key)
+        }
+        result["entrust_no_verified"] = entrust_no in booked
+        if not result["entrust_no_verified"]:
+            logger.warning(
+                f"entrust_no 对账未命中: 横幅号 {entrust_no} 不在当日委托"
+                f"落表号中（以 GET /orders/pending 查询为准）"
+            )
+        else:
+            logger.info(f"entrust_no 对账命中: {entrust_no}")
+    except Exception as e:
+        result["entrust_no_verified"] = None
+        logger.warning(f"entrust_no 对账查询失败（不影响下单结果）: {e}")
+    return result
 
 
 @order_bp.route("/orders", methods=["POST"])
@@ -144,6 +195,7 @@ def xiadan():
             },
             timeout=order_timeout
         )
+        result = _maybe_verify_entrust_no(config, task_queue, result)
         return success_response(result, request_id, duration_ms=(time.time() - _start) * 1000)
     except Exception as e:
         # 任务可能仍在执行/排队（看门狗超时、队列超时）时保留幂等记录，

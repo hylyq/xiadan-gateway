@@ -1600,6 +1600,105 @@ class TestIdempotencyKeyRoute:
         assert r2.get_json()["error_code"] == "DUPLICATE_ORDER"
 
 
+class TestEntrustNoVerification:
+    """entrust_no 自动对账测试（order.verify_entrust_no，链式入队查询）"""
+
+    @staticmethod
+    def _make_client(monkeypatch, tmp_path, verify=True):
+        import json
+
+        from src.models import config as config_module
+
+        cfg = {"order": {"capture_entrust_no": True, "verify_entrust_no": verify}}
+        p = tmp_path / "app_config.json"
+        p.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(config_module, "CONFIG_PATH", str(p))
+        config_module.AppConfig._reset_instance()
+
+        from src.api.idempotency import IdempotencyChecker
+        IdempotencyChecker._reset_instance()
+
+        from src.api.routes import create_app
+        app = create_app()
+        app.config["TESTING"] = True
+        return app.test_client()
+
+    @staticmethod
+    def _stub_submit(monkeypatch, handler):
+        """handler(task_name, params) → 返回值 / 抛异常"""
+        from src.api.task_queue import TaskQueue
+        monkeypatch.setattr(TaskQueue, "submit",
+                            lambda self, func, task_name, params, timeout=None:
+                            handler(task_name, params))
+
+    def test_verified_hit(self, monkeypatch, tmp_path):
+        """下单拿到委托号 → 查当日委托命中 → entrust_no_verified=True"""
+        def _handler(task_name, params):
+            if task_name == "place_order":
+                return {"confirmed": True, "entrust_no": "6246860043"}
+            assert params["verify_entrust_no"] == "6246860043"
+            return [{"合同编号": "6246860043", "证券代码": "601991"}]
+
+        self._stub_submit(monkeypatch, _handler)
+        client = self._make_client(monkeypatch, tmp_path)
+        r = client.post("/orders", json={"code": "601991", "status": "1", "amount": "100"})
+        body = r.get_json()
+        assert body["status"] == "success"
+        assert body["data"]["confirmed"] is True
+        assert body["data"]["entrust_no_verified"] is True
+
+    def test_verified_miss(self, monkeypatch, tmp_path):
+        """落表号不含横幅号 → entrust_no_verified=False（下单仍 success）"""
+        def _handler(task_name, params):
+            if task_name == "place_order":
+                return {"confirmed": True, "entrust_no": "6246860043"}
+            return [{"合同编号": "999", "证券代码": "601991"}]
+
+        self._stub_submit(monkeypatch, _handler)
+        client = self._make_client(monkeypatch, tmp_path)
+        r = client.post("/orders", json={"code": "601991", "status": "1", "amount": "100"})
+        body = r.get_json()
+        assert body["status"] == "success", "对账未命中不改变下单成功语义"
+        assert body["data"]["entrust_no_verified"] is False
+
+    def test_verify_query_failure_returns_none(self, monkeypatch, tmp_path):
+        """对账查询失败 → verified=None，不影响下单成功响应"""
+        from src.exceptions import ApiError, ErrorCode
+
+        def _handler(task_name, params):
+            if task_name == "get_today_orders":
+                raise ApiError(ErrorCode.OCR_FAILED, "验证码识别失败", suggestion="重试")
+            return {"confirmed": True, "entrust_no": "6246860043"}
+
+        self._stub_submit(monkeypatch, _handler)
+        client = self._make_client(monkeypatch, tmp_path)
+        r = client.post("/orders", json={"code": "601991", "status": "1", "amount": "100"})
+        body = r.get_json()
+        assert body["status"] == "success"
+        assert body["data"]["entrust_no_verified"] is None
+
+    def test_disabled_or_no_entrust_no_skips_query(self, monkeypatch, tmp_path):
+        """未开启对账 / 未拿到委托号 → 不追加查询任务"""
+        submitted = []
+
+        def _handler(task_name, params):
+            submitted.append(task_name)
+            return {"confirmed": True}  # 无 entrust_no
+
+        self._stub_submit(monkeypatch, _handler)
+
+        # 开启但无 entrust_no → 不查询
+        client = self._make_client(monkeypatch, tmp_path, verify=True)
+        client.post("/orders", json={"code": "601991", "status": "1", "amount": "100"})
+        assert "get_today_orders" not in submitted
+
+        # 关闭对账 → 不查询
+        submitted.clear()
+        client = self._make_client(monkeypatch, tmp_path, verify=False)
+        client.post("/orders", json={"code": "601991", "status": "1", "amount": "100"})
+        assert "get_today_orders" not in submitted
+
+
 class TestCrossSiteRejection:
     """跨站防御测试（#12：带 Origin 头的浏览器请求一律拒绝，防恶意网页触发交易）"""
 
