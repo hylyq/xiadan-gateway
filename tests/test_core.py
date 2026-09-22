@@ -103,6 +103,61 @@ class TestTradingHoursCheck:
         ok, _reason = check_trading_hours(self._at(2026, 9, 13, 14, 0))
         assert ok is False
 
+    # ── 法定节假日（chinesecalendar，优雅降级） ──────────────────
+
+    @staticmethod
+    def _fake_calendar(monkeypatch, is_workday_impl=None, absent=False):
+        """伪造/移除 chinese_calendar 模块，模拟依赖缺失与数据边界"""
+        import sys
+        import types
+
+        if absent:
+            # sys.modules 中置 None → from ... import 抛 ImportError
+            monkeypatch.setitem(sys.modules, "chinese_calendar", None)
+            return
+        mod = types.ModuleType("chinese_calendar")
+        mod.is_workday = is_workday_impl or (lambda d: True)
+        monkeypatch.setitem(sys.modules, "chinese_calendar", mod)
+
+    def test_weekday_holiday_rejected(self, monkeypatch):
+        """工作日但为法定节假日 → 拒绝（依赖可用时）"""
+        self._fake_calendar(monkeypatch, is_workday_impl=lambda d: False)
+        ok, reason = check_trading_hours(self._at(2026, 10, 1, 10, 0))
+        assert ok is False
+        assert "节假日" in reason
+
+    def test_weekday_workday_allowed(self, monkeypatch):
+        """工作日且非节假日 → 正常按时段判定（上午盘放行）"""
+        self._fake_calendar(monkeypatch, is_workday_impl=lambda d: True)
+        ok, _reason = check_trading_hours(self._at(2026, 9, 15, 10, 0))
+        assert ok is True
+
+    def test_calendar_data_uncovered_degrades_to_weekday(self, monkeypatch):
+        """数据未覆盖该年份（NotImplementedError）→ 退回工作日粗判放行"""
+        def _raise(d):
+            raise NotImplementedError("no data for year")
+        self._fake_calendar(monkeypatch, is_workday_impl=_raise)
+        ok, _reason = check_trading_hours(self._at(2027, 1, 5, 10, 0))
+        assert ok is True
+
+    def test_calendar_absent_degrades_to_weekday(self, monkeypatch):
+        """未安装 chinesecalendar → 行为与旧版一致（工作日放行）"""
+        self._fake_calendar(monkeypatch, absent=True)
+        ok, _reason = check_trading_hours(self._at(2026, 9, 15, 10, 0))
+        assert ok is True
+
+    def test_real_calendar_national_day_2026(self):
+        """集成锚点：2026-10-01（周四，国庆）→ 真实数据判定拒绝"""
+        ok, reason = check_trading_hours(self._at(2026, 10, 1, 10, 0))
+        assert ok is False
+        assert "节假日" in reason
+
+    def test_swap_weekend_still_rejected(self):
+        """调休补班的周末（2026-10-10 周六 is_workday=True）→ 仍按周末拒绝"""
+        ok, reason = check_trading_hours(self._at(2026, 10, 10, 10, 0))
+        assert ok is False
+        assert "周末" in reason
+
 
 class TestTableDataFormatting:
     """表格数据解析测试"""

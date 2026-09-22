@@ -15,6 +15,7 @@ dependencies = [
     "pyautogui>=0.9.54",
     "pillow>=10.0.0",
     "waitress>=3.0.2",
+    "chinesecalendar>=1.11.0",
 ]
 
 [project.optional-dependencies]

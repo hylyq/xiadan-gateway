@@ -29,10 +29,39 @@ _TRADING_SESSIONS = (
 )
 
 
-def check_trading_hours(now: datetime = None) -> tuple:
-    """交易时段预检（工作日 + 时段粗判，快速失败用）
+def _is_market_holiday(n: datetime) -> tuple:
+    """法定节假日判断（可选口径增强，失败优雅降级）
 
-    不含节假日历：法定节假日的工作日时段内会放行，由券商报错兜底
+    依赖 chinesecalendar 包判断工作日是否为法定节假日。依赖缺失
+    （未安装）或数据未覆盖该年份（NotImplementedError）时静默退回
+    工作日粗判——节假日放行由券商报错兜底（既有行为），不阻塞下单。
+
+    口径说明：只对「周一至周五但为法定节假日」生效。调休补班的
+    周末 A 股同样休市，周末判断已在 check_trading_hours 前置处理，
+    不受 is_workday 对调休周末返回 True 的影响。
+
+    Returns:
+        (是否节假日休市, 拒绝原因)——非节假日原因为空串
+    """
+    try:
+        from chinese_calendar import is_workday
+    except ImportError:
+        return False, ""
+    try:
+        if not is_workday(n.date()):
+            return True, "法定节假日休市"
+    except NotImplementedError:
+        pass  # 数据未覆盖该年份，退回工作日粗判
+    except Exception:
+        pass  # 节假日判断失败不阻塞下单主流程
+    return False, ""
+
+
+def check_trading_hours(now: datetime = None) -> tuple:
+    """交易时段预检（周末/节假日 + 时段粗判，快速失败用）
+
+    节假日判断依赖 chinesecalendar（见 _is_market_holiday 的降级说明）：
+    法定节假日的工作日时段直接拒绝；数据未覆盖时由券商报错兜底
     （OUTSIDE_TRADING_HOURS / SERVER_CLEARING）。仅在配置
     order.reject_outside_trading_hours=true 时被调用。
 
@@ -43,8 +72,11 @@ def check_trading_hours(now: datetime = None) -> tuple:
         (是否可下单, 拒绝原因)——允许时原因为空串
     """
     n = now or datetime.now()
-    if n.weekday() >= 5:  # 5=周六 6=周日
+    if n.weekday() >= 5:  # 5=周六 6=周日（调休补班的周末同样休市）
         return False, "周末非交易时段"
+    is_holiday, holiday_reason = _is_market_holiday(n)
+    if is_holiday:
+        return False, holiday_reason
     t = n.time()
     for start, end in _TRADING_SESSIONS:
         if start <= t <= end:
