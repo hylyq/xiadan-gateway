@@ -269,8 +269,8 @@ class AppConfig(Singleton):
         elif url and not str(url).strip().startswith(("http://", "https://")):
             errors.append(f"alerts.webhook_url 必须以 http:// 或 https:// 开头，当前: {url!r}")
         fmt = acfg.get("format")
-        if fmt is not None and fmt not in ("generic", "text"):
-            errors.append(f"alerts.format 必须是 'generic' 或 'text'，当前: {fmt!r}")
+        if fmt is not None and fmt not in ("generic", "text", "feishu"):
+            errors.append(f"alerts.format 必须是 'generic'、'text' 或 'feishu'，当前: {fmt!r}")
         v = acfg.get("timeout_seconds")
         if v is not None:
             try:

@@ -1915,6 +1915,48 @@ class TestAlertWebhook:
         assert "[xiadan-gateway] 连续失败" in body["text"]["content"]
         assert "正文" in body["text"]["content"]
 
+    def test_feishu_format(self, monkeypatch, tmp_path):
+        """feishu 格式 → 飞书机器人 {"msg_type":"text","content":{...}} 结构
+        （与企业微信的 msgtype/text 结构不同，不能混用）"""
+        from src.utils import alert as alert_mod
+        self._with_config(monkeypatch, tmp_path,
+                          {"webhook_url": "https://open.larksuite.com/x",
+                           "format": "feishu"})
+        captured = {}
+        monkeypatch.setattr(
+            alert_mod, "_deliver",
+            lambda url, timeout, payload: captured.update(payload=payload))
+        self._sync_threads(monkeypatch)
+
+        alert_mod.send_alert("task_timeout", "任务超时", "正文", {"a": 1})
+        body = captured["payload"]
+        assert body["msg_type"] == "text"
+        assert "content" in body and "msgtype" not in body
+        assert "[xiadan-gateway] 任务超时" in body["content"]["text"]
+
+    def test_deliver_detects_bot_business_error(self, monkeypatch):
+        """飞书/企微业务错误（HTTP 200 + code≠0）→ 识别为失败而非误报成功"""
+        import urllib.request
+
+        from src.utils import alert as alert_mod
+
+        class _Resp:
+            status = 200
+
+            def read(self, n):
+                return b'{"code": 19003, "msg": "signature mismatch"}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: _Resp())
+        alert_mod._deliver("https://open.larksuite.com/x", 5,
+                           {"msg_type": "text", "content": {"text": "x"}})
+        # 不抛异常即通过；失败细节已记 warning 日志
+
     def test_unknown_format_not_sent(self, monkeypatch, tmp_path):
         """未知 format → 不发送（启动校验也会拦，此处兜底）"""
         from src.utils import alert as alert_mod

@@ -133,7 +133,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
 | `task_queue.max_size` | 50 | Max queue length |
 | `idempotency.order_dedup_window_seconds` | 60 | Order dedup window (seconds) |
 | `alerts.webhook_url` | empty | Alert webhook (**empty=disabled**): consecutive task failures ≥3, order-dialog behavior drift, and watchdog timeouts POST JSON in the background; hot-reloadable |
-| `alerts.format` | generic | `generic`=full structured JSON (custom receiver); `text`=WeCom group-bot / DingTalk custom-bot text format |
+| `alerts.format` | generic | `generic`=full structured JSON (custom receiver); `text`=WeCom group-bot / DingTalk custom-bot text format; `feishu`=Feishu/Lark custom-bot text format |
 | `alerts.timeout_seconds` | 5 | Webhook POST timeout (seconds). Sent on a background daemon thread, never blocks the trading path |
 | `ocr.max_retry` | 3 | Max captcha OCR retries |
 | `order.reject_outside_trading_hours` | false | Fail fast at `place_order` entry outside trading hours (weekday + statutory holidays via chinesecalendar + 9:15-11:30 / 13:00-15:00; degrades to weekday-only when the package is missing or its data doesn't cover the year — broker errors remain the fallback). Off by default to preserve after-hours order queuing |
