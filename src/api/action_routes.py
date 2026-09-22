@@ -17,6 +17,7 @@ from src.api.task_queue import TaskQueue
 from src.exceptions import ErrorCode
 from src.models.config import AppConfig
 from src.services.window_service import WindowService
+from src.utils.logger import Logger
 
 action_bp = Blueprint("action", __name__)
 
@@ -149,14 +150,39 @@ def diagnostic_snapshot():
     返回当前交易窗口的截图和 OCR 识别结果，
     用于开发测试时验证每一步操作的界面状态。
     不入队，立即返回。
+
+    与 worker 的并发策略：诊断的价值在于 worker 卡死时也能取到界面
+    状态，因此不强制排队。worker 忙时先让位等待（最多 2s，降低与
+    任务 UIA 操作的并发窗口），仍忙则照常执行——snapshot 各环节
+    自带 try/except，瞬时 COM 冲突不会 500。响应携带 worker_busy /
+    current_task 字段，调用方可据此判断快照与任务并发时的可信度。
     """
     from src.utils.diagnostic import DiagnosticUtil
+
+    task_queue = TaskQueue.get_instance()
+
+    # worker 忙时短暂让位（最多 2s）
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if task_queue.get_status()["current_task"] is None:
+            break
+        time.sleep(0.2)
+
     info = DiagnosticUtil().snapshot("api_diagnostic")
+    status = task_queue.get_status()
+    busy = status["current_task"] is not None
+    if busy:
+        Logger.get_instance().warning(
+            f"诊断快照与任务 {status['current_task']} 并发执行（让位等待 2s 超时），"
+            f"快照可能混入任务中间态"
+        )
     return success_response({
         "screenshot": info.get("screenshot"),
         "ui_text": info.get("ui_text", ""),
         "ocr_text": info.get("ocr_text", ""),
         "ocr_failed": info.get("ocr_failed", True),
+        "worker_busy": busy,
+        "current_task": status["current_task"],
     })
 
 

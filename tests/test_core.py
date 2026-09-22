@@ -1391,6 +1391,68 @@ class TestIdempotencyRecordRetention:
         chk.check_and_record("601991", "1", "100", "10.50", "limit", idem_key="retry-xyz")
 
 
+class TestDiagnosticSnapshotConcurrency:
+    """诊断快照并发保护测试：响应携带 worker_busy，忙时告警不 500"""
+
+    @staticmethod
+    def _make_client(monkeypatch, tmp_path):
+        import json
+
+        from src.models import config as config_module
+
+        p = tmp_path / "app_config.json"
+        p.write_text(json.dumps({}, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(config_module, "CONFIG_PATH", str(p))
+        config_module.AppConfig._reset_instance()
+
+        from src.api.routes import create_app
+        app = create_app()
+        app.config["TESTING"] = True
+
+        # 快照不真正截图/UIA 遍历（测试环境无交易窗口）
+        from src.utils.diagnostic import DiagnosticUtil
+        monkeypatch.setattr(
+            DiagnosticUtil, "snapshot",
+            lambda self, prefix, window=None: {
+                "screenshot": None, "ui_text": "fake",
+                "ocr_text": "", "ocr_failed": True})
+
+        return app.test_client()
+
+    @staticmethod
+    def _set_worker_status(monkeypatch, current_task):
+        from src.api.task_queue import TaskQueue
+        monkeypatch.setattr(
+            TaskQueue, "get_status",
+            lambda self: {
+                "queue_size": 0, "max_size": 50, "worker_alive": True,
+                "current_task": current_task,
+                "current_task_duration": 1.0 if current_task else None,
+                "is_zombie": False})
+
+    def test_idle_worker_snapshot_not_busy(self, monkeypatch, tmp_path):
+        """worker 空闲 → 快照正常返回，worker_busy=False"""
+        client = self._make_client(monkeypatch, tmp_path)
+        self._set_worker_status(monkeypatch, None)
+
+        r = client.get("/diagnostic/snapshot")
+        body = r.get_json()
+        assert body["status"] == "success"
+        assert body["data"]["worker_busy"] is False
+        assert body["data"]["current_task"] is None
+
+    def test_busy_worker_snapshot_marks_concurrent(self, monkeypatch, tmp_path):
+        """worker 忙 → 快照仍返回（诊断不被卡死任务阻塞），但标记 worker_busy"""
+        client = self._make_client(monkeypatch, tmp_path)
+        self._set_worker_status(monkeypatch, "place_order")
+
+        r = client.get("/diagnostic/snapshot")
+        body = r.get_json()
+        assert body["status"] == "success", "快照必须不被繁忙 worker 阻塞为错误"
+        assert body["data"]["worker_busy"] is True
+        assert body["data"]["current_task"] == "place_order"
+
+
 class TestIdempotencyKeyRoute:
     """下单路由 Idempotency-Key 请求头集成测试（Flask test client）"""
 
