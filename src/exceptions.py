@@ -33,6 +33,7 @@ class ErrorCode:
     ORDER_PRICE_REQUIRED = "ORDER_PRICE_REQUIRED" # 券商要求填写委托价格（市价类型未选择/不受支持，或限价未传价格）
     SERVER_UNAVAILABLE = "SERVER_UNAVAILABLE"       # 券商服务器不可用（维护中）
     OCR_FAILED = "OCR_FAILED"                       # 验证码识别失败
+    INPUT_VERIFY_FAILED = "INPUT_VERIFY_FAILED"     # 输入回读校验失败（焦点抢占/自动补全导致截断）
     INTERNAL_ERROR = "INTERNAL_ERROR"               # 未知异常
 
     # 队列相关 (503)
@@ -66,6 +67,7 @@ HTTP_STATUS = {
     ErrorCode.ORDER_PRICE_REQUIRED: 400,
     ErrorCode.SERVER_UNAVAILABLE: 503,
     ErrorCode.OCR_FAILED: 500,
+    ErrorCode.INPUT_VERIFY_FAILED: 500,
     ErrorCode.INTERNAL_ERROR: 500,
     ErrorCode.QUEUE_TIMEOUT: 503,
     ErrorCode.QUEUE_FULL: 503,

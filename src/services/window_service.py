@@ -642,13 +642,22 @@ class WindowService(Singleton):
                 time.sleep(delay)
 
     def input_text_to_element(self, window, control_id, text: str, delay: float = 0.3,
-                              descendants=None) -> bool:
+                              descendants=None, verify: Optional[str] = None) -> bool:
         """向输入框输入文本（先清空已有内容，再输入新内容）
 
         清空策略（由快到慢）：
         1. WM_SETTEXT 直接置空（最快，跳过 UI 渲染）
         2. type_keys {HOME}+{END}{BACKSPACE} 全选删除（兜底）
         3. 验证：若券商自动填充重新出现，再清一次
+
+        Args:
+            verify: 输入回读校验模式（2026-09-22 新增，防静默截断——
+                    实测下单时代码字段只留下 1-3 位，焦点被抢/自动补全
+                    重写导致，且无任何报错）：
+                    - None      不校验（默认，向后兼容）
+                    - "exact"   回读文本与期望完全一致
+                    - "numeric" 按数值比较（容忍 "10.5" vs "10.50" 格式差异）
+                    不符则清空重输一次，仍不符抛 INPUT_VERIFY_FAILED。
         """
         try:
             element = self.find_element_in_window(window, control_id, descendants=descendants)
@@ -690,14 +699,67 @@ class WindowService(Singleton):
                 pass
 
             element.type_keys(text)
+
+            # 输入回读校验：type_keys 是真实键盘事件，打字期间焦点被抢
+            # （鼠标点击/输入法）或券商自动补全重写内容会导致静默截断。
+            # 不符则清空重输一次，仍不符显式报错，绝不带残缺内容提交
+            if verify:
+                if not self._verify_input_text(element, text, verify):
+                    self.logger.warning(
+                        f"输入校验失败 control_id={control_id}"
+                        f"（期望 '{text}'），清空重输一次"
+                    )
+                    element.type_keys("{HOME}+{END}{BACKSPACE}")
+                    time.sleep(0.1)
+                    element.type_keys(text)
+                    if not self._verify_input_text(element, text, verify):
+                        actual = ""
+                        try:
+                            actual = (element.window_text() or "").strip()
+                        except Exception:
+                            pass
+                        self.logger.error(
+                            f"输入回读校验失败 control_id={control_id}: "
+                            f"期望 '{text}'，实际 '{actual}'"
+                        )
+                        raise ApiError(
+                            ErrorCode.INPUT_VERIFY_FAILED,
+                            f"输入校验失败: 期望 '{text}'，实际 '{actual}'",
+                            suggestion="输入过程中焦点可能被抢占（下单期间请勿"
+                                       "操作鼠标/输入法），请重试；若反复出现"
+                                       "请联系维护者排查",
+                            details={"control_id": control_id, "expected": text,
+                                     "actual": actual, "mode": verify},
+                        )
+
             self.logger.info(
                 f"输入文本 control_id={control_id}: {text}"
                 f"{' (WM_SETTEXT)' if cleared else ''}"
+                f"{' (已回读校验)' if verify else ''}"
             )
             return True
         except Exception as e:
             self.logger.error(f"输入文本失败 control_id={control_id}: {str(e)}")
             raise
+
+    @staticmethod
+    def _verify_input_text(element, expected: str, mode: str) -> bool:
+        """回读控件文本并按模式比对
+
+        - exact: 完全一致（股票代码/数量等纯数字字段，无重格式化空间）
+        - numeric: 按数值比较（价格字段，容忍 "10.5" vs "10.50" 格式差异）
+        回读失败（控件异常）一律视为未通过。
+        """
+        try:
+            actual = (element.window_text() or "").strip()
+        except Exception:
+            return False
+        if mode == "numeric":
+            try:
+                return actual != "" and float(actual) == float(expected)
+            except (ValueError, TypeError):
+                return False
+        return actual == expected
 
     # ------------------------------------------------------------
     # 按键发送

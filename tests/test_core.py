@@ -2074,6 +2074,134 @@ class TestAlertCallSites:
             tq._last_order_had_dialog = None
 
 
+class TestInputVerification:
+    """输入回读校验测试：防 type_keys 静默截断（2026-09-22 实测代码字段
+    只留下 1-3 位且无任何报错——焦点被抢/自动补全重写导致）"""
+
+    @staticmethod
+    def _make_service(monkeypatch, element):
+        """构造 WindowService 并把控件查找接到脚本化假元素上"""
+        import win32gui
+
+        from src.services.window_service import WindowService
+
+        ws = WindowService()
+        monkeypatch.setattr(ws, "find_element_in_window",
+                            lambda *a, **k: element)
+        monkeypatch.setattr(win32gui, "SendMessage",
+                            lambda hwnd, msg, w, s: None)
+        return ws
+
+    @staticmethod
+    def _make_fake_element(monkeypatch, typing_script):
+        """脚本化假输入框：type_keys 按 script 决定落盘内容
+
+        typing_script: [(匹配的 keys 前缀, 落盘文本), ...] 按序消费，
+                       未命中时落盘空串（模拟清空）
+        window_text 返回当前落盘内容
+        """
+        calls = []
+
+        class FakeEl:
+            handle = 0x1234
+
+            def __init__(self):
+                self.text = ""
+                self._pending = list(typing_script)
+
+            def set_focus(self):
+                pass
+
+            def type_keys(self, keys):
+                calls.append(("type_keys", keys))
+                for i, (prefix, result) in enumerate(self._pending):
+                    if keys.startswith(prefix):
+                        self.text = result
+                        self._pending.pop(i)
+                        return
+                if "{BACKSPACE}" in keys or keys == "":
+                    self.text = ""
+
+            def window_text(self):
+                calls.append(("window_text", self.text))
+                return self.text
+
+        return FakeEl(), calls
+
+    def test_verify_numeric_tolerates_format_diff(self, monkeypatch):
+        """numeric 模式：10.5 vs 10.50 视为一致；非数字/不一致为 False"""
+        from src.services.window_service import WindowService
+
+        class _El:
+            def window_text(self):
+                return " 10.5 "
+
+        assert WindowService._verify_input_text(_El(), "10.50", "numeric") is True
+        assert WindowService._verify_input_text(_El(), "11.00", "numeric") is False
+
+        class _Bad:
+            def window_text(self):
+                return "abc"
+
+        assert WindowService._verify_input_text(_Bad(), "10.50", "numeric") is False
+
+        class _Boom:
+            def window_text(self):
+                raise RuntimeError("控件失效")
+
+        assert WindowService._verify_input_text(_Boom(), "10.50", "exact") is False
+
+    def test_truncated_input_retried_and_recovered(self, monkeypatch):
+        """首次键入被截断（模拟焦点抢占）→ 自动清空重输 → 校验通过"""
+        el, calls = self._make_fake_element(
+            monkeypatch,
+            [("601991", "601"), ("601991", "601991")])
+        ws = self._make_service(monkeypatch, el)
+
+        ws.input_text_to_element(None, 1032, "601991",
+                                 descendants=[], verify="exact")
+        type_text_calls = [c for c in calls if c == ("type_keys", "601991")]
+        assert len(type_text_calls) == 2, "截断后应自动重输一次"
+
+    def test_persistent_truncation_raises(self, monkeypatch):
+        """两次键入均截断 → INPUT_VERIFY_FAILED，携带期望/实际内容"""
+        import pytest
+
+        from src.exceptions import ApiError, ErrorCode
+        el, _calls = self._make_fake_element(
+            monkeypatch,
+            [("601991", "601"), ("601991", "60")])  # 两次都截断
+        ws = self._make_service(monkeypatch, el)
+
+        with pytest.raises(ApiError) as exc_info:
+            ws.input_text_to_element(None, 1032, "601991",
+                                     descendants=[], verify="exact")
+        assert exc_info.value.error_code == ErrorCode.INPUT_VERIFY_FAILED
+        assert exc_info.value.details["expected"] == "601991"
+        assert exc_info.value.details["actual"] == "60"
+
+    def test_clean_input_single_pass(self, monkeypatch):
+        """输入正常 → 只键入一次，不触发重输"""
+        el, calls = self._make_fake_element(
+            monkeypatch,
+            [("601991", "601991")])
+        ws = self._make_service(monkeypatch, el)
+
+        ws.input_text_to_element(None, 1032, "601991",
+                                 descendants=[], verify="exact")
+        assert calls.count(("type_keys", "601991")) == 1
+
+    def test_no_verify_keeps_legacy_behavior(self, monkeypatch):
+        """verify=None（默认）→ 不做回读，行为与旧版一致"""
+        el, calls = self._make_fake_element(
+            monkeypatch,
+            [("100", "1")])  # 截断也不管
+        ws = self._make_service(monkeypatch, el)
+
+        ws.input_text_to_element(None, 1034, "100", descendants=[])
+        assert calls.count(("type_keys", "100")) == 1  # 无重试
+
+
 class TestWindowSetupSkipAccessors:
     """TaskQueue 跳过状态公共访问器测试（收口私有属性直接读写）"""
 
