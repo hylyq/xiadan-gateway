@@ -1641,6 +1641,74 @@ class TestCrossSiteRejection:
         assert r.get_json()["status"] == "success"
 
 
+class TestOrderDialogDrift:
+    """下单确认弹窗行为跟踪测试：/health 统计 + 快速交易设置漂移告警"""
+
+    @staticmethod
+    def _outcome(tq, had_dialog, task_name="place_order", error=None):
+        from src.api.task_queue import Task
+        task = Task(lambda: None, task_name, {"status": "1"}, 30)
+        task.error = error
+        task.window_state = None if had_dialog is None else {
+            "had_dialog": had_dialog, "clean": False}
+        tq._record_task_outcome(task)
+
+    def test_stats_expose_order_dialog_counts(self):
+        """get_stats 暴露 order_confirm_dialog 统计（弹窗/无弹窗计数）"""
+        from src.api.task_queue import TaskQueue
+        tq = TaskQueue.get_instance()
+        tq._recent_tasks.clear()
+        tq._order_dialog_stats.clear()
+        tq._last_order_had_dialog = None
+        try:
+            self._outcome(tq, False)
+            self._outcome(tq, False)
+            self._outcome(tq, True)
+
+            stats = tq.get_stats()
+            dlg = stats["order_confirm_dialog"]
+            assert dlg["total_orders"] == 3
+            assert dlg["no_dialog_fast_trade"] == 2
+            assert dlg["with_confirm_dialog"] == 1
+            assert dlg["last_order_had_dialog"] is True
+        finally:
+            tq._order_dialog_stats.clear()
+            tq._last_order_had_dialog = None
+
+    def test_non_order_tasks_not_counted(self):
+        """查询/撤单任务不计入弹窗统计；无窗口状态的任务（僵尸）也跳过"""
+        from src.api.task_queue import TaskQueue
+        tq = TaskQueue.get_instance()
+        tq._recent_tasks.clear()
+        tq._order_dialog_stats.clear()
+        tq._last_order_had_dialog = None
+        try:
+            self._outcome(tq, False, task_name="get_balance")
+            self._outcome(tq, None)  # window_state=None（超时僵尸任务）
+            stats = tq.get_stats()
+            assert stats["order_confirm_dialog"]["total_orders"] == 0
+            assert tq._last_order_had_dialog is None
+        finally:
+            tq._order_dialog_stats.clear()
+            tq._last_order_had_dialog = None
+
+    def test_drift_detection_flips_state(self):
+        """弹窗行为翻转 → _last_order_had_dialog 更新（告警日志路径）"""
+        from src.api.task_queue import TaskQueue
+        tq = TaskQueue.get_instance()
+        tq._recent_tasks.clear()
+        tq._order_dialog_stats.clear()
+        tq._last_order_had_dialog = None
+        try:
+            self._outcome(tq, False)   # 快速交易
+            assert tq._last_order_had_dialog is False
+            self._outcome(tq, True)    # 突然出现弹窗 → 漂移
+            assert tq._last_order_had_dialog is True
+        finally:
+            tq._order_dialog_stats.clear()
+            tq._last_order_had_dialog = None
+
+
 class TestCancelValidation:
     """撤单参数校验测试
 

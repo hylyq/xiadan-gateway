@@ -108,6 +108,13 @@ class TaskQueue(Singleton):
         self._recent_tasks: deque = deque(maxlen=500)  # (timestamp, success, error_code)
         self._consecutive_failures = 0                 # 连续失败计数（告警阈值 3）
 
+        # 下单确认弹窗行为跟踪：客户端「快速交易」设置漂移的被动检测。
+        # place_order 的弹窗出现与否反映客户端确认弹窗设置——同一客户端
+        # 会话内该行为突然翻转（无弹窗→有弹窗）通常意味着设置被重置/
+        # 券商升级复原，需人工检查（只告警不拦截，判定仅作参考信号）
+        self._order_dialog_stats: deque = deque(maxlen=200)  # (timestamp, had_dialog)
+        self._last_order_had_dialog: Optional[bool] = None
+
         # 连续同向订单优化：跟踪上次任务状态，避免重复的准备操作
         # 如 买入→买入 时跳过 _reset_trading_window + 激活 + F1
         self._last_task_info: Optional[dict] = None
@@ -417,6 +424,33 @@ class TaskQueue(Singleton):
             else:
                 self._consecutive_failures = 0
 
+        self._track_order_dialog_behavior(task)
+
+    def _track_order_dialog_behavior(self, task: Task) -> None:
+        """跟踪下单确认弹窗行为，检测客户端快速交易设置漂移
+
+        place_order 出现委托确认弹窗 = 客户端未开快速交易；完全无弹窗 =
+        快速交易模式（下单成败判定依赖此前提，见 README 已知限制）。
+        同一会话内行为突然翻转 → 大概率设置被重置/券商升级复原，
+        告警提示人工检查。仅统计窗口状态已上报的任务（超时僵尸任务
+        window_state=None，跳过不计）。
+        """
+        if task.name != "place_order" or task.window_state is None:
+            return
+        had_dialog = bool(task.window_state.get("had_dialog"))
+        with self._stats_lock:
+            self._order_dialog_stats.append((time.time(), had_dialog))
+            previous = self._last_order_had_dialog
+            self._last_order_had_dialog = had_dialog
+        if previous is not None and previous != had_dialog:
+            old_mode = "快速交易（无弹窗）" if not previous else "弹窗确认"
+            new_mode = "快速交易（无弹窗）" if not had_dialog else "弹窗确认"
+            self.logger.warning(
+                f"⚠ 下单确认弹窗行为变化: {old_mode} → {new_mode} ——"
+                f"客户端「快速交易」设置可能被重置/券商升级复原，"
+                f"请人工检查客户端设置（影响无弹窗=已提交的判定）"
+            )
+
     def get_stats(self, window_seconds: int = 3600) -> dict:
         """运行统计（#12）：按错误码聚合成功率 + 连续失败状态
 
@@ -438,6 +472,8 @@ class TaskQueue(Singleton):
         with self._stats_lock:
             recent = list(self._recent_tasks)
             consecutive = self._consecutive_failures
+            order_dialogs = list(self._order_dialog_stats)
+            last_order_had_dialog = self._last_order_had_dialog
 
         windowed = [t for t in recent if now - t[0] <= window_seconds]
         total = len(windowed)
@@ -448,6 +484,10 @@ class TaskQueue(Singleton):
             if not ok:
                 error_counts[code] = error_counts.get(code, 0) + 1
 
+        # 下单确认弹窗统计：无弹窗占比异常（如一直有弹窗）提示检查客户端设置
+        windowed_dialogs = [hd for ts, hd in order_dialogs if now - ts <= window_seconds]
+        with_dialog = sum(1 for hd in windowed_dialogs if hd)
+
         return {
             "window_seconds": window_seconds,
             "total_tasks": total,
@@ -456,6 +496,12 @@ class TaskQueue(Singleton):
             "success_rate": round(success / total, 3) if total else None,
             "error_counts": dict(sorted(error_counts.items(), key=lambda x: -x[1])),
             "consecutive_failures": consecutive,
+            "order_confirm_dialog": {
+                "total_orders": len(windowed_dialogs),
+                "with_confirm_dialog": with_dialog,
+                "no_dialog_fast_trade": len(windowed_dialogs) - with_dialog,
+                "last_order_had_dialog": last_order_had_dialog,
+            },
         }
 
     def get_status(self) -> dict:
