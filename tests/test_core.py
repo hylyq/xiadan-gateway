@@ -1363,6 +1363,125 @@ class TestIdempotencyRecordRetention:
         chk._records["601991_1_100__limit"] = 0  # 1970 年 → 必然过期
         chk.check_and_record("601991", "1", "100", "10.50", "limit")
 
+    def test_client_key_dedup_independent_of_params(self):
+        """客户端幂等键：同 key 不同参数也去重；不同 key 同参数不互撞"""
+        from src.exceptions import ApiError, ErrorCode
+        chk = self._checker()
+
+        chk.check_and_record("601991", "1", "100", "10.50", "limit", idem_key="retry-abc")
+        # 同 key 不同参数 → 仍拒绝（键优先于参数指纹）
+        with pytest.raises(ApiError) as exc_info:
+            chk.check_and_record("600000", "2", "200", None, "market", idem_key="retry-abc")
+        assert exc_info.value.error_code == ErrorCode.DUPLICATE_ORDER
+
+        # 不同 key 同参数 → 不互撞（参数指纹模式的痛点）
+        chk.check_and_record("601991", "1", "100", "10.50", "limit", idem_key="strategy-b")
+
+    def test_client_key_clear_uses_same_key(self):
+        """失败清除必须走同一把客户端键，重试才能通过"""
+        chk = self._checker()
+        chk.check_and_record("601991", "1", "100", "10.50", "limit", idem_key="retry-xyz")
+        # 按参数指纹清除（旧调用方式）→ 清不掉客户端键记录
+        assert chk.clear_record("601991", "1", "100", "10.50", "limit") is False
+        with pytest.raises(Exception):
+            chk.check_and_record("601991", "1", "100", "10.50", "limit", idem_key="retry-xyz")
+        # 用同一把键清除 → 重试放行
+        assert chk.clear_record("601991", "1", "100", "10.50", "limit",
+                                idem_key="retry-xyz") is True
+        chk.check_and_record("601991", "1", "100", "10.50", "limit", idem_key="retry-xyz")
+
+
+class TestIdempotencyKeyRoute:
+    """下单路由 Idempotency-Key 请求头集成测试（Flask test client）"""
+
+    @staticmethod
+    def _make_client(monkeypatch, tmp_path):
+        import json
+
+        from src.models import config as config_module
+
+        p = tmp_path / "app_config.json"
+        p.write_text(json.dumps({}, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(config_module, "CONFIG_PATH", str(p))
+        config_module.AppConfig._reset_instance()
+
+        from src.api.idempotency import IdempotencyChecker
+        IdempotencyChecker._reset_instance()
+
+        from src.api.routes import create_app
+        app = create_app()
+        app.config["TESTING"] = True
+        return app.test_client()
+
+    @staticmethod
+    def _ok_submit(monkeypatch, results):
+        """按调用顺序返回预设结果，记录每次 task_name"""
+        from src.api.task_queue import TaskQueue
+        calls = []
+
+        def _submit(self, func, task_name, params, timeout=None):
+            calls.append(task_name)
+            return results[len([c for c in calls if c == task_name]) - 1]
+
+        monkeypatch.setattr(TaskQueue, "submit", _submit)
+        return calls
+
+    def test_same_key_twice_rejected(self, monkeypatch, tmp_path):
+        """同 Idempotency-Key 两次请求（参数不同）→ 第二次 DUPLICATE_ORDER"""
+        self._ok_submit(monkeypatch, [{"confirmed": True}])
+        client = self._make_client(monkeypatch, tmp_path)
+
+        r1 = client.post("/orders", json={"code": "601991", "status": "1", "amount": "100"},
+                         headers={"Idempotency-Key": "op-1"})
+        assert r1.get_json()["status"] == "success"
+
+        r2 = client.post("/orders", json={"code": "600000", "status": "2", "amount": "200"},
+                         headers={"Idempotency-Key": "op-1"})
+        body = r2.get_json()
+        assert body["status"] == "error"
+        assert body["error_code"] == "DUPLICATE_ORDER"
+
+    def test_failure_clears_client_key_allowing_retry(self, monkeypatch, tmp_path):
+        """带 key 的下单失败 → 记录按 key 清除，同 key 重试放行"""
+        from src.api.idempotency import IdempotencyChecker
+        from src.exceptions import ApiError, ErrorCode
+
+        client = self._make_client(monkeypatch, tmp_path)
+        from src.api.task_queue import TaskQueue
+
+        def _fail(self, *args, **kwargs):
+            raise ApiError(ErrorCode.PRICE_OUT_OF_RANGE, "价格超限", suggestion="调整")
+
+        monkeypatch.setattr(TaskQueue, "submit", _fail)
+
+        r1 = client.post("/orders", json={"code": "601991", "status": "1", "amount": "100"},
+                         headers={"Idempotency-Key": "op-9"})
+        assert r1.get_json()["error_code"] == "PRICE_OUT_OF_RANGE"
+        assert IdempotencyChecker.get_instance()._records == {}
+
+        # 重试成功路径
+        self._ok_submit(monkeypatch, [{"confirmed": True}])
+        r2 = client.post("/orders", json={"code": "601991", "status": "1", "amount": "100"},
+                         headers={"Idempotency-Key": "op-9"})
+        assert r2.get_json()["status"] == "success"
+
+    def test_oversized_key_rejected(self, monkeypatch, tmp_path):
+        """超长 Idempotency-Key → VALIDATION_ERROR"""
+        self._ok_submit(monkeypatch, [{"confirmed": True}])
+        client = self._make_client(monkeypatch, tmp_path)
+        r = client.post("/orders", json={"code": "601991", "status": "1"},
+                        headers={"Idempotency-Key": "k" * 129})
+        assert r.get_json()["error_code"] == "VALIDATION_ERROR"
+
+    def test_no_header_falls_back_to_param_fingerprint(self, monkeypatch, tmp_path):
+        """不带头时行为不变：相同参数 60s 内仍被参数指纹拦截"""
+        self._ok_submit(monkeypatch, [{"confirmed": True}])
+        client = self._make_client(monkeypatch, tmp_path)
+        payload = {"code": "601991", "status": "1", "amount": "100"}
+        assert client.post("/orders", json=payload).get_json()["status"] == "success"
+        r2 = client.post("/orders", json=payload)
+        assert r2.get_json()["error_code"] == "DUPLICATE_ORDER"
+
 
 class TestCrossSiteRejection:
     """跨站防御测试（#12：带 Origin 头的浏览器请求一律拒绝，防恶意网页触发交易）"""

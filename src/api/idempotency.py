@@ -50,21 +50,40 @@ class IdempotencyChecker(Singleton):
         """生成任务唯一键"""
         return f"{code}_{status}_{amount or ''}_{price or ''}_{price_type}"
 
+    def _resolve_key(self, idem_key: Optional[str], code: str, status: str,
+                     amount: Optional[str], price: Optional[str],
+                     price_type: str) -> str:
+        """解析幂等键：客户端 Idempotency-Key 优先，缺省回退参数指纹
+
+        客户端键加 "client:" 前缀隔离命名空间，避免与参数指纹撞键；
+        同一策略重试传同一 key 即可去重，不同策略同参数互不干扰
+        （参数指纹模式下的互撞问题）。
+        """
+        if idem_key:
+            return f"client:{idem_key}"
+        return self._make_key(code, status, amount, price, price_type)
+
     def check_and_record(
         self,
         code: str,
         status: str,
         amount: Optional[str] = None,
         price: Optional[str] = None,
-        price_type: str = "limit"
+        price_type: str = "limit",
+        idem_key: Optional[str] = None
     ) -> None:
         """检查是否重复，如果不重复则记录
+
+        Args:
+            idem_key: 客户端幂等键（Idempotency-Key 请求头）。提供时以它
+                为去重依据（60s 窗口内同 key 拒绝），参数指纹退居其次；
+                缺省时按参数指纹去重（向后兼容）。
 
         Raises:
             ApiError: 60 秒内重复下单
         """
         window = self.config.get_idempotency_config().get("order_dedup_window_seconds", 60)
-        key = self._make_key(code, status, amount, price, price_type)
+        key = self._resolve_key(idem_key, code, status, amount, price, price_type)
         now = time.time()
 
         with self._records_lock:
@@ -104,14 +123,19 @@ class IdempotencyChecker(Singleton):
         status: str,
         amount: Optional[str] = None,
         price: Optional[str] = None,
-        price_type: str = "limit"
+        price_type: str = "limit",
+        idem_key: Optional[str] = None
     ) -> bool:
         """清除下单记录（下单失败时调用，允许重试）
+
+        Args:
+            idem_key: 与 check_and_record 相同的客户端幂等键，确保清除的
+                是同一把键（客户端键模式下参数指纹里没有记录）
 
         Returns:
             是否清除了记录
         """
-        key = self._make_key(code, status, amount, price, price_type)
+        key = self._resolve_key(idem_key, code, status, amount, price, price_type)
         with self._records_lock:
             if key in self._records:
                 del self._records[key]

@@ -43,6 +43,11 @@ def xiadan():
     示例:
         POST /orders  {"code": "601991", "status": "1", "amount": "100", "price_type": "market"}
         POST /orders  {"code": "600000", "status": "1", "amount": "100", "price": "10.5", "price_type": "limit"}
+
+    幂等:
+        可选请求头 Idempotency-Key（≤128 字符）——提供时按它去重（60s 窗口），
+        HTTP 超时重试带同一 key 即不会被 DUPLICATE_ORDER 误拦也不会重复下单；
+        缺省按 参数指纹 去重（60s 内相同 code+status+amount+price+price_type 拒绝）。
     """
     request_id = generate_request_id()
     config = AppConfig()
@@ -104,9 +109,19 @@ def xiadan():
 
     confirm = (confirm_str == "true")
 
+    # 客户端幂等键（可选）：Idempotency-Key 请求头优先于参数指纹去重。
+    # HTTP 超时重试时携带同一 key 即可安全重试，且不同策略同参数不再互撞。
+    idem_key = (request.headers.get("Idempotency-Key") or "").strip() or None
+    if idem_key and len(idem_key) > 128:
+        return error_response(
+            ErrorCode.VALIDATION_ERROR, "Idempotency-Key 过长", request_id,
+            "Idempotency-Key 请求头最长 128 字符"
+        )
+
     # 幂等检查
     try:
-        idempotency.check_and_record(code, status, amount, price, price_type)
+        idempotency.check_and_record(code, status, amount, price, price_type,
+                                     idem_key=idem_key)
     except ApiError as e:
         return error_response(
             e.error_code, e.message, request_id,
@@ -134,7 +149,8 @@ def xiadan():
         # 任务可能仍在执行/排队（看门狗超时、队列超时）时保留幂等记录，
         # 防止客户端立即重试导致重复下单
         if not should_keep_record_on_error(e):
-            idempotency.clear_record(code, status, amount, price, price_type)
+            idempotency.clear_record(code, status, amount, price, price_type,
+                                     idem_key=idem_key)
         return error_response_from_exception(e, request_id)
 
 
