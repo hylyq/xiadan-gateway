@@ -57,6 +57,7 @@ Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──�
 | Cross-site defense | Requests carrying an `Origin` header are rejected (browser cross-site requests always carry it; script clients never do) — prevents malicious web pages from firing trades at the local gateway; active even when auth is disabled |
 | Runtime stats | Per-error-code success rates (1-hour window, via `/health`); log alert after 3 consecutive failures; tracks order-confirm-dialog behavior and warns when the client's fast-trade setting appears reset (behavior flip) |
 | Alert webhook | Consecutive task failures ≥3, order-dialog drift, and task timeouts → POST to a webhook (generic JSON or WeCom/DingTalk `text` format) on a background thread, never blocking the trading path |
+| Input read-back verification | After typing code/quantity (exact) and price (numeric), the field content is read back; on mismatch it clears and retypes once, then raises `INPUT_VERIFY_FAILED` — guards against silent truncation when focus is stolen mid-typing (measured: only 1-3 digits left with no error) |
 | Window position self-healing | Before each task, checks window/workarea intersection (60% threshold); auto-moves the window back if it was dragged off-screen (`click_input`/screenshots are coordinate-based and fail off-screen) |
 
 ## Prerequisites: Broker Software Settings
@@ -190,6 +191,8 @@ All responses return HTTP 200; success/failure is distinguished by the JSON `sta
 | `INSUFFICIENT_BALANCE` | Insufficient available balance (clicked OK to close, clean exit, next same-direction task can skip) |
 | `SHORT_SELLING_FORBIDDEN` | Short selling not allowed — no position or exceeds sellable shares (clicked OK to close, clean exit) |
 | `PRICE_OUT_OF_RANGE` | Price outside daily limit (clicked N to cancel, clean exit, next same-direction task can skip) |
+| `ORDER_PRICE_REQUIRED` | Broker requires an order price (market-order type unselected/unsupported, or limit mode without a price; suggests limit mode) |
+| `INPUT_VERIFY_FAILED` | Input read-back verification failed: code/price/quantity did not stick in the field (focus steal / autocomplete truncation); one automatic retype already attempted |
 | `SERVER_UNAVAILABLE` | Broker server unavailable (e.g. transaction-processor forwarding failed) |
 | `OCR_FAILED` | Captcha recognition failed |
 | `INTERNAL_ERROR` | Unknown exception |
