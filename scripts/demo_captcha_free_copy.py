@@ -28,8 +28,6 @@ GAP_SECONDS = 60  # 第 3 轮前的等待间隔
 CAPTCHA_MARKERS = ("检测到验证码弹窗", "验证码 OCR", "输入验证码", "验证码验证成功")
 FREE_MARKERS = ("消息级复制成功", "但剪贴板已有有效表格数据，直接使用")
 
-QUERIES = []  # 运行时填充 [(名称, 方法), ...]
-
 
 class RoundCollector(logging.Handler):
     """收集每轮查询产生的日志行（用于判定是否触发验证码）"""
@@ -116,9 +114,15 @@ def main():
         print("演示开始：观察每轮复制是否触发验证码")
         print(f"（第 3 轮前等待 {GAP_SECONDS}s，测试间隔是否重置券商验证码限频）")
 
+        queries = [
+            ("持仓查询", ps.get_position),
+            ("今日成交", ps.get_today_trades),
+            ("当日委托", ps.get_today_orders),
+        ]
+
         results = []
         last_copy_end = None
-        for round_no, (name, fn) in enumerate(QUERIES, start=1):
+        for round_no, (name, fn) in enumerate(queries, start=1):
             if round_no == 3:
                 print(f"\n… 等待 {GAP_SECONDS}s（模拟间隔较久后的再次复制）…")
                 time.sleep(GAP_SECONDS)
