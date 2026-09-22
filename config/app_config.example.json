@@ -26,7 +26,7 @@
   },
   "order": {
     "capture_entrust_no": false,
-    "entrust_no_timeout_seconds": 3.0,
+    "entrust_no_timeout_seconds": 5.0,
     "verify_entrust_no": false,
     "reject_outside_trading_hours": false
   },

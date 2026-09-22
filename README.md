@@ -46,7 +46,7 @@ Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──�
 | Message-based table copy (experimental) | With `query.copy_method=message`, table copy is sent as a `WM_COMMAND(0xE122)` message — no foreground activation, no synthetic keystrokes. Copy stage 5.5s→0.5s in captcha-free sessions; on par with keyboard in captcha sessions (the captcha is triggered by the copy action itself, regardless of how it's invoked). Falls back to keyboard automatically on failure |
 | Pipelined mode switching | Click the limit/market toggle without waiting, immediately fill the quantity — the ~0.7s fill overlaps the label change; verification is naturally ready after filling |
 | Classified popup handling | Order confirm → Y/N; warning → Y to continue; **price out of range → N to cancel + `PRICE_OUT_OF_RANGE`**; error → close + report |
-| Watchdog recovery | On task timeout: screenshot + activate + ESC×5, reset, then return an error |
+| Watchdog recovery | On task timeout: screenshot + activate + ESC×3, reset, then return an error |
 | Idempotency | Orders with identical parameters within a 60s window are rejected, preventing duplicate orders from HTTP timeout retries; optional client `Idempotency-Key` header deduplicates by key |
 | OCR captcha | Lightweight template-matching engine; failures auto-archived; optional ddddocr offline training |
 | Production server | `waitress` WSGI + graceful shutdown (SIGINT/SIGTERM) |
@@ -247,7 +247,7 @@ PopupRule(
 | GET | `/trades/today` | Today's trades | ✓ | 40s |
 | GET | `/orders/pending` | Today's orders | ✓ | 40s |
 | POST | `/orders` | Place order (limit/market) | ✓ | 40s |
-| POST | `/orders/cancel-all` | Cancel orders (all / buys / sells) | ✓ | 40s |
+| POST | `/orders/cancel-all` | Cancel orders (all / buys / sells / last) | ✓ | 40s |
 | POST | `/actions/send-key` | Send a key manually | ✓ | 30s |
 | POST | `/actions/click` | Mouse click at coordinates | ✓ | 30s |
 | POST | `/actions/close-dialog` | Close the buy/sell sub-panel | ✓ | 30s |
@@ -267,6 +267,8 @@ PopupRule(
 | `price` | | Order price (limit mode, max 2 decimals) |
 | `price_type` | | `limit`=limit (default), `market`=market |
 | `confirm` | | `true`=auto-confirm (default), `false`=preview mode (clicks N to cancel) |
+
+> An optional `Idempotency-Key` header (≤128 chars) is also supported for client-key dedup — see [Idempotency and Price Validation](#idempotency-and-price-validation).
 
 ```bash
 # Market buy
@@ -307,6 +309,8 @@ curl -X POST http://localhost:5000/orders \
 
 ### POST /orders/cancel-all — Cancel Orders
 
+Cancels run on the F3 cancel page (reachable with one F3 keypress); the cancel-all/cancel-buys/cancel-sells/cancel-last buttons share the same control IDs across pages (measured 30001/30002/30003/1946). When a confirmation popup appears after clicking (cid=1040 text + cid=6 "Yes(Y)" button), it is auto-confirmed and the cancelled count is parsed from the popup text; in quick-trading mode (no cancel confirmation) the cancel takes effect with no popup. Grayed-out buttons (nothing to cancel) return immediately.
+
 | Parameter | Required | Description |
 |-----------|:---:|-------------|
 | `type` | | `A`=all (default), `X`=cancel buys, `C`=cancel sells, `L`=cancel last order |
@@ -315,6 +319,16 @@ curl -X POST http://localhost:5000/orders \
 curl -X POST http://localhost:5000/orders/cancel-all
 curl -X POST http://localhost:5000/orders/cancel-all -d '{"type":"X"}'
 ```
+
+**Response** (`data` fields):
+
+| Field | Description |
+|-------|-------------|
+| `cancel_type` | Operation name (cancel all / buys / sells / last) |
+| `success` | Whether a cancel was executed (`false` when buttons were grayed out) |
+| `cancelled_count` | Cancelled count (parsed from the confirmation popup text; `null` when no popup or parse failed, `0` on the grayed-out path) |
+| `confirm_dialog_shown` | Whether a cancel-confirmation popup appeared |
+| `reason` | Only present when buttons were grayed out, e.g. 「当前无可撤委托」 (nothing to cancel) |
 
 ### Auxiliary Endpoints
 
@@ -369,18 +383,20 @@ xiadan-gateway/
 │   ├── api/
 │   │   ├── routes.py            # Flask app factory + system routes + auth middleware
 │   │   ├── query_routes.py      # query Blueprint (positions/balance/trades/orders)
-│   │   ├── order_routes.py      # order/cancel Blueprint
+│   │   ├── order_routes.py      # order/cancel Blueprint (incl. entrust_no reconciliation)
 │   │   ├── action_routes.py     # manual-action/diagnostic Blueprint
-│   │   ├── task_queue.py        # global task queue + watchdog recovery
+│   │   ├── task_queue.py        # global task queue + watchdog recovery + runtime stats
 │   │   ├── response.py          # unified response wrapper (success/error)
 │   │   ├── helpers.py           # route-layer shared utilities
-│   │   └── idempotency.py       # order idempotency check
+│   │   └── idempotency.py       # order idempotency check (param fingerprint / Idempotency-Key)
 │   ├── core/
 │   │   ├── trader.py            # order orchestration
 │   │   ├── popup_rules.py       # popup/submit-error classification rule table (action + error code)
 │   │   ├── ocr.py               # OCR service (dual-engine scheduling + quality checks)
 │   │   ├── ocr_lightweight.py   # lightweight OCR (template matching, pure NumPy/Pillow)
-│   │   └── validation.py        # pure data-validation functions
+│   │   ├── entrust_capture.py   # order banner capture thread (bottom-right strip grab)
+│   │   ├── banner_ocr.py        # banner digit recognition (MS YaHei templates + IoU)
+│   │   └── validation.py        # pure validation functions (price / trading hours + holidays)
 │   ├── services/
 │   │   ├── window_service.py    # base window/control operations
 │   │   ├── window_monitor.py    # window-minimized monitor thread
@@ -396,12 +412,12 @@ xiadan-gateway/
 │       ├── poll.py              # poll-based waiting (poll_until / timed)
 │       └── diagnostic.py        # diagnostic tools (screenshot + UI text + OCR)
 ├── tests/
-│   └── test_core.py             # core-logic unit tests
+│   └── test_core.py             # core-logic unit tests (no real broker client needed)
 ├── scripts/
 │   ├── diagnose_settings.py     # broker UI structure diagnostic
 │   ├── generate_templates.py    # OCR template management (view/extract/batch-annotate)
 │   ├── train_ocr.py             # iterative OCR training (auto-triggers captchas, tracks accuracy)
-│   ├── test_*_menu.py           # menu-structure exploration scripts (dev leftovers)
+│   ├── test_*.py / explore_*.py # exploration & experiment debug scripts (dev leftovers, run manually)
 │   └── legacy/                  # one-off manual test scripts moved out of tests/ (not collected by pytest)
 ├── assets/
 │   ├── digit_templates/          # digit templates (git-tracked, produced by offline training)
@@ -424,13 +440,14 @@ xiadan-gateway/
 | **pyautogui** | Mouse clicks, full-screen screenshots |
 | **ddddocr** (ONNX Runtime) | Optional, offline OCR training scripts only (`uv sync --extra ocr`) |
 | **Pillow + NumPy** | Lightweight OCR template-matching engine |
+| **chinesecalendar** | Statutory-holiday awareness for trading-hours precheck (auto-degrades when data year is uncovered) |
 | **pytest** | Unit tests |
 
 ## Key Design
 
 ### Task Queue and Watchdog
 
-All operations run sequentially on a single worker thread (`TaskQueue`) to avoid concurrent conflicts on `xiadan.exe`. By default `WindowService.reset_window_state()` runs before each task, resetting the window to the F1-buy baseline (including window position self-healing — auto-returns the window if dragged off-screen); consecutive clean exits in the same group skip the reset (see 「Consecutive clean skip」 in Core Features). On task timeout, the watchdog performs 「screenshot archive → activate window → ESC×5 reset」 recovery and **returns the error only after all recovery completes**, guaranteeing that when the caller receives `TASK_TIMEOUT`, `xiadan.exe` is already back to its initial state.
+All operations run sequentially on a single worker thread (`TaskQueue`) to avoid concurrent conflicts on `xiadan.exe`. By default `WindowService.reset_window_state()` runs before each task, resetting the window to the F1-buy baseline (activation + ESC×5, including window position self-healing — auto-returns the window if dragged off-screen); consecutive clean exits in the same group skip the reset (see 「Consecutive clean skip」 in Core Features). On task timeout, the watchdog performs 「screenshot archive → activate window → ESC×3 reset」 recovery and **returns the error only after all recovery completes**, guaranteeing that when the caller receives `TASK_TIMEOUT`, `xiadan.exe` is already back to its initial state.
 
 > **Watchdog concurrency boundary**: recovery (ESC reset) runs on the watchdog timer thread while the timed-out task's worker thread may still be executing. The guarantee covers the window's final state, not the side effects of the abandoned task — a zombie task can still drive the UI (e.g. click buy) *after* recovery completed and the error was returned. The single-worker design ensures the next queued task only starts after the zombie returns; treat TASK_TIMEOUT as "order state unknown, verify before retrying" (see the idempotency rule that keeps dedup records on timeout).
 
