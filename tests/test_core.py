@@ -1740,6 +1740,93 @@ class TestCrossSiteRejection:
         assert r.get_json()["status"] == "success"
 
 
+class TestSendKeyBackgroundVerification:
+    """send_key(background=True) 前台自校验测试
+
+    锚定 2026-09-22 实测回归：background=True 原先盲目信任调用方，
+    窗口被切走时 F4/F3/F1 经 keybd_event 发进错误前台窗口——F4 发空后
+    查询页不对，树节点点击未注册，导航多花 ~1.5s。现自校验前台：
+    匹配零开销直发，不匹配自动补激活。
+    """
+
+    @staticmethod
+    def _make_service(monkeypatch, window_handle, foreground_handle):
+        import win32gui
+
+        from src.services.window_service import WindowService
+
+        ws = WindowService()
+        calls = []
+
+        class _Win:
+            handle = window_handle
+
+        monkeypatch.setattr(win32gui, "GetForegroundWindow",
+                            lambda: foreground_handle)
+        monkeypatch.setattr(ws, "get_trading_window", lambda: _Win() if window_handle else None)
+        monkeypatch.setattr(ws, "_send_key_foreground",
+                            lambda keys: calls.append(("send", keys)))
+        monkeypatch.setattr(ws, "_activate_window_before_keybd",
+                            lambda keys: calls.append(("activate", keys)))
+        return ws, calls
+
+    def test_foreground_match_sends_directly(self, monkeypatch):
+        """已在前台 → 零开销直发，不触发激活"""
+        ws, calls = self._make_service(monkeypatch, 0x111, 0x111)
+        ws.send_key("F4", background=True)
+        assert calls == [("send", "F4")]
+
+    def test_foreground_mismatch_activates_first(self, monkeypatch):
+        """窗口被切走 → 先走完整激活路径再发，不盲发"""
+        ws, calls = self._make_service(monkeypatch, 0x111, 0x222)
+        ws.send_key("F4", background=True)
+        assert calls == [("activate", "F4")]
+
+    def test_window_missing_goes_through_activate_guard(self, monkeypatch):
+        """窗口未找到 → 走激活路径（其内部有禁止发送防御），不盲发"""
+        ws, calls = self._make_service(monkeypatch, None, 0x222)
+        ws.send_key("F3", background=True)
+        assert calls == [("activate", "F3")]
+
+
+class TestHealthLoggedIn:
+    """/health 登录态检测测试：主窗口存在 ≈ 已登录"""
+
+    @staticmethod
+    def _make_client(monkeypatch, tmp_path):
+        import json
+
+        from src.models import config as config_module
+
+        p = tmp_path / "app_config.json"
+        p.write_text(json.dumps({}, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(config_module, "CONFIG_PATH", str(p))
+        config_module.AppConfig._reset_instance()
+
+        from src.api.routes import create_app
+        app = create_app()
+        app.config["TESTING"] = True
+        return app.test_client()
+
+    def test_logged_in_when_window_exists(self, monkeypatch, tmp_path):
+        """主窗口存在 → logged_in=True"""
+        import win32gui
+        monkeypatch.setattr(win32gui, "FindWindow", lambda cls, title: 0x555)
+
+        client = self._make_client(monkeypatch, tmp_path)
+        body = client.get("/health").get_json()
+        assert body["data"]["logged_in"] is True
+
+    def test_not_logged_in_when_window_absent(self, monkeypatch, tmp_path):
+        """进程在但主窗口不在（登录页/断线）→ logged_in=False"""
+        import win32gui
+        monkeypatch.setattr(win32gui, "FindWindow", lambda cls, title: 0)
+
+        client = self._make_client(monkeypatch, tmp_path)
+        body = client.get("/health").get_json()
+        assert body["data"]["logged_in"] is False
+
+
 class TestWindowSetupSkipAccessors:
     """TaskQueue 跳过状态公共访问器测试（收口私有属性直接读写）"""
 

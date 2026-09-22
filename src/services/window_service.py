@@ -711,8 +711,9 @@ class WindowService(Singleton):
             hwnd: 目标窗口句柄。提供时用 PostMessage 后台发送，不抢焦点；
                   不提供时自动查找交易窗口句柄（优先 PostMessage），
                   找不到则 fallback 到 keybd_event（原有行为）
-            background: 为 True 时跳过窗口激活，直接用 keybd_event 前台发送。
-                       用于调用方已自行激活窗口的场景，避免冗余激活。
+            background: 为 True 时先自校验前台：交易窗口确实在前台则零开销
+                       直发（调用方已激活的常规场景）；不在前台则自动补
+                       完整激活流程后再发，绝不把按键发进错误窗口。
 
         注意:
             功能键（F1-F12）始终走 keybd_event 前台发送，因为这类键触发界面切换，
@@ -727,9 +728,23 @@ class WindowService(Singleton):
             send_key('{CTRL+C}')              # 组合键（花括号内，+连接）
             send_key('CTRL C')                # 组合键（空格分隔，按下后释放）
         """
-        # background=True 时跳过激活，直接用 keybd_event 前台发送
+        # background=True：语义是"调用方已激活窗口/窗口应在前台"，但窗口
+        # 可能被用户切走（人工操作、其他程序抢焦点）——keybd_event 会把
+        # 按键发进当前前台窗口，F4/F3/F1 发错窗口比多一次激活更糟
+        # （实测：F4 发空后查询页不对，树节点点击未注册，导航多花 ~1.5s）。
+        # 廉价校验（~µs，句柄缓存后 get_trading_window 也近零开销）：
+        # 确实在前台 → 零开销直发；不在前台/窗口未找到/最小化 → 走完整
+        # 激活+句柄校验路径再发（复用全部防御：恢复最小化、激活失败禁止发送）
         if background:
-            self._send_key_foreground(keys)
+            window = self.get_trading_window()
+            try:
+                if window is not None and \
+                        win32gui.GetForegroundWindow() == window.handle:
+                    self._send_key_foreground(keys)
+                    return
+            except Exception:
+                pass  # 句柄失效等异常 → 走激活路径重新获取
+            self._activate_window_before_keybd(keys)
             return
 
         # 功能键（F1-F12）必须前台发送，PostMessage 无法可靠触发窗口快捷键
