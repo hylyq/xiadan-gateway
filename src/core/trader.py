@@ -174,11 +174,12 @@ class Trader:
         self._ui_text_baseline = self._snapshot_ui_texts(_descendants)
 
         # 4. 填写股票代码（必须先填代码，否则价格模式切换可能被禁用）
-        # 回读校验：实测焦点被抢时代码会静默截断成 1-3 位（2026-09-22）
+        # 注意：代码/价格/数量输入框是券商自绘壳控件，window_text() 回读
+        # 恒为空（诊断确认），不能用作输入校验信号——verify 参数留空。
+        # 输入是否生效以「证券名称自动填充 / 价格联动」为准（见后续防御）。
         with timed("填写股票代码", self.logger):
             self.window_service.input_text_to_element(
-                window, CONTROL_ID_CODE, code, descendants=_descendants,
-                delay=0.1, verify="exact")
+                window, CONTROL_ID_CODE, code, descendants=_descendants, delay=0.1)
             # 轮询等待券商自动填充价格（多数 <0.1s），替代固定 sleep(0.3)
             try:
                 _price_el = self.window_service.find_element_in_window(
@@ -225,8 +226,7 @@ class Trader:
         if amount:
             with timed("填写数量", self.logger):
                 self.window_service.input_text_to_element(
-                    window, CONTROL_ID_AMOUNT, amount, descendants=_descendants,
-                    delay=0.05, verify="exact")
+                    window, CONTROL_ID_AMOUNT, amount, descendants=_descendants, delay=0.05)
                 time.sleep(0.05)
 
         # 5b. 阶段 2/2：验证模式切换（填数量期间已自然等待 ~0.7s，切换早已完成）
@@ -246,12 +246,11 @@ class Trader:
                         raise ApiError(ErrorCode.WINDOW_NOT_FOUND, "切换价格模式后交易窗口消失")
                     _descendants = list(window.descendants())
 
-        # 7. 填写价格（仅限价，此时模式已确认）；数值比较容忍 10.5/10.50 格式差异
+        # 7. 填写价格（仅限价，此时模式已确认）
         if price_type == "limit" and price:
             with timed("填写价格", self.logger):
                 self.window_service.input_text_to_element(
-                    window, CONTROL_ID_PRICE, price, descendants=_descendants,
-                    delay=0.05, verify="numeric")
+                    window, CONTROL_ID_PRICE, price, descendants=_descendants, delay=0.05)
                 time.sleep(0.05)
 
         # 8. 点击下单按钮并处理弹窗
