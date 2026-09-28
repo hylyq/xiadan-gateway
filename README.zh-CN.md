@@ -57,6 +57,7 @@
 | 跨站防御 | 拒绝携带 `Origin` 头的请求（浏览器跨站请求必带，脚本客户端不带）——防恶意网页向本机网关发起交易，未开认证时同样生效 |
 | 运行统计 | 按错误码聚合成功率（最近 1 小时窗口，`/health` 返回），连续 3 次失败日志告警；跟踪下单弹窗行为，客户端「快速交易」设置被重置（弹窗行为翻转）时告警 |
 | 告警外推 | 连续任务失败≥3、下单弹窗行为漂移、任务超时 → POST webhook（generic JSON 或企业微信/钉钉 `text` 格式），后台线程发送不阻塞交易路径 |
+| 证券名称联动校验 | 输入代码后轮询名称联动控件（cid=1036 Static）非空——代码被客户端完整解析的可靠信号（1032 是壳控件回读恒空）。未联动自动清空重输一次，仍失败报 `INPUT_VERIFY_FAILED` 阻止提交；名称控件缺失时降级放行。可用 `order.verify_code_input` 关闭 |
 | 窗口位置自愈 | 任务开始前检查窗口与工作区交集（阈值 60%），窗口被误拖出屏幕时自动移回（`click_input`/截图按屏幕坐标工作，出屏会失效） |
 | MCP 适配器 | `scripts/mcp_server.py` 将网关暴露为标准 MCP 工具供大模型 agent 调用——只读查询恒注册；`place_order`/`cancel_orders` 需 `XIADAN_MCP_TRADING=1`；`/actions/*` 裸操作永不暴露（见 [MCP 服务](#mcp-服务agent-接入)） |
 
@@ -119,7 +120,7 @@ uv run python main.py --dev       # 开发模式（热加载）
   "alerts": { "webhook_url": "", "format": "generic", "timeout_seconds": 5 },
   "ocr": { "warmup_on_start": true, "max_retry": 3, "ddddocr_enabled": false },
   "query": { "copy_method": "keyboard" },
-  "order": { "capture_entrust_no": false, "verify_entrust_no": false, "reject_outside_trading_hours": false },
+  "order": { "capture_entrust_no": false, "verify_entrust_no": false, "verify_code_input": true, "reject_outside_trading_hours": false },
   "auth": { "enabled": false, "token": "" },
   "logging": { "level": "INFO", "file": "logs/app.log", "screenshot_dir": "logs/screenshots" }
 }
@@ -139,6 +140,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `ocr.max_retry` | 3 | 验证码识别最大重试次数 |
 | `order.reject_outside_trading_hours` | false | 下单入口交易时段预检（工作日 + 法定节假日 + 9:15-11:30 / 13:00-15:00 粗判，节假日历由 chinesecalendar 提供——依赖缺失或数据年份未覆盖时降级为仅工作日判断，节假日由券商报错兜底）。开启后非交易时段秒级返回 `OUTSIDE_TRADING_HOURS`，免走完整 UI 流程 ~11s；默认关闭以保留收盘后挂单行为 |
 | `order.verify_entrust_no` | false | 下单成功拿到委托号后自动追加一笔当日委托查询对账（响应附加 `entrust_no_verified`：命中/未命中/查询失败）。开启后接口耗时增加一次查询，调用方 timeout 需相应放大。需配合 `order.capture_entrust_no` 使用 |
+| `order.verify_code_input` | true | 输入代码后校验证券名称联动（非空=代码被接受），未联动重输一次仍失败则拒绝提交（`INPUT_VERIFY_FAILED`）。失败路径增加约 3-6s |
 | `ocr.ddddocr_enabled` | false | ddddocr 调试开关（开启后可启用双引擎质检+模板提取，需 `uv sync --extra ocr`） |
 | `window_monitor.enabled` | true | 窗口最小化监控开关 |
 | `auth.enabled` | false | Token 认证开关 |

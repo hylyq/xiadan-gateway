@@ -14,7 +14,7 @@ from typing import Optional
 from src.api.task_queue import TaskQueue, report_window_state
 from src.constants import (
     CONTROL_ID_CODE, CONTROL_ID_PRICE, CONTROL_ID_AMOUNT,
-    CONTROL_ID_SUBMIT, CONTROL_ID_PRICE_TYPE,
+    CONTROL_ID_SUBMIT, CONTROL_ID_PRICE_TYPE, CONTROL_ID_STOCK_NAME,
     CONFIRM_DIALOG_TITLE_ID, CONFIRM_YES_BUTTON_ID,
     CONFIRM_NO_BUTTON_ID, CONFIRM_DETAIL_TEXT_ID,
     CANCEL_CONFIRM_TEXT_ID,
@@ -174,12 +174,13 @@ class Trader:
         self._ui_text_baseline = self._snapshot_ui_texts(_descendants)
 
         # 4. 填写股票代码（必须先填代码，否则价格模式切换可能被禁用）
-        # 注意：代码/价格/数量输入框是券商自绘壳控件，window_text() 回读
-        # 恒为空（2026-09-28 盘中诊断确认），不能用作输入校验信号。
-        # 输入是否生效以「证券名称自动填充 / 价格联动」为准（待实现）。
+        # 注意：代码输入框(1032)是券商自绘壳控件，window_text() 回读恒空，
+        # 不能直接回读校验；输入是否被客户端真实接受以「证券名称联动
+        # (cid=1036) 自动填充」为准——见 _verify_code_accepted。
         with timed("填写股票代码", self.logger):
             self.window_service.input_text_to_element(
                 window, CONTROL_ID_CODE, code, descendants=_descendants, delay=0.1)
+            self._verify_code_accepted(window, _descendants, code)
             # 轮询等待券商自动填充价格（多数 <0.1s），替代固定 sleep(0.3)
             try:
                 _price_el = self.window_service.find_element_in_window(
@@ -511,6 +512,86 @@ class Trader:
                       .get("entrust_no_timeout_seconds", 3.0)) + 0.5)
         self.logger.info(f"下单完成: {result}")
         return result
+
+    def _verify_code_accepted(self, window, descendants, code: str,
+                              timeout_seconds: float = 3.0) -> None:
+        """校验证券代码被客户端真实接受：名称联动控件(1036)自动填充
+
+        代码输入框(1032)是券商自绘壳控件，window_text() 回读恒空（见
+        input_text_to_element 注释），不能直接回读；但客户端在代码被
+        完整解析后会自动把证券名称填充到 1036（Static 文本，回读可靠，
+        不受交易时段影响）。轮询其非空 = 代码被接受。
+
+        实测边界（2026-09-28 探测，scripts/probe_name_control.py）：
+        清空代码框后 1036 被券商清空、无效代码保持空、有效代码填充
+        名称、同代码重复输入正常填充——「非空」条件在全部场景一致。
+
+        超时 → 清空重输一次 → 仍超时 → INPUT_VERIFY_FAILED（绝不带
+        残缺代码提交）。名称控件缺失（券商界面升级）→ 记 warning 放行，
+        不阻塞下单。残余风险：不完整输入若恰好被联想匹配为另一只有效
+        股票，校验无法区分——委托参数以 /orders/pending 复核兜底。
+
+        Args:
+            timeout_seconds: 名称联动轮询超时（测试注入小值用）
+        """
+        if not self.config.get_order_config().get("verify_code_input", True):
+            return
+        name_el = self.window_service.find_element_in_window(
+            window, CONTROL_ID_STOCK_NAME, descendants=descendants)
+
+        def _name_filled(el) -> bool:
+            try:
+                return bool((el.window_text() or "").strip())
+            except Exception:
+                return False
+
+        if name_el is not None and _name_filled(name_el):
+            # 立即通过（联动通常 <0.5s；同代码连续下单时残留名称等价于通过）
+            self.logger.info("证券名称联动已填充，代码输入校验通过")
+            return
+
+        for attempt in (1, 2):
+            if name_el is None:
+                self.logger.warning(
+                    f"名称联动控件 cid={CONTROL_ID_STOCK_NAME} 未找到，"
+                    f"跳过代码输入校验（券商界面升级时请运行诊断排查）")
+                return
+            try:
+                poll_until(lambda: _name_filled(name_el),
+                           timeout=timeout_seconds, interval=0.1,
+                           description=f"证券名称联动（第 {attempt} 次输入）")
+                self.logger.info(
+                    f"证券名称联动已填充（第 {attempt} 次输入），代码输入校验通过")
+                return
+            except PollTimeoutError:
+                if attempt == 1:
+                    self.logger.warning(
+                        f"代码输入校验失败（名称未联动，期望代码 {code}），"
+                        f"清空重输一次")
+                    self.window_service.input_text_to_element(
+                        window, CONTROL_ID_CODE, code,
+                        descendants=descendants, delay=0.1)
+                    # 重输后重新获取 1036 引用（防 UIA 引用失效）
+                    name_el = self.window_service.find_element_in_window(
+                        window, CONTROL_ID_STOCK_NAME)
+
+        actual = ""
+        try:
+            if name_el is not None:
+                actual = (name_el.window_text() or "").strip()
+        except Exception:
+            pass
+        raise ApiError(
+            ErrorCode.INPUT_VERIFY_FAILED,
+            f"证券代码输入校验失败: 键入 {code} 后证券名称未自动填充"
+            f"（代码未被客户端接受，重输 1 次仍失败）",
+            suggestion="请确认证券代码有效（6 位数字、交易所已上市）；"
+                       "若反复出现请运行 /diagnostic/snapshot 排查客户端"
+                       "界面状态，或临时在配置中关闭 order.verify_code_input",
+            details={"code": code,
+                     "name_control_id": CONTROL_ID_STOCK_NAME,
+                     "name_text": actual},
+        )
 
     def _click_price_type_toggle(self, window, descendants=None) -> None:
         """点击价格类型切换按钮（控制 ID=1400），不等待确认

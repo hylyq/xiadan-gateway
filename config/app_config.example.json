@@ -33,6 +33,7 @@
     "capture_entrust_no": false,
     "entrust_no_timeout_seconds": 5.0,
     "verify_entrust_no": false,
+    "verify_code_input": true,
     "reject_outside_trading_hours": false
   },
   "logging": {

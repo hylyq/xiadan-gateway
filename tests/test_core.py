@@ -2174,6 +2174,152 @@ class TestOrderDialogDrift:
             tq._last_order_had_dialog = None
 
 
+class TestCodeAcceptedVerification:
+    """证券名称联动校验测试（cid=1036 非空 = 代码被客户端真实接受）
+
+    背景：代码输入框 1032 是壳控件回读恒空（见 TestSendKeyBackground 系
+    与记忆），输入完整性只能靠客户端联动信号校验——名称 Static 1036 在
+    代码被完整解析后自动填充（清空后联动清空、无效代码保持空，实测边界
+    一致）。替代已回滚的 window_text 回读校验（假阴性）。
+    """
+
+    @staticmethod
+    def _make_trader(monkeypatch, name_seq, cfg=None):
+        """构造 Trader + 脚本化 1036 控件
+
+        name_seq: 每次读 1036 依序返回的文本列表（耗尽后返回最后一项）
+        返回 (trader, name_el, input_calls)
+        """
+        from src.core.trader import Trader
+
+        class _NameEl:
+            def __init__(self):
+                self.calls = 0
+
+            def window_text(self):
+                t = name_seq[min(self.calls, len(name_seq) - 1)]
+                self.calls += 1
+                return t
+
+        name_el = _NameEl()
+        input_calls = []
+
+        class _WS:
+            def find_element_in_window(self, window, cid, descendants=None):
+                assert cid == 1036
+                return name_el
+
+            def input_text_to_element(self, window, cid, text,
+                                      descendants=None, delay=0.1):
+                input_calls.append((cid, text))
+                return True
+
+        class _Cfg:
+            def __init__(self, d):
+                self._d = d
+
+            def get_order_config(self):
+                return self._d
+
+        trader = Trader.__new__(Trader)
+        trader.window_service = _WS()
+        trader.config = _Cfg(cfg if cfg is not None
+                             else {"verify_code_input": True})
+        trader.logger = type("L", (), {
+            "info": staticmethod(lambda *a, **k: None),
+            "warning": staticmethod(lambda *a, **k: None)})()
+        return trader, name_el, input_calls
+
+    def test_name_filled_immediately_passes(self, monkeypatch):
+        """联动立即填充 → 通过，无重输"""
+        trader, name_el, input_calls = self._make_trader(
+            monkeypatch, ["大唐发电"])
+        # poll_until 真实时间：首查即非空立即返回
+        trader._verify_code_accepted(None, [], "601991", timeout_seconds=0.3)
+        assert input_calls == []
+
+    def test_name_late_fill_passes(self, monkeypatch):
+        """联动延迟填充（前几次空读）→ 轮询等到后通过"""
+        trader, name_el, input_calls = self._make_trader(
+            monkeypatch, ["", "", "", "", "大唐发电"])
+        trader._verify_code_accepted(None, [], "601991", timeout_seconds=2.0)
+        assert input_calls == []
+
+    def test_name_never_fills_raises_after_retype(self, monkeypatch):
+        """两次输入均未联动 → INPUT_VERIFY_FAILED（方法内重输一次）"""
+        import pytest
+
+        from src.exceptions import ApiError, ErrorCode
+        trader, name_el, input_calls = self._make_trader(
+            monkeypatch, [""])
+        with pytest.raises(ApiError) as exc_info:
+            trader._verify_code_accepted(None, [], "601991", timeout_seconds=0.2)
+        assert exc_info.value.error_code == ErrorCode.INPUT_VERIFY_FAILED
+        assert exc_info.value.details["code"] == "601991"
+        # 初始输入在 place_order 中；本方法内恰好重输一次
+        assert input_calls == [(1032, "601991")]
+
+    def test_retype_success_second_pass(self, monkeypatch):
+        """首次未联动、重输后联动 → 通过且方法内重输一次"""
+        from src.core.trader import Trader
+
+        # 重输动作触发联动（确定性模拟：重输前名称恒空，重输后填充）
+        state = {"retyped": False}
+        input_calls = []
+
+        class _NameEl:
+            def window_text(self):
+                return "大唐发电" if state["retyped"] else ""
+
+        class _WS:
+            def find_element_in_window(self, window, cid, descendants=None):
+                return _NameEl()
+
+            def input_text_to_element(self, window, cid, text,
+                                      descendants=None, delay=0.1):
+                input_calls.append((cid, text))
+                state["retyped"] = True
+                return True
+
+        trader = Trader.__new__(Trader)
+        trader.window_service = _WS()
+        trader.config = type("C", (), {
+            "get_order_config": lambda self: {"verify_code_input": True}})()
+        trader.logger = type("L", (), {
+            "info": staticmethod(lambda *a, **k: None),
+            "warning": staticmethod(lambda *a, **k: None)})()
+
+        trader._verify_code_accepted(None, [], "601991", timeout_seconds=0.3)
+        assert input_calls == [(1032, "601991")]
+
+    def test_disabled_skips_verification(self, monkeypatch):
+        """verify_code_input=false → 不校验（即使名称恒空）"""
+        from src.core.trader import Trader
+        trader, name_el, input_calls = self._make_trader(
+            monkeypatch, [""], cfg={"verify_code_input": False})
+        trader._verify_code_accepted(None, [], "601991", timeout_seconds=0.1)
+        assert input_calls == []
+
+    def test_missing_name_control_degrades(self, monkeypatch):
+        """名称控件缺失（界面升级）→ 放行不阻塞下单"""
+        from src.core.trader import Trader
+
+        class _WS:
+            def find_element_in_window(self, *a, **k):
+                return None
+
+            def input_text_to_element(self, *a, **k):
+                raise AssertionError("控件缺失时不应重输")
+
+        trader = Trader.__new__(Trader)
+        trader.window_service = _WS()
+        trader.config = type("C", (), {
+            "get_order_config": lambda self: {"verify_code_input": True}})()
+        trader.logger = type("L", (), {
+            "warning": staticmethod(lambda *a, **k: None)})()
+        trader._verify_code_accepted(None, [], "601991", timeout_seconds=0.1)
+
+
 class TestCancelValidation:
     """撤单参数校验测试
 

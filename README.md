@@ -57,6 +57,7 @@ Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──�
 | Cross-site defense | Requests carrying an `Origin` header are rejected (browser cross-site requests always carry it; script clients never do) — prevents malicious web pages from firing trades at the local gateway; active even when auth is disabled |
 | Runtime stats | Per-error-code success rates (1-hour window, via `/health`); log alert after 3 consecutive failures; tracks order-confirm-dialog behavior and warns when the client's fast-trade setting appears reset (behavior flip) |
 | Alert webhook | Consecutive task failures ≥3, order-dialog drift, and task timeouts → POST to a webhook (generic JSON or WeCom/DingTalk `text` format) on a background thread, never blocking the trading path |
+| Stock-name linkage verification | After typing the code, polls the name-linkage control (cid=1036 Static) for non-empty text — a reliable signal that the client fully parsed the code (1032 is a shell control whose read-back is always empty). On no linkage, clears and retypes once; still failing raises `INPUT_VERIFY_FAILED` and blocks submission; degrades to pass-through if the name control is missing. Disable via `order.verify_code_input` |
 | Window position self-healing | Before each task, checks window/workarea intersection (60% threshold); auto-moves the window back if it was dragged off-screen (`click_input`/screenshots are coordinate-based and fail off-screen) |
 | MCP adapter | `scripts/mcp_server.py` exposes the gateway as standard MCP tools for LLM agents — read-only queries always registered; `place_order`/`cancel_orders` only with `XIADAN_MCP_TRADING=1`; raw `/actions/*` never exposed (see [MCP Server](#mcp-server-agent-access)) |
 
@@ -119,7 +120,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
   "alerts": { "webhook_url": "", "format": "generic", "timeout_seconds": 5 },
   "ocr": { "warmup_on_start": true, "max_retry": 3, "ddddocr_enabled": false },
   "query": { "copy_method": "keyboard" },
-  "order": { "capture_entrust_no": false, "verify_entrust_no": false, "reject_outside_trading_hours": false },
+  "order": { "capture_entrust_no": false, "verify_entrust_no": false, "verify_code_input": true, "reject_outside_trading_hours": false },
   "auth": { "enabled": false, "token": "" },
   "logging": { "level": "INFO", "file": "logs/app.log", "screenshot_dir": "logs/screenshots" }
 }
@@ -139,6 +140,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
 | `ocr.max_retry` | 3 | Max captcha OCR retries |
 | `order.reject_outside_trading_hours` | false | Fail fast at `place_order` entry outside trading hours (weekday + statutory holidays via chinesecalendar + 9:15-11:30 / 13:00-15:00; degrades to weekday-only when the package is missing or its data doesn't cover the year — broker errors remain the fallback). Off by default to preserve after-hours order queuing |
 | `order.verify_entrust_no` | false | After a successful order with a captured entrust number, automatically query today's orders to reconcile (response gains `entrust_no_verified`). Adds one query to the response time — enlarge client timeout accordingly. Requires `order.capture_entrust_no` |
+| `order.verify_code_input` | true | After typing the code, verify the stock-name linkage (non-empty = code accepted); on no linkage it retypes once, then rejects submission (`INPUT_VERIFY_FAILED`). Adds ~3-6s on the failure path |
 | `ocr.ddddocr_enabled` | false | ddddocr debug switch (dual-engine verification + template extraction; requires `uv sync --extra ocr`) |
 | `window_monitor.enabled` | true | Window-minimized monitoring switch |
 | `auth.enabled` | false | Token auth switch |

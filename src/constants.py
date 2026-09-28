@@ -20,6 +20,11 @@ CONTROL_ID_PRICE = 1033       # 价格输入框（仅限价）
 CONTROL_ID_AMOUNT = 1034      # 数量输入框
 CONTROL_ID_SUBMIT = 1006      # 下单按钮
 CONTROL_ID_PRICE_TYPE = 1400  # 价格类型标签（点击切换限价/市价）
+CONTROL_ID_STOCK_NAME = 1036  # 证券名称联动显示（Static）——代码被客户端
+                              # 完整解析后自动填充，是代码输入完整性的
+                              # 可靠信号（1032 是壳控件回读恒空。2026-09-28
+                              # 实测：清空代码框后联动清空、无效代码保持
+                              # 空、有效代码填充名称、重复输入正常）
 
 # 委托确认弹窗控件
 CONFIRM_DIALOG_TITLE_ID = 1365  # "委托确认"标题 Image
