@@ -175,8 +175,8 @@ class Trader:
 
         # 4. 填写股票代码（必须先填代码，否则价格模式切换可能被禁用）
         # 注意：代码/价格/数量输入框是券商自绘壳控件，window_text() 回读
-        # 恒为空（诊断确认），不能用作输入校验信号——verify 参数留空。
-        # 输入是否生效以「证券名称自动填充 / 价格联动」为准（见后续防御）。
+        # 恒为空（2026-09-28 盘中诊断确认），不能用作输入校验信号。
+        # 输入是否生效以「证券名称自动填充 / 价格联动」为准（待实现）。
         with timed("填写股票代码", self.logger):
             self.window_service.input_text_to_element(
                 window, CONTROL_ID_CODE, code, descendants=_descendants, delay=0.1)
