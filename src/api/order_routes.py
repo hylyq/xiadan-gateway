@@ -15,6 +15,7 @@ from src.api.response import (
 )
 from src.api.task_queue import TaskQueue
 from src.constants import CANCEL_TYPE_MAP
+from src.core.ocr import OcrService
 from src.core.trader import Trader
 from src.exceptions import ApiError, ErrorCode
 from src.models.config import AppConfig
@@ -54,8 +55,11 @@ def _maybe_verify_entrust_no(config: AppConfig, task_queue: TaskQueue, result: d
     logger = Logger.get_instance()
     try:
         query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
+        # OCR 服务必须显式传入——对账查询可能触发验证码，缺省会话
+        # OCR 未初始化导致对账必然失败（2026-09-28 盘中实测）
         orders = task_queue.submit(
-            func=lambda: PositionService(WindowService()).get_today_orders(),
+            func=lambda: PositionService(
+                WindowService(), OcrService.get_instance()).get_today_orders(),
             task_name="get_today_orders",
             params={"verify_entrust_no": entrust_no},
             timeout=query_timeout,
