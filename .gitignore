@@ -20,9 +20,13 @@ env/
 *.swp
 *.swo
 
-# 日志
+# 日志与诊断产物
 logs/*.log
-logs/screenshots/*.png
+logs/banner_samples/
+logs/screenshots/
+
+# 本地项目约定（不入库）
+CLAUDE.md
 
 # 配置覆盖
 config/app_config.local.json
