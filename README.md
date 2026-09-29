@@ -407,14 +407,14 @@ The exposure surface is deliberately layered:
 
 | Layer | Tools | Availability |
 |-------|-------|--------------|
-| Read-only queries | `gateway_health` `get_queue_status` `get_balance` `get_positions` `get_today_trades` `get_today_orders` | always registered |
+| Read-only queries | `gateway_health` `get_queue_status` `get_balance` `get_positions` `get_today_trades` `get_today_orders` `get_order_status` | always registered |
 | Trading | `place_order` `cancel_orders` | only with `XIADAN_MCP_TRADING=1` |
 | Raw UI actions (`/actions/*`), `/admin/*` | — | never exposed to agents |
 
 Safety design:
 
 - The adapter imports nothing from `src/` and never touches the trading path — queue serialization, idempotency, and alerting are all inherited via the HTTP layer
-- `place_order` maps `buy`/`sell` to `1`/`2`, validates locally (6-digit code, positive integer amount, ≤2-decimal price), **requires an explicit numeric price for limit orders** ("latest price" is rejected), and its description forces a confirm-then-verify workflow: query positions/balance → repeat the parameters verbatim to the user and get consent → place → verify with `get_today_orders`
+- `place_order` maps `buy`/`sell` to `1`/`2`, validates locally (6-digit code, positive integer amount, ≤2-decimal price), **requires an explicit numeric price for limit orders** ("latest price" is rejected), and its description forces a confirm-then-verify workflow: query positions/balance → repeat the parameters verbatim to the user and get consent → place → verify with `get_order_status` (per-order status + fills; falls back to `get_today_orders` when the banner number wasn't captured)
 - Gateway auth is reused: token from `XIADAN_MCP_TOKEN`, auto-read from `config/app_config.json` if unset; requests never carry an `Origin` header (compatible with the cross-site defense)
 - Gateway errors surface as MCP `isError` results formatted as `[ERROR_CODE] message | suggestion | request_id`; an unreachable gateway returns actionable guidance instead of a stack trace
 
