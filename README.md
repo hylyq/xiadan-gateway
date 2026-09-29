@@ -527,6 +527,12 @@ xiadan-gateway/
 | **chinesecalendar** | Statutory-holiday awareness for trading-hours precheck (auto-degrades when data year is uncovered) |
 | **pytest** | Unit tests |
 
+> 📅 **chinesecalendar annual maintenance**: holiday data follows the State Council's release cadence; a new version covering the next year usually ships around **November** each year. When installed data doesn't cover the current year, the trading-hours precheck **silently degrades** to weekend/weekday-only checks (statutory holidays fall back to broker-side rejection, with no local warning) — manually upgrade once after each November release:
+>
+> ```bash
+> uv lock --upgrade-package chinesecalendar && uv sync
+> ```
+
 ## Key Design
 
 ### Task Queue and Watchdog
