@@ -47,7 +47,7 @@
 | 模式切换流水线 | 限价↔市价切换时先点按钮不等待，立即填数量——数量填充的 ~0.7s 与标签变化重叠，验证在填数量之后自然就绪 |
 | 弹窗分类处理 | 委托确认→点Y/N；警告→点Y继续；**价格超限→点N取消+返回`PRICE_OUT_OF_RANGE`**；错误→关闭+报错 |
 | 看门狗恢复 | 任务超时自动截图 + 激活 + ESC×3，重置后返回错误 |
-| 幂等检查 | 60s 窗口内相同参数的下单被拒绝，防 HTTP 超时重试重复下单；支持客户端 `Idempotency-Key` 请求头按键去重 |
+| 幂等检查 | **必填** `Idempotency-Key` 请求头（1–128 字符）——每个逻辑订单一个 key：窗口内同 key 拒绝（`DUPLICATE_ORDER`，HTTP 超时重试保护）；新 key = 新订单，含同参数多单 |
 | OCR 验证码 | 轻量模板匹配引擎，失败自动存档，可选 ddddocr 离线训练 |
 | 生产级服务器 | `waitress` WSGI + 优雅关闭（SIGINT/SIGTERM） |
 | 配置热更新 | `POST /admin/reload-config` 无需重启 |
@@ -58,6 +58,8 @@
 | 运行统计 | 按错误码聚合成功率（最近 1 小时窗口，`/health` 返回），连续 3 次失败日志告警；跟踪下单弹窗行为，客户端「快速交易」设置被重置（弹窗行为翻转）时告警 |
 | 告警外推 | 连续任务失败≥3、下单弹窗行为漂移、任务超时 → POST webhook（generic JSON 或企业微信/钉钉 `text` 格式），后台线程发送不阻塞交易路径 |
 | 证券名称联动校验 | 输入代码后轮询名称联动控件（cid=1036 Static）非空——代码被客户端完整解析的可靠信号（1032 是壳控件回读恒空）。未联动自动清空重输一次，仍失败报 `INPUT_VERIFY_FAILED` 阻止提交；名称控件缺失时降级放行。可用 `order.verify_code_input` 关闭 |
+| 委托号横幅截获 | 提交点击后，后台线程屏幕抓取右下角黄色横幅（~12fps；自绘覆盖层，`PrintWindow` 不可见），黄色掩码定位 + 模板 OCR 读出合同编号。解析与字长无关，以尾部全角句号为锚——券商/交易所展示格式不一（模拟客户端 10 位；深交所规范 22 位）。成功返回 `entrust_no`；失败返回 `null`（遮挡/最小化/出屏/帧不可读），不影响下单本身。要求横幅条带在屏且无遮挡；出屏由每任务前的位置自愈兜底 |
+| 委托状态与成交回报 | `GET /orders/{entrust_no}/status` 按合同编号 join 当日委托 × 当日成交：委托状态由数量推导（不依赖券商备注文本），成交聚合含加权均价与逐笔明细——下单响应的轮询侧对应物，供策略调用方使用 |
 | 窗口位置自愈 | 任务开始前检查窗口与工作区交集（阈值 60%），窗口被误拖出屏幕时自动移回（`click_input`/截图按屏幕坐标工作，出屏会失效） |
 | MCP 适配器 | `scripts/mcp_server.py` 将网关暴露为标准 MCP 工具供大模型 agent 调用——只读查询恒注册；`place_order`/`cancel_orders` 需 `XIADAN_MCP_TRADING=1`；`/actions/*` 裸操作永不暴露（见 [MCP 服务](#mcp-服务agent-接入)） |
 
@@ -120,7 +122,7 @@ uv run python main.py --dev       # 开发模式（热加载）
   "alerts": { "webhook_url": "", "format": "generic", "timeout_seconds": 5 },
   "ocr": { "warmup_on_start": true, "max_retry": 3, "ddddocr_enabled": false },
   "query": { "copy_method": "keyboard" },
-  "order": { "capture_entrust_no": false, "verify_entrust_no": false, "verify_code_input": true, "reject_outside_trading_hours": false },
+  "order": { "capture_entrust_no": false, "entrust_no_timeout_seconds": 5.0, "verify_entrust_no": false, "verify_code_input": true, "reject_outside_trading_hours": false },
   "auth": { "enabled": false, "token": "" },
   "logging": { "level": "INFO", "file": "logs/app.log", "screenshot_dir": "logs/screenshots" }
 }
@@ -133,13 +135,16 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `task_queue.query_timeout_seconds` | 30 | 查询操作超时（秒） |
 | `task_queue.confirm_timeout_seconds` | 10 | 确认/按键操作超时（秒） |
 | `task_queue.max_size` | 50 | 队列最大长度 |
-| `idempotency.order_dedup_window_seconds` | 60 | 下单去重窗口（秒） |
+| `idempotency.order_dedup_window_seconds` | 60 | 同 key 重试拦截窗（秒），与推荐客户端超时 40s 校准 |
 | `alerts.webhook_url` | 空 | 告警外推 webhook（**空=禁用**）：连续任务失败≥3、下单弹窗行为漂移、任务看门狗超时时后台 POST JSON；支持热更新 |
 | `alerts.format` | generic | `generic`=完整结构化 JSON（自建 receiver）；`text`=企业微信群机器人/钉钉自定义机器人文本格式；`feishu`=飞书/Lark 自定义机器人文本格式 |
 | `alerts.timeout_seconds` | 5 | webhook POST 超时（秒）。后台 daemon 线程发送，不阻塞交易路径 |
 | `ocr.max_retry` | 3 | 验证码识别最大重试次数 |
 | `order.reject_outside_trading_hours` | false | 下单入口交易时段预检（工作日 + 法定节假日 + 9:15-11:30 / 13:00-15:00 粗判，节假日历三级降级：chinesecalendar → 深交所官方月度日历（当年 12 个月一次性拉取并缓存到 `data/trading_calendar/`，缓存齐全后离线读取）→ 仅周末/工作日粗判，节假日由券商报错兜底）。开启后非交易时段秒级返回 `OUTSIDE_TRADING_HOURS`，免走完整 UI 流程 ~11s；默认关闭以保留收盘后挂单行为 |
-| `order.verify_entrust_no` | false | 下单成功拿到委托号后自动追加一笔当日委托查询对账（响应附加 `entrust_no_verified`：命中/未命中/查询失败）。开启后接口耗时增加一次查询，调用方 timeout 需相应放大。需配合 `order.capture_entrust_no` 使用 |
+| `order.capture_entrust_no` | false | 下单成功后从右下角成功横幅截获合同编号（后台抓屏 + 模板 OCR，句号锚定——券商编号长度不一）。截获失败返回 `null`；下单成败与之无关（见响应说明）。成功路径加 ~1s，失败路径最多 5s 截获超时。配合 `order.verify_entrust_no` 对账使用 |
+| `order.entrust_no_timeout_seconds` | 5.0 | 横幅截获等待超时（秒）；成功即返回，仅拖慢失败路径 |
+| `order.recover_entrust_no` | true | 横幅截获失败时按**提交点击时刻×参数四元组**（操作+代码+价格+数量；对全精度点击时刻施加秒桶窗口 [-1,+2] 构成秒桶闭包，完整覆盖秒粒度「委托时间」）反查当日委托回补编号。仅唯一命中才采纳（0 或 ≥2 候选保持 `null`，绝不猜测）。以独立排队查询链式追加——仅截获失败路径多 ~6-8s，成功路径不受影响。采纳时置 `entrust_no_recovered: true` |
+| `order.verify_entrust_no` | false | 下单成功拿到委托号后自动追加一笔当日委托查询对账（响应附加 `entrust_no_verified`）。未命中时先 F5 刷新当日委托页重拷一次才报 `false`——券商委托列表对新委托有秒级可见性延迟（2026-09-29 压测实测）。开启后接口耗时增加一次查询，调用方 timeout 需相应放大。需配合 `order.capture_entrust_no` 使用 |
 | `order.verify_code_input` | true | 输入代码后校验证券名称联动（非空=代码被接受），未联动重输一次仍失败则拒绝提交（`INPUT_VERIFY_FAILED`）。失败路径增加约 3-6s |
 | `ocr.ddddocr_enabled` | false | ddddocr 调试开关（开启后可启用双引擎质检+模板提取，需 `uv sync --extra ocr`） |
 | `window_monitor.enabled` | true | 窗口最小化监控开关 |
@@ -179,7 +184,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | 错误码 | 说明 |
 |--------|------|
 | `VALIDATION_ERROR` | 参数校验失败 |
-| `DUPLICATE_ORDER` | 60s 内重复下单 |
+| `DUPLICATE_ORDER` | 重试拦截窗口内同一 `Idempotency-Key` 重复提交 |
 | `AUTH_REQUIRED` | 缺少认证 token |
 | `AUTH_FAILED` | 认证 token 无效 |
 | `WINDOW_NOT_FOUND` | 交易窗口未找到 |
@@ -196,6 +201,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `ORDER_PRICE_REQUIRED` | 券商要求填写委托价格（市价类型未选择/不受支持，或限价未传 price；建议改用限价模式） |
 | `SERVER_UNAVAILABLE` | 券商服务器不可用（事务处理机转发失败等） |
 | `OCR_FAILED` | 验证码识别失败 |
+| `INPUT_VERIFY_FAILED` | 证券名称联动校验失败（代码未被客户端接受） |
 | `INTERNAL_ERROR` | 未知异常 |
 | `QUEUE_TIMEOUT` | 任务排队超时 |
 | `QUEUE_FULL` | 队列已满 |
@@ -255,6 +261,7 @@ PopupRule(
 | GET | `/positions` | 持仓查询 | ✓ | 40s |
 | GET | `/trades/today` | 今日成交 | ✓ | 40s |
 | GET | `/orders/pending` | 当日委托 | ✓ | 40s |
+| GET | `/orders/{entrust_no}/status` | 按合同编号查委托状态 + 成交回报（join 当日委托 × 当日成交；每次调用两份表拷贝） | ✓ | 60s |
 | POST | `/orders` | 下单（限价/市价） | ✓ | 40s |
 | POST | `/orders/cancel-all` | 撤单（全部/撤买/撤卖/撤最后） | ✓ | 40s |
 | POST | `/actions/send-key` | 手动发送按键 | ✓ | 30s |
@@ -275,24 +282,27 @@ PopupRule(
 | `amount` | | 委托数量 |
 | `price` | | 委托价格（限价模式，最多 2 位小数） |
 | `price_type` | | `limit`=限价(默认), `market`=市价 |
-| `confirm` | | `true`=自动确认(默认), `false`=不确认（预览模式点「否(N)」取消） |
+| `confirm` | | `true`=自动确认（默认）。`false`=仅在客户端弹出「委托确认」时点「否(N)」取消——推荐快速交易设置下（客户端确认全关，见前置准备）无弹窗直接成单，`false` **不是**可靠的预览/拦截 |
 
-> 另支持可选请求头 `Idempotency-Key`（≤128 字符）按客户端键去重，见[幂等与价格校验](#幂等与价格校验)。
+> **强制要求 `Idempotency-Key` 请求头（1–128 字符）**——见[幂等与价格校验](#幂等与价格校验)。key 生命周期：每个逻辑订单一个 key，超时重试复用同一 key；确要新单（含同参数多单）用新 key。
 
 ```bash
 # 市价买入
 curl -X POST http://localhost:5000/orders \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d '{"code":"601991","status":"1","amount":"100","price_type":"market"}'
 
 # 限价买入
 curl -X POST http://localhost:5000/orders \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d '{"code":"600000","status":"1","amount":"100","price":"10.50","price_type":"limit"}'
 
 # 市价卖出
 curl -X POST http://localhost:5000/orders \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d '{"code":"601991","status":"2","amount":"100","price_type":"market"}'
 ```
 
@@ -302,8 +312,8 @@ curl -X POST http://localhost:5000/orders \
 |------|------|
 | `action` / `mode` / `code` / `amount` / `price` | 回显下单参数 |
 | `confirmed` | `true`=已提交（快速交易模式下无错误弹窗即判定成功） |
-| `entrust_no` | 合同编号（委托号）。仅启用 `order.capture_entrust_no` 后返回，截获失败或未启用时为 `null` |
-| `entrust_no_verified` | 委托号对账结果。仅 `order.verify_entrust_no` 开启且拿到委托号时返回：`true`=当日委托落表命中 / `false`=未命中（横幅号可能不准，以查询为准）/ `null`=对账查询失败（不影响下单结果语义） |
+| `entrust_no` | 合同编号（委托号）。仅启用 `order.capture_entrust_no` 后返回，截获失败或未启用时为 `null`。开启 `order.recover_entrust_no`（默认开）时，截获失败会按点击时刻窗口×参数匹配反查当日委托一次——唯一命中才采纳并置 `entrust_no_recovered: true` |
+| `entrust_no_verified` | 委托号对账结果。仅 `order.verify_entrust_no` 开启且拿到委托号时返回：`true`=当日委托落表命中 / `false`=F5 刷新重拷一次后仍未命中（横幅号可能不准，以查询为准）/ `null`=对账查询失败（不影响下单结果语义） |
 
 > **`entrust_no: null` 不代表下单失败**——成败判定基于弹窗检测，与横幅截获解耦。
 > `null` 的语义是"已提交（推断），编号未知"（横幅未出现/被遮挡/窗口最小化）。
@@ -312,6 +322,19 @@ curl -X POST http://localhost:5000/orders \
 > 横幅号与最终落表号可能不一致，按单操作前应以当日委托查询复核；
 > 开启 `order.verify_entrust_no` 可在下单响应中直接获得对账结果
 > （`entrust_no_verified`）。
+
+### GET /orders/{entrust_no}/status — 委托状态与成交回报
+
+按**合同编号** join 当日委托 × 当日成交（两表间的外键；券商生成，长度随券商/交易所而异——模拟客户端 10 位，深交所规范 22 位；成交编号为交易所生成：上交所 16 位零填充，深交所 8 位）。单个排队任务跑两次表拷贝（通常 8–15s）。
+
+- `found: false` —— 当日委托中无此合同编号（非当日下单，或编号有误）
+- `order.status` —— 由数量推导，不依赖券商备注文本（跨券商稳定）：`全部成交` / `部分成交` / `部分成交后撤单` / `全部撤单` / `未成交` / `未知`（数量缺失）
+- `order.is_final` —— `filled + cancelled >= amount`：该笔委托已不再留在市场
+- `fills` —— 按合同编号聚合的成交：`count` / `total_qty` / `total_amount` / `avg_price`（按金额/数量加权，未成交为 `null`）/ `trades[]`（`time` / `trade_no` / `qty` / `price` / `amount`，按时间排序）
+
+```bash
+curl -H "X-API-Key: $TOKEN" http://localhost:5000/orders/6284424619/status
+```
 
 ### POST /orders/cancel-all — 撤单
 
@@ -387,14 +410,14 @@ MCP 客户端 ──stdio──→ mcp_server.py ──HTTP──→ 网关(Flas
 
 | 层 | 工具 | 可用性 |
 |----|------|--------|
-| 只读查询 | `gateway_health` `get_queue_status` `get_balance` `get_positions` `get_today_trades` `get_today_orders` | 恒注册 |
+| 只读查询 | `gateway_health` `get_queue_status` `get_balance` `get_positions` `get_today_trades` `get_today_orders` `get_order_status` | 恒注册 |
 | 交易 | `place_order` `cancel_orders` | 仅 `XIADAN_MCP_TRADING=1` 时注册 |
 | 裸 UI 操作（`/actions/*`）、`/admin/*` | — | 永不暴露给 agent |
 
 安全设计：
 
 - 适配器不 import `src/` 任何模块、不进交易路径——队列串行化、幂等、告警全部经 HTTP 层自动继承
-- `place_order` 将 `buy`/`sell` 映射为 `1`/`2`，本地前置校验（6 位代码、正整数数量、价格最多 2 位小数），限价单**必须显式数值价格**（拒绝"最新价"等模糊语义），工具描述强制「先查询 → 向用户逐字复述参数并确认 → 下单 → `get_today_orders()` 核对」工作流
+- `place_order` 将 `buy`/`sell` 映射为 `1`/`2`，本地前置校验（6 位代码、正整数数量、价格最多 2 位小数），限价单**必须显式数值价格**（拒绝"最新价"等模糊语义），工具描述强制「先查询 → 向用户逐字复述参数并确认 → 下单 → `get_order_status()` 核对（单笔状态+成交；横幅号未截获时回退 `get_today_orders`）」工作流。API 强制的 `Idempotency-Key` 缺省自动填 uuid4（除非 agent 显式传 `idempotency_key`）——自动生成意味着超时后的再次调用会被视为**新订单**（不重用自有 key 就没有重试保护）
 - 认证复用网关 token：优先 `XIADAN_MCP_TOKEN` 环境变量，缺省自动回读 `config/app_config.json`；请求永不携带 `Origin` 头（与跨站防御兼容）
 - 网关错误以 MCP `isError` 结果返回，格式为 `[ERROR_CODE] message | 建议 | request_id`；网关未启动时返回带启动指引的提示而非堆栈
 
@@ -446,7 +469,7 @@ xiadan-gateway/
 │   │   ├── task_queue.py        # 全局任务队列 + 看门狗恢复 + 运行统计
 │   │   ├── response.py          # 统一响应封装（success/error）
 │   │   ├── helpers.py           # 路由层共享工具
-│   │   └── idempotency.py       # 下单幂等检查（参数指纹 / Idempotency-Key）
+│   │   └── idempotency.py       # 下单幂等检查（Idempotency-Key 必填）
 │   ├── core/
 │   │   ├── trader.py            # 下单编排器
 │   │   ├── popup_rules.py       # 弹窗/提交错误分类规则表（动作 + 错误码）
@@ -472,6 +495,7 @@ xiadan-gateway/
 │       └── diagnostic.py        # 诊断工具（截图 + UI 文本 + OCR）
 ├── tests/
 │   ├── test_core.py             # 核心逻辑单元测试（无需真实券商客户端）
+│   ├── test_banner_ocr.py       # 横幅数字 OCR 单元测试（真实横幅条带样本夹具）
 │   └── test_mcp_server.py       # MCP 适配层单元测试（桩掉 HTTP，不启动真实服务）
 ├── scripts/
 │   ├── mcp_server.py           # MCP stdio 适配器（缺省只读；交易工具需 XIADAN_MCP_TRADING=1）
@@ -640,8 +664,8 @@ Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 间隔 0.15s)
 
 ### 幂等与价格校验
 
-- **幂等**：60s 内相同 `code+status+amount+price+price_type` 下单被拒绝（`DUPLICATE_ORDER`）。下单失败清除记录允许重试，超时不清除（防止重复提交）。
-- **客户端幂等键**：`POST /orders` 支持可选请求头 `Idempotency-Key`（≤128 字符）——提供时优先按键去重，HTTP 超时重试携带同一 key 即安全（不会误拦也不会重复下单），不同策略同参数 60s 内不再互撞；缺省回退参数指纹（向后兼容）。
+- **幂等键必填**：每笔 `POST /orders` **必须**携带 `Idempotency-Key` 请求头（1–128 字符）。key 生命周期 = **每个逻辑订单一个 key**：HTTP 超时重试必须**复用同一 key**（窗口内同 key 拒绝 `DUPLICATE_ORDER`——这正是重试保护）；确要新单（含同参数多单）必须用**新 key**，不同 key 同参数立即放行。服务端不校验"随机性"（无法校验），契约是**唯一性**；uuid4 最省力，"策略ID+自增序号"同样合法。
+- **窗口语义**：`idempotency.order_dedup_window_seconds`（默认 60，与推荐客户端超时 40s 校准）= 同 key 重试拦截窗。下单失败清除记录允许同 key 重试；超时不清除（防止重复提交）。key 缺失/空白 → `VALIDATION_ERROR` 并附指引。
 - **价格**：API 层拦截超 2 位小数的价格（`VALIDATION_ERROR`），下单层自动 `sanitize_price()` 格式化为 2 位小数。
 
 ### 查询面板标准化

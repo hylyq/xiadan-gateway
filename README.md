@@ -122,7 +122,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
   "alerts": { "webhook_url": "", "format": "generic", "timeout_seconds": 5 },
   "ocr": { "warmup_on_start": true, "max_retry": 3, "ddddocr_enabled": false },
   "query": { "copy_method": "keyboard" },
-  "order": { "capture_entrust_no": false, "verify_entrust_no": false, "verify_code_input": true, "reject_outside_trading_hours": false },
+  "order": { "capture_entrust_no": false, "entrust_no_timeout_seconds": 5.0, "verify_entrust_no": false, "verify_code_input": true, "reject_outside_trading_hours": false },
   "auth": { "enabled": false, "token": "" },
   "logging": { "level": "INFO", "file": "logs/app.log", "screenshot_dir": "logs/screenshots" }
 }
@@ -142,6 +142,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
 | `ocr.max_retry` | 3 | Max captcha OCR retries |
 | `order.reject_outside_trading_hours` | false | Fail fast at `place_order` entry outside trading hours (weekday + statutory holidays + 9:15-11:30 / 13:00-15:00; three-tier holiday calendar: chinesecalendar → SZSE official monthly calendar (current year fetched once and cached under `data/trading_calendar/`, offline reads once complete) → weekday-only — broker errors remain the fallback). Off by default to preserve after-hours order queuing |
 | `order.capture_entrust_no` | false | After a successful order, capture the contract number from the bottom-right success banner (background screen-grab + template OCR, trailing-period anchored — broker number lengths vary). `null` on capture failure; order success is independent (see the response note). Adds ~1s on success, up to the 5s capture timeout on failure. Pair with `order.verify_entrust_no` for reconciliation |
+| `order.entrust_no_timeout_seconds` | 5.0 | Banner-capture wait timeout (seconds); returns immediately on success, only slows the failure path |
 | `order.recover_entrust_no` | true | When banner capture fails, look the contract number up in today's orders by **submit-click moment × parameter quadruple** (action+code+price+amount; the click second-bucket window [-1,+2] is applied to the full-precision click time as a second-bucket closure so second-granularity 委托时间 is fully covered). Adopted only on a unique match (0 or ≥2 candidates → stays `null`, never guesses). Chained as a separate queued query — adds ~6-8s only on the capture-failure path; successful captures are unaffected. Sets `entrust_no_recovered: true` when adopted |
 | `order.verify_entrust_no` | false | After a successful order with a captured entrust number, automatically query today's orders to reconcile (response gains `entrust_no_verified`). On a miss, the query page is refreshed (F5) and re-copied once before reporting `false` — the broker's order list can lag a few seconds for new orders (2026-09-29 stress-test observed). Adds one query to the response time — enlarge client timeout accordingly. Requires `order.capture_entrust_no` |
 | `order.verify_code_input` | true | After typing the code, verify the stock-name linkage (non-empty = code accepted); on no linkage it retypes once, then rejects submission (`INPUT_VERIFY_FAILED`). Adds ~3-6s on the failure path |
@@ -200,6 +201,7 @@ All responses return HTTP 200; success/failure is distinguished by the JSON `sta
 | `ORDER_PRICE_REQUIRED` | Broker requires an order price (market-order type unselected/unsupported, or limit mode without a price; suggests limit mode) |
 | `SERVER_UNAVAILABLE` | Broker server unavailable (e.g. transaction-processor forwarding failed) |
 | `OCR_FAILED` | Captcha recognition failed |
+| `INPUT_VERIFY_FAILED` | Stock-name linkage verification failed (code not accepted by the client) |
 | `INTERNAL_ERROR` | Unknown exception |
 | `QUEUE_TIMEOUT` | Task queuing timeout |
 | `QUEUE_FULL` | Queue is full |
@@ -496,6 +498,7 @@ xiadan-gateway/
 │       └── diagnostic.py        # diagnostic tools (screenshot + UI text + OCR)
 ├── tests/
 │   ├── test_core.py             # core-logic unit tests (no real broker client needed)
+│   ├── test_banner_ocr.py       # banner digit OCR unit tests (real banner-strip sample fixtures)
 │   └── test_mcp_server.py       # MCP adapter unit tests (HTTP stubbed, no live server needed)
 ├── scripts/
 │   ├── mcp_server.py           # MCP stdio adapter (read-only by default; trading tools behind XIADAN_MCP_TRADING=1)
