@@ -8,6 +8,8 @@
 """
 import pytest
 
+from datetime import date, datetime, time as dtime
+
 from src.core.popup_rules import match_popup_rule, match_submit_error
 from src.core.validation import check_trading_hours, sanitize_price
 from src.services.position_service import PositionService
@@ -2490,3 +2492,105 @@ class TestOrderStatusBuilder:
         r = PositionService.build_order_status("6284424619", [self.ORD], [f1, f2])
         assert [t["trade_no"] for t in r["fills"]["trades"]] == \
             ["6660162516", "6660162901"]
+
+
+class TestEntrustNoRecovery:
+    """横幅截获失败时的委托号回补匹配：点击时刻秒桶窗口 × 参数四元组"""
+
+    @staticmethod
+    def _row(entrust_no, click_epoch, delta, code="601991", action="买入",
+             price="5.350", amount="100"):
+        """构造当日委托行：委托时间 = 点击时刻 + delta（秒）"""
+        t = datetime.fromtimestamp(click_epoch + delta)
+        return {"合同编号": entrust_no, "证券代码": code, "操作": action,
+                "委托价格": price, "委托数量": amount,
+                "委托时间": t.strftime("%H:%M:%S")}
+
+    # 固定今天正午 12:00:00.5 为点击时刻（带小数秒，避开午夜边界）
+    CLICK = None
+
+    @classmethod
+    def _click(cls):
+        if cls.CLICK is None:
+            base = datetime.combine(date.today(), dtime(12, 0, 0))
+            cls.CLICK = base.timestamp() + 0.5
+        return cls.CLICK
+
+    def test_window_covers_fractional_edges(self):
+        """秒桶完整覆盖 [-1,+2]：T=click-0.95（桶 floor-1）与 T=click+1.9
+        （桶 floor+2）都必须命中；桶 floor-2 / floor+3 不命中"""
+        click = self._click()
+        rows = [
+            self._row("A", click, -0.95),   # T=click-0.95 → 桶 floor(click)-1
+            self._row("B", click, 1.9),     # T=click+1.9  → 桶 floor(click)+2
+            self._row("C", click, -1.9),    # 桶 floor-2 → 窗口外
+            self._row("D", click, 2.9),     # 桶 floor+3 → 窗口外
+        ]
+        r = PositionService.recover_entrust_no(click, rows, "601991", "买入", "5.35", "100")
+        # A/B 各自唯一命中窗口，C/D 窗口外——四行参数全等但时间只有 A/B 在窗内，
+        # 命中 2 行 → 歧义放弃。单测改为逐行验证窗口边界：
+        assert PositionService.recover_entrust_no(
+            click, [rows[0]], "601991", "买入", "5.35", "100") == "A"
+        assert PositionService.recover_entrust_no(
+            click, [rows[1]], "601991", "买入", "5.35", "100") == "B"
+        assert PositionService.recover_entrust_no(
+            click, [rows[2]], "601991", "买入", "5.35", "100") is None
+        assert PositionService.recover_entrust_no(
+            click, [rows[3]], "601991", "买入", "5.35", "100") is None
+
+    def test_exact_second_click(self):
+        """点击恰在整秒：桶 floor(t) 本身及 ±边界桶均可命中"""
+        base = datetime.combine(date.today(), dtime(12, 0, 1))
+        click = float(base.timestamp())  # 整秒，无小数
+        row = self._row("E", click, 0)
+        assert PositionService.recover_entrust_no(
+            click, [row], "601991", "买入", "5.35", "100") == "E"
+
+    def test_price_format_tolerance(self):
+        """委托价格格式差（5.00 vs 5.000）不影响匹配"""
+        click = self._click()
+        row = self._row("F", click, 0.5, price="5.000")
+        assert PositionService.recover_entrust_no(
+            click, [row], "601991", "买入", "5.00", "100") == "F"
+
+    def test_param_mismatch_excluded(self):
+        """代码/方向/价格/数量任一不等即排除"""
+        click = self._click()
+        rows = [
+            self._row("G", click, 0.5, code="600000"),
+            self._row("H", click, 0.5, action="卖出"),
+            self._row("I", click, 0.5, price="5.8"),
+            self._row("J", click, 0.5, amount="200"),
+        ]
+        for row in rows:
+            assert PositionService.recover_entrust_no(
+                click, [row], "601991", "买入", "5.35", "100") is None, row
+
+    def test_ambiguous_returns_none(self):
+        """窗口内同参数命中 2 行 → 歧义放弃返回 None"""
+        click = self._click()
+        rows = [self._row("K1", click, 0.3), self._row("K2", click, 1.2)]
+        assert PositionService.recover_entrust_no(
+            click, rows, "601991", "买入", "5.35", "100") is None
+
+    def test_same_params_outside_window(self):
+        """同参数委托在窗口外（61 秒前）不参与匹配"""
+        click = self._click()
+        rows = [self._row("L", click, -61)]
+        assert PositionService.recover_entrust_no(
+            click, rows, "601991", "买入", "5.35", "100") is None
+
+    def test_market_order_price_skipped(self):
+        """市价单无价格参数：跳过价格条件，按其余三元组+时间匹配"""
+        click = self._click()
+        row = self._row("M", click, 0.5, price="0.000")
+        assert PositionService.recover_entrust_no(
+            click, [row], "601991", "买入", None, "100") == "M"
+
+    def test_malformed_time_excluded(self):
+        """委托时间解析失败（脏数据）的行被保守排除"""
+        click = self._click()
+        row = self._row("N", click, 0.5)
+        row["委托时间"] = "--"
+        assert PositionService.recover_entrust_no(
+            click, [row], "601991", "买入", "5.35", "100") is None

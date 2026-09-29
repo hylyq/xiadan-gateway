@@ -142,6 +142,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
 | `ocr.max_retry` | 3 | Max captcha OCR retries |
 | `order.reject_outside_trading_hours` | false | Fail fast at `place_order` entry outside trading hours (weekday + statutory holidays via chinesecalendar + 9:15-11:30 / 13:00-15:00; degrades to weekday-only when the package is missing or its data doesn't cover the year — broker errors remain the fallback). Off by default to preserve after-hours order queuing |
 | `order.capture_entrust_no` | false | After a successful order, capture the contract number from the bottom-right success banner (background screen-grab + template OCR, trailing-period anchored — broker number lengths vary). `null` on capture failure; order success is independent (see the response note). Adds ~1s on success, up to the 5s capture timeout on failure. Pair with `order.verify_entrust_no` for reconciliation |
+| `order.recover_entrust_no` | true | When banner capture fails, look the contract number up in today's orders by **submit-click moment × parameter quadruple** (action+code+price+amount; the click second-bucket window [-1,+2] is applied to the full-precision click time as a second-bucket closure so second-granularity 委托时间 is fully covered). Adopted only on a unique match (0 or ≥2 candidates → stays `null`, never guesses). Chained as a separate queued query — adds ~6-8s only on the capture-failure path; successful captures are unaffected. Sets `entrust_no_recovered: true` when adopted |
 | `order.verify_entrust_no` | false | After a successful order with a captured entrust number, automatically query today's orders to reconcile (response gains `entrust_no_verified`). Adds one query to the response time — enlarge client timeout accordingly. Requires `order.capture_entrust_no` |
 | `order.verify_code_input` | true | After typing the code, verify the stock-name linkage (non-empty = code accepted); on no linkage it retypes once, then rejects submission (`INPUT_VERIFY_FAILED`). Adds ~3-6s on the failure path |
 | `ocr.ddddocr_enabled` | false | ddddocr debug switch (dual-engine verification + template extraction; requires `uv sync --extra ocr`) |
@@ -306,7 +307,7 @@ curl -X POST http://localhost:5000/orders \
 |-------|-------------|
 | `action` / `mode` / `code` / `amount` / `price` | Echo of order parameters |
 | `confirmed` | `true`=submitted (in fast-trade mode, no error popup means success) |
-| `entrust_no` | Contract number. Returned only when `order.capture_entrust_no` is enabled; `null` on capture failure or when disabled |
+| `entrust_no` | Contract number. Returned only when `order.capture_entrust_no` is enabled; `null` on capture failure or when disabled. With `order.recover_entrust_no` (default on), a failed capture is retried once against today's bookings via click-time window × parameter match — adopted only on a unique hit, with `entrust_no_recovered: true` |
 | `entrust_no_verified` | Reconciliation result. Returned only when `order.verify_entrust_no` is enabled and a banner number was captured: `true`=matched in today's booked orders / `false`=not matched (banner number may be wrong, trust the query) / `null`=reconciliation query failed (order-result semantics unchanged) |
 
 > **`entrust_no: null` does NOT mean the order failed** — success is judged by

@@ -30,6 +30,54 @@ def _get_trader() -> Trader:
     return Trader(WindowService())
 
 
+def _maybe_recover_entrust_no(config: AppConfig, task_queue: TaskQueue, result: dict) -> dict:
+    """横幅截获失败时的委托号回补（order.recover_entrust_no 门控）
+
+    横幅 OCR 偶发不可读（2026-09-29 盘中实测：三连同号黏连已修复，仍有
+    遮挡/动画帧等残缺场景）时，以「点击下单时刻（全精度）的秒桶窗口
+    [-1,+2] × 参数四元组」在当日委托中反查合同编号：
+    - 时间窗秒桶闭包保证覆盖委托时间秒级取整的边界（见
+      PositionService.recover_entrust_no）
+    - 参数四元组（操作+代码+价格+数量）为主键，时间窗负责消歧
+      （幂等窗口外的同参数重复委托）
+    - 命中恰好 1 行才采纳（0/多行保持 null，绝不猜）——失败模式保守，
+      最坏结果与不回补相同
+
+    采纳后 entrust_no_recovered=True，后续对账 (_maybe_verify_entrust_no)
+    照常执行。仅在截获失败路径多一次当日委托查询（~6-8s），成功路径零开销。
+    """
+    order_cfg = config.get_order_config()
+    if not (order_cfg.get("recover_entrust_no", True)
+            and result.get("confirmed")
+            and "entrust_no" in result and result.get("entrust_no") is None
+            and result.get("submit_click_epoch")):
+        return result
+
+    logger = Logger.get_instance()
+    try:
+        query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
+        orders = task_queue.submit(
+            func=lambda: PositionService(
+                WindowService(), OcrService.get_instance()).get_today_orders(),
+            task_name="get_today_orders",
+            params={"recover_entrust_no": True},
+            timeout=query_timeout,
+        )
+        recovered = PositionService.recover_entrust_no(
+            result["submit_click_epoch"], orders or [],
+            code=result.get("code"), action=result.get("action"),
+            price=result.get("price"), amount=result.get("amount"))
+        if recovered:
+            result["entrust_no"] = recovered
+            result["entrust_no_recovered"] = True
+            logger.info(f"entrust_no 回补成功: {recovered}（点击时刻秒桶窗口匹配）")
+        else:
+            logger.info("entrust_no 回补未命中（0 或多行候选），保持 null")
+    except Exception as e:
+        logger.warning(f"entrust_no 回补查询失败（不影响下单结果）: {e}")
+    return result
+
+
 def _maybe_verify_entrust_no(config: AppConfig, task_queue: TaskQueue, result: dict) -> dict:
     """entrust_no 可选自动对账（order.verify_entrust_no 门控）
 
@@ -200,6 +248,7 @@ def xiadan():
             },
             timeout=order_timeout
         )
+        result = _maybe_recover_entrust_no(config, task_queue, result)
         result = _maybe_verify_entrust_no(config, task_queue, result)
         return success_response(result, request_id, duration_ms=(time.time() - _start) * 1000)
     except Exception as e:

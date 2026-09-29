@@ -815,6 +815,69 @@ class PositionService:
             return cast(0)
 
     @staticmethod
+    def recover_entrust_no(click_epoch: float, order_rows: list,
+                           code: str, action: str,
+                           price, amount) -> "str | None":
+        """横幅截获失败时按「点击时刻窗口 × 参数四元组」反查合同编号（纯函数）
+
+        匹配规则（宁可放弃、绝不猜错）：
+        - 参数全等：操作+证券代码+委托数量+委托价格（数值化比较，容忍
+          "5.00"/"5.000" 格式差；price 为 None（市价）时跳过价格条件）
+        - 时间窗：委托秒桶 ∈ [floor(click)-1, floor(click)+2]。点击时刻
+          为全精度、委托时间仅秒级精度——秒桶闭包保证真实委托时刻
+          T ∈ [click-1, click+2] 时其所在桶必被覆盖（朴素比较会在前沿
+          丢桶：如点击 X.73、委托盖在 floor(click)-1 桶内的情形）
+        - 窗口内命中恰好 1 行才返回其合同编号；0 行或 ≥2 行（歧义）
+          返回 None
+
+        背景：幂等去重仅覆盖 60s，同参数委托可在更早时段重复出现，
+        时间窗负责消歧；参数四元组本身排除手工单/其他软件单。
+        """
+        from datetime import datetime
+
+        if click_epoch is None:
+            return None
+        lo = int(click_epoch) - 1   # int() 对正时间戳即向秒取整
+        hi = int(click_epoch) + 2
+        today = datetime.now().date()
+
+        code = str(code or "").strip()
+        action = str(action or "").strip()
+        amount_num = PositionService._num(amount, int)
+        price_num = None if price in (None, "") else PositionService._num(price)
+
+        candidates = []
+        for row in order_rows or []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("证券代码", "")).strip() != code or \
+                    str(row.get("操作", "")).strip() != action:
+                continue
+            if PositionService._num(row.get("委托数量"), int) != amount_num:
+                continue
+            if price_num is not None:
+                if abs(PositionService._num(row.get("委托价格")) - price_num) >= 0.005:
+                    continue
+            # 委托时间秒桶（HH:MM:SS + 今天日期，按本地时区折算 epoch，
+            # 与 time.time() 同基准；解析失败保守排除）
+            t_str = str(row.get("委托时间", "")).strip()
+            try:
+                bucket = int(datetime.combine(
+                    today, datetime.strptime(t_str, "%H:%M:%S").time()
+                ).timestamp())
+            except (ValueError, TypeError):
+                continue
+            if not (lo <= bucket <= hi):
+                continue
+            entrust = str(row.get("合同编号", "")).strip()
+            if entrust:
+                candidates.append(entrust)
+
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
+    @staticmethod
     def build_order_status(entrust_no: str, order_rows: list, fill_rows: list) -> dict:
         """按合同编号 join 当日委托 × 当日成交，产出状态+回报汇总（纯函数）
 

@@ -52,6 +52,7 @@ DEFAULT_CONFIG = {
     "order": {
         "capture_entrust_no": False,      # 下单后截获右下角横幅回传委托号（模板匹配，零额外依赖）
         "entrust_no_timeout_seconds": 5.0,  # 横幅截获超时（成功即返回，超时仅拖慢失败路径）
+        "recover_entrust_no": True,       # 横幅截获失败时按「点击时刻秒桶窗口[-1,+2]×参数四元组」反查当日委托回补（仅失败路径多一次查询）
         "verify_entrust_no": False,       # 下单成功拿到委托号后自动查当日委托对账（追加一次查询耗时）
         "verify_code_input": True,        # 输入代码后校验证券名称联动（cid=1036 非空=代码被客户端接受）
         "reject_outside_trading_hours": False  # 非交易时段入口快速失败（默认关闭，保留收盘后挂单行为）

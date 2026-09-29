@@ -257,11 +257,13 @@ class Trader:
         # 8. 点击下单按钮并处理弹窗
         # 横幅截获线程在点击前启动：横幅出现于提交后 ~0.3-0.5s、存活 1-2s，
         # 必须与弹窗检测并行，否则 place_order 返回时横幅已消失
+        submit_click_epoch = None  # 全精度点击完成时刻（截获失败时回补窗口锚点）
         if capture.enabled:
             capture.start(window)
         with timed("点击下单按钮", self.logger):
             self.window_service.click_element(
                 window, CONTROL_ID_SUBMIT, descendants=_descendants)
+            submit_click_epoch = time.time()
             self.logger.info("已点击下单按钮，等待弹窗")
 
         # 统一弹窗检测与处理：sleep(0.2) 等待渲染 + 一次 UIA 遍历完成检测+处理
@@ -510,6 +512,8 @@ class Trader:
             result["entrust_no"] = capture.wait_result(
                 float(self.config.get_order_config()
                       .get("entrust_no_timeout_seconds", 3.0)) + 0.5)
+            # 全精度点击时刻随结果带出：截获失败时路由层据此做秒桶窗口回补
+            result["submit_click_epoch"] = submit_click_epoch
         self.logger.info(f"下单完成: {result}")
         return result
 
