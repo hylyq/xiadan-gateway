@@ -15,25 +15,20 @@ A trading gateway for TongHuaShun `xiadan.exe` — controls the THS order-entry 
 > - Ensure your trading activities **comply with local laws and regulations** and your broker's terms of service
 > - **The market carries risk; invest with caution. Fully understand the risks before entering the market.**
 
-## How It Works
+## Table of Contents
 
-```
-Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──→ pywinauto ──→ xiadan.exe
-                          │                    │               │
-                      Auth/routes/resp   single-threaded   UIA automation
-                                                     │
-                                              ┌──────┴──────┐
-                                          Queries (read)   Trades (write)
-                                    Ctrl+C clipboard copy  F1/F2 form fill
-                                    + OCR captcha solving  + popup detect/confirm
-```
-
-1. **HTTP API layer**: Flask + waitress provides a REST API with token auth and a unified JSON response format
-2. **Task queue**: a single worker thread executes tasks sequentially to prevent concurrent access to `xiadan.exe` from conflicting on the UI
-3. **UI automation**: pywinauto (UIA backend) manipulates controls — reading text, filling inputs, clicking buttons
-4. **OCR captcha**: Ctrl+C always triggers a captcha popup; a lightweight template-matching engine recognizes it automatically (see [Captcha OCR — lightweight template matching](#captcha-ocr--lightweight-template-matching))
-5. **Window monitoring**: a background thread periodically checks the trading window state and restores it if minimized
-6. **Order latency optimization**: by reusing UIA control-tree traversals, pipelined mode switching, and consecutive-clean-skip, a single order dropped from ~13.7s to: buy ~7.8s (cold) / ~5.5s (same-direction) / ~6.0s (cross-direction), cancel ~6.0s / 2.2s (consecutive), positions ~7.9s / 5.5s (consecutive), trades ~9.2s / 6.6s (consecutive) **Re-measured 2026-09-05** (after cross-request window-handle caching): buy ~6.9s (cold) / ~6.0s (same-direction), cancel ~4.9s / 1.8s (consecutive), positions ~6.4s (consecutive), trades ~5.8s (consecutive), balance ~2.2s (consecutive); first query after service restart 17.0s → 9.0s (`WindowService` is now a singleton — the handle cache is reused across requests, eliminating the ~2s global window scan per request)
+- [Core Features](#core-features)
+- [Quick Start](#quick-start) (incl. [Prerequisites: Broker Software Settings](#prerequisites-broker-software-settings))
+- [Required Before Going Live (Security Checklist)](#required-before-going-live-security-checklist)
+- [Configuration](#configuration)
+- [API](#api): [Response Format](#response-format) / [Error Codes](#error-codes) / [Endpoints](#endpoints) / [Place Order](#post-orders--place-order) / [Order Status & Fill Report](#get-ordersentrust_nostatus--order-status--fill-report) / [Cancel Orders](#post-orderscancel-all--cancel-orders) / [Auxiliary Endpoints](#auxiliary-endpoints) / [Client Timeout Configuration](#client-timeout-configuration)
+- [MCP Server (Agent Access)](#mcp-server-agent-access)
+- [How It Works](#how-it-works)
+- [Key Design](#key-design): [Task Queue and Watchdog](#task-queue-and-watchdog) / [Idempotency and Price Validation](#idempotency-and-price-validation) / [Classified Popup Handling](#classified-popup-handling) / [Limit/Market Mode Switching](#limitmarket-mode-switching) / [Query Panel Standardization](#query-panel-standardization) / [Captcha OCR](#captcha-ocr--lightweight-template-matching) / [Performance Measurements](#performance-measurements)
+- [Known Limitations](#known-limitations)
+- [Project Structure](#project-structure)
+- [Tech Stack](#tech-stack)
+- [Development](#development) (incl. [Adding a New Clean-Exit Scenario](#adding-a-new-clean-exit-scenario))
 
 ## Core Features
 
@@ -41,11 +36,11 @@ Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──�
 |---------|-------------|
 | Single instance | Windows global mutex guarantees only one instance runs at a time |
 | Sequential execution | Single-worker task queue avoids concurrent conflicts on `xiadan.exe` |
-| Consecutive clean skip | Clean exit from previous task → skip `_reset_trading_window` + activation. **Fully skipped within the same group and direction; cross-direction only re-presses F1/F2.** Full preparation on popups/failures/cross-group. Groups: `trade` (buy/sell), `cancel`, `query` |
+| Consecutive clean skip | Clean exit from previous task → skip window reset + activation. Fully skipped within the same group and direction; cross-direction only re-presses F1/F2. Groups: `trade` (buy/sell), `cancel`, `query` (see [Task Queue and Watchdog](#task-queue-and-watchdog)) |
 | Query traversal reuse | Position/trades/orders queries: one `descendants` traversal serves tree lookup + popup detection + fallback scan, cutting ~40% of navigation time |
-| Message-based table copy (experimental) | With `query.copy_method=message`, table copy is sent as a `WM_COMMAND(0xE122)` message — no foreground activation, no synthetic keystrokes; immune to IME interception and `GetAsyncKeyState` delays, works while the window is obscured or unfocused. **The captcha is independent of the invocation method — most copies still trigger it**; the gain comes from the copy stage itself: with captcha always popping, copy stage 5.5s→~1.2s, end-to-end trades 6.25s→3.20s, positions 8.35s→5.92s (2026-09-09 baseline; 2026-09-22 re-test positions 3.5s / trades 4.5s, both incl. captcha). Falls back to keyboard automatically on failure; default remains keyboard |
+| Message-based table copy (experimental) | With `query.copy_method=message`, table copy is sent as a `WM_COMMAND(0xE122)` message — no foreground activation, no synthetic keystrokes, immune to IME interception and `GetAsyncKeyState` delays, works while the window is obscured or unfocused. **The captcha is independent of the invocation method — most copies still trigger it**; the gain comes from the copy stage itself (numbers in [Performance Measurements](#performance-measurements)). Falls back to keyboard automatically on failure; default remains keyboard |
 | Pipelined mode switching | Click the limit/market toggle without waiting, immediately fill the quantity — the ~0.7s fill overlaps the label change; verification is naturally ready after filling |
-| Classified popup handling | Order confirm → Y/N; warning → Y to continue; **price out of range → N to cancel + `PRICE_OUT_OF_RANGE`**; error → close + report |
+| Classified popup handling | Order confirm → Y/N; warning → Y to continue; **price out of range → N to cancel + `PRICE_OUT_OF_RANGE`**; error → close + report (see [Classified Popup Handling](#classified-popup-handling)) |
 | Watchdog recovery | On task timeout: screenshot + activate + ESC×3, reset, then return an error |
 | Idempotency | **Required** `Idempotency-Key` header (1–128 chars) — one key per logical order: same key within the window is rejected (`DUPLICATE_ORDER`, HTTP-timeout retry protection); a new key = a new order, identical-parameter multi-orders included |
 | OCR captcha | Lightweight template-matching engine; failures auto-archived; optional ddddocr offline training |
@@ -56,14 +51,24 @@ Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──�
 | Auth security | Token compared with `hmac.compare_digest` (constant-time) |
 | Cross-site defense | Requests carrying an `Origin` header are rejected (browser cross-site requests always carry it; script clients never do) — prevents malicious web pages from firing trades at the local gateway; active even when auth is disabled |
 | Runtime stats | Per-error-code success rates (1-hour window, via `/health`); log alert after 3 consecutive failures; tracks order-confirm-dialog behavior and warns when the client's fast-trade setting appears reset (behavior flip) |
-| Alert webhook | Consecutive task failures ≥3, order-dialog drift, and task timeouts → POST to a webhook (generic JSON or WeCom/DingTalk `text` format) on a background thread, never blocking the trading path |
+| Alert webhook | Consecutive task failures ≥3, order-dialog drift, and task timeouts → POST to a webhook (generic JSON or WeCom/DingTalk/Feishu `text` format) on a background thread, never blocking the trading path |
 | Stock-name linkage verification | After typing the code, polls the name-linkage control (cid=1036 Static) for non-empty text — a reliable signal that the client fully parsed the code (1032 is a shell control whose read-back is always empty). On no linkage, clears and retypes once; still failing raises `INPUT_VERIFY_FAILED` and blocks submission; degrades to pass-through if the name control is missing. Disable via `order.verify_code_input` |
-| Entrust-no banner capture | After the submit click, a background thread screen-grabs the bottom-right yellow banner (~12fps; it is a self-drawn overlay invisible to `PrintWindow`), localizes it by yellow mask, and reads the contract number via template OCR. Parsing is length-agnostic, anchored on the trailing fullwidth period — broker/exchange display formats vary (sim client shows 10 digits; SZSE spec is 22). Returns `entrust_no` on success; `null` on failure (occluded / minimized / off-screen / unreadable frame) without affecting the order itself. Requires the banner strip on-screen and unoccluded; off-screen is self-healed before each task |
+| Entrust-no banner capture | After the submit click, a background thread screen-grabs the bottom-right yellow banner (~12fps; it is a self-drawn overlay invisible to `PrintWindow`), localizes it by yellow mask, and reads the contract number via template OCR — parsing is length-agnostic, anchored on the trailing fullwidth period (broker/exchange display formats vary). Returns `entrust_no` on success; `null` on failure without affecting the order; optional auto-recovery via `order.recover_entrust_no` (see the [order response](#post-orders--place-order)) |
 | Order status & fill report | `GET /orders/{entrust_no}/status` joins today's orders × today's fills by contract number: order status derived from quantities (not broker remark text), fill aggregation with weighted avg price and per-trade numbers — the polling counterpart of the order response for strategy callers |
 | Window position self-healing | Before each task, checks window/workarea intersection (60% threshold); auto-moves the window back if it was dragged off-screen (`click_input`/screenshots are coordinate-based and fail off-screen) |
 | MCP adapter | `scripts/mcp_server.py` exposes the gateway as standard MCP tools for LLM agents — read-only queries always registered; `place_order`/`cancel_orders` only with `XIADAN_MCP_TRADING=1`; raw `/actions/*` never exposed (see [MCP Server](#mcp-server-agent-access)) |
 
-## Prerequisites: Broker Software Settings
+## Quick Start
+
+**Environment**: Windows / Python 3.11+ / [uv](https://github.com/astral-sh/uv) / TongHuaShun `xiadan.exe` installed
+
+```bash
+uv sync                           # install dependencies
+uv run python main.py             # start the service (default http://localhost:5000)
+uv run python main.py --dev       # dev mode (hot reload)
+```
+
+### Prerequisites: Broker Software Settings
 
 Configure the following manually before starting — disabling confirmation popups speeds up trading.
 
@@ -77,16 +82,6 @@ Configure the following manually before starting — disabling confirmation popu
 | 委托成功后是否弹出提示对话框 (Prompt dialog after order success) | **No** | Reduce post-trade popup interference |
 
 > Configure once. With confirmations off (quick-trading mode), orders submit directly with no popups, cutting ~1.4s per order.
-
-## Quick Start
-
-**Environment**: Windows / Python 3.11+ / [uv](https://github.com/astral-sh/uv) / TongHuaShun `xiadan.exe` installed
-
-```bash
-uv sync                           # install dependencies
-uv run python main.py             # start the service (default http://localhost:5000)
-uv run python main.py --dev       # dev mode (hot reload)
-```
 
 ## Required Before Going Live (Security Checklist)
 
@@ -153,7 +148,9 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
 
 > Config reloads via `POST /admin/reload-config` (some path changes need a restart). Timeouts follow the latest performance measurements (2026-08 simulated-market: worst-case order ~8s, worst-case query ~12s incl. failure retries; 30s gives 2.5–3.5× headroom; hung tasks trigger watchdog recovery sooner and callers fail faster).
 
-## API Response Format
+## API
+
+### Response Format
 
 All responses return HTTP 200; success/failure is distinguished by the JSON `status` field.
 
@@ -208,49 +205,9 @@ All responses return HTTP 200; success/failure is distinguished by the JSON `sta
 | `TASK_TIMEOUT` | Task timeout, recovery succeeded |
 | `TASK_TIMEOUT_RECOVERY_FAILED` | Task timeout, recovery also failed |
 
-### Popup Handling and "Clean Exit"
+> For popup types and "clean exit" semantics, see [Classified Popup Handling](#classified-popup-handling).
 
-Several popups may appear after placing/canceling orders; how they are handled determines whether the window state can be trusted:
-
-| Popup type | Example title | Buttons | Handling | Window state |
-|------------|--------------|:---:|----------|:---:|
-| Order confirm | 「委托确认」 | Yes(Y) / No(N) | Click Y to confirm / N to cancel | Trusted |
-| Price out of range | 「提示信息」 | Yes(Y) / No(N) | Click N to cancel → `PRICE_OUT_OF_RANGE` | Trusted (clean exit) |
-| Single-button notice | 「提示」 | OK | Click OK (mouse only; Y key does nothing) | Depends on content |
-| Insufficient balance | 「提示」 | OK | Click OK to close → `INSUFFICIENT_BALANCE` (keyword combo: 「提交失败」+ balance/funds + 「还差」) | Trusted (clean exit) |
-| Short-selling restriction | 「提示」 | OK | Click OK to close → `SHORT_SELLING_FORBIDDEN` (「不允许卖空」or 「提交失败」+「无证券」+「持仓信息」) | Trusted (clean exit) |
-| Fatal error | 「提示信息」 | OK | Close + classified error | **Untrusted** |
-
-> **Note**: single-button popups titled 「提示」 have only an OK button (cid=1) and cannot be triggered with letter keys. When debugging, if the Y key appears ineffective, check whether it's a single-button popup.
-
-#### Adding a New Clean-Exit Scenario
-
-Classification is driven by the rule table in `src/core/popup_rules.py` — no changes to `TaskQueue` or the skip logic are needed:
-
-**1. Add an error code in `src/exceptions.py`:**
-```python
-NEW_ERROR = "NEW_ERROR"   # description
-```
-
-**2. Add a rule in `src/core/popup_rules.py`** (the popup action table `POPUP_RULES` or the error-code table `SUBMIT_ERROR_RULES`):
-```python
-PopupRule(
-    _or(("keyword1", "keyword2")),      # matches when ANY AND-group is fully hit
-    "raise_error",                      # action: raise_error / click_no / click_yes
-    ErrorCode.NEW_ERROR,
-    "Description: {text}",              # {text} placeholder, replaced with popup text
-    "Suggestion",
-    clean_dismiss=True,                 # popup closed normally, window trusted, next same-group task can skip
-),
-```
-
-**3. Add a parameterized test case in `tests/test_core.py`.**
-
-> The rule table is **order-sensitive**: multiple rules may share keywords (e.g. 「可卖数量」 appears in both T1 and `INSUFFICIENT_SHARES`); order decides classification — place new rules at the correct priority and add tests to prevent regressions.
-
-> **Popup text extraction**: `order_detail_text` reads from cid=1040 first, falling back to `_extract_dialog_text(title_el)` which collects text from the popup container (`title_el.parent()`); `_extract_popup_error_text` likewise prefers the **container first** (clean, no hard-coded UI-label blacklist, unaffected by broker UI upgrades), falling back to a global scan + two-layer blacklist only when container extraction is empty (last line of defense). The blacklist's first layer is a runtime snapshot of the quiet-time main-window texts taken at the start of each order (self-learning: new labels introduced by broker UI upgrades are filtered automatically, no code change needed); the second layer is the original hard-coded label list as a static floor; matching always uses the combined text (primary + fallback extraction), so error popups are still precisely classified when cid=1040 extraction is incomplete, instead of being treated as generic warnings and clicking Y.
-
-## API Endpoints
+### Endpoints
 
 | Method | Path | Description | Queued | timeout |
 |--------|------|-------------|:---:|--------|
@@ -282,7 +239,7 @@ PopupRule(
 | `amount` | | Order quantity |
 | `price` | | Order price (limit mode, max 2 decimals) |
 | `price_type` | | `limit`=limit (default), `market`=market |
-| `confirm` | | `true`=auto-confirm (default). `false`=click N to cancel **only if the client pops the「委托确认」dialog** — with the recommended quick-trading setup (client confirmations off, see setup section) no dialog appears and the order submits directly, so `false` is NOT a guaranteed preview/interception |
+| `confirm` | | `true`=auto-confirm (default). `false`=click N to cancel **only if the client pops the「委托确认」dialog** — with the recommended quick-trading setup (client confirmations off, see [Prerequisites](#prerequisites-broker-software-settings)) no dialog appears and the order submits directly, so `false` is NOT a guaranteed preview/interception |
 
 > **A required `Idempotency-Key` header (1–128 chars) is enforced** — see [Idempotency and Price Validation](#idempotency-and-price-validation). Key lifecycle: one key per logical order, reuse it on timeout retries; use a new key for each genuinely new order (identical-parameter multi-orders included).
 
@@ -381,7 +338,7 @@ curl http://localhost:5000/diagnostic/snapshot
 curl "http://localhost:5000/diagnostic/history?n=3"
 ```
 
-## Client Timeout Configuration
+### Client Timeout Configuration
 
 The caller's HTTP timeout **must exceed the server's watchdog timeout + recovery time (~5s)**. Recommended: fetch it dynamically from `/health`:
 
@@ -452,6 +409,285 @@ Configuration (environment variables, all optional):
 | `XIADAN_MCP_CONFIG` | `config/app_config.json` | gateway config file path |
 | `XIADAN_MCP_TRADING` | `0` | `1`/`true` registers `place_order`/`cancel_orders` |
 | `XIADAN_MCP_TIMEOUT_SECONDS` | `60` | HTTP timeout toward the gateway (recommended ≥40) |
+
+## How It Works
+
+```
+Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──→ pywinauto ──→ xiadan.exe
+                          │                    │               │
+                      Auth/routes/resp   single-threaded   UIA automation
+                                                     │
+                                              ┌──────┴──────┐
+                                          Queries (read)   Trades (write)
+                                    Ctrl+C clipboard copy  F1/F2 form fill
+                                    + OCR captcha solving  + popup detect/confirm
+```
+
+1. **HTTP API layer**: Flask + waitress provides a REST API with token auth and a unified JSON response format
+2. **Task queue**: a single worker thread executes tasks sequentially to prevent concurrent access to `xiadan.exe` from conflicting on the UI
+3. **UI automation**: pywinauto (UIA backend) manipulates controls — reading text, filling inputs, clicking buttons
+4. **OCR captcha**: Ctrl+C almost always triggers a captcha popup (occasionally a copy goes through without one — clipboard fallback, see [Query Panel Standardization](#query-panel-standardization)); a lightweight template-matching engine recognizes it automatically (see [Captcha OCR](#captcha-ocr--lightweight-template-matching))
+5. **Window monitoring**: a background thread periodically checks the trading window state and restores it if minimized
+6. **Order latency optimization**: reusing UIA control-tree traversals, pipelined mode switching, and consecutive-clean-skip cut single-order latency dramatically (current measurements in [Performance Measurements](#performance-measurements))
+
+## Key Design
+
+### Task Queue and Watchdog
+
+All operations run sequentially on a single worker thread (`TaskQueue`) to avoid concurrent conflicts on `xiadan.exe`. By default `WindowService.reset_window_state()` runs before each task, resetting the window to the F1-buy baseline (activation + ESC×5, including window position self-healing — auto-returns the window if dragged off-screen); consecutive clean exits in the same group skip the reset (see 「Consecutive clean skip」 in Core Features). On task timeout, the watchdog performs 「screenshot archive → activate window → ESC×3 reset」 recovery and **returns the error only after all recovery completes**, guaranteeing that when the caller receives `TASK_TIMEOUT`, `xiadan.exe` is already back to its initial state.
+
+> **Watchdog concurrency boundary**: recovery (ESC reset) runs on the watchdog timer thread while the timed-out task's worker thread may still be executing. The guarantee covers the window's final state, not the side effects of the abandoned task — a zombie task can still drive the UI (e.g. click buy) *after* recovery completed and the error was returned. The single-worker design ensures the next queued task only starts after the zombie returns; treat TASK_TIMEOUT as "order state unknown, verify before retrying" (see the idempotency rule that keeps dedup records on timeout).
+
+### Idempotency and Price Validation
+
+- **Mandatory idempotency key**: every `POST /orders` **requires** an `Idempotency-Key` header (1–128 chars). Key lifecycle = **one key per logical order**: an HTTP-timeout retry must **reuse the same key** (a same-key request within the window is rejected with `DUPLICATE_ORDER` — that is the retry protection); a genuinely new order (including multiple identical-parameter orders) must use a **new key**, and distinct keys pass immediately even with identical parameters. The server cannot verify randomness — the contract is **uniqueness**; uuid4 is the easiest way, "strategy-id + sequence number" works too.
+- **Window semantics**: `idempotency.order_dedup_window_seconds` (default 60, calibrated to the recommended 40s client timeout) is the same-key retry-block window. A failed order clears its record to allow same-key retry; a timed-out order does not (prevents duplicate submission). Missing/blank key → `VALIDATION_ERROR` with guidance.
+- **Price**: the API layer rejects prices with more than 2 decimals (`VALIDATION_ERROR`); the order layer auto-formats via `sanitize_price()` to 2 decimals.
+
+### Classified Popup Handling
+
+Popups during order/cancel are auto-detected and handled by type: order-confirm popups (click Y/N), warning popups (click Y to continue), price-out-of-range (click N to cancel), error popups (close then report). Classification is driven by the rule table in `src/core/popup_rules.py` (how to extend it: [Adding a New Clean-Exit Scenario](#adding-a-new-clean-exit-scenario)).
+
+**Popup-dismissal mechanism**: non-order-confirm popups are closed via `_close_non_confirm_popup()` — batch lookup of standard Windows buttons first (IDOK=1 / IDCANCEL=2, one traversal finds both), falling back to sending ESC directly via `keybd_event` (bypassing `send_key` so foreground-window verification isn't blocked by the modal popup). The order-confirm popup's N-key fallback uses the same method.
+
+**Order-confirm safety check**: the popup-handling loop verifies the 「委托确认」 title (cid=1365 text match) before clicking Y/N — in quick-trading mode (no popup) the loop exits on the first round, so the Y key never leaks to other windows.
+
+#### Popup Types and "Clean Exit"
+
+Several popups may appear after placing/canceling orders; how they are handled determines whether the window state can be trusted:
+
+| Popup type | Example title | Buttons | Handling | Window state |
+|------------|--------------|:---:|----------|:---:|
+| Order confirm | 「委托确认」 | Yes(Y) / No(N) | Click Y to confirm / N to cancel | Trusted |
+| Price out of range | 「提示信息」 | Yes(Y) / No(N) | Click N to cancel → `PRICE_OUT_OF_RANGE` | Trusted (clean exit) |
+| Single-button notice | 「提示」 | OK | Click OK (mouse only; Y key does nothing) | Depends on content |
+| Insufficient balance | 「提示」 | OK | Click OK to close → `INSUFFICIENT_BALANCE` (keyword combo: 「提交失败」+ balance/funds + 「还差」) | Trusted (clean exit) |
+| Short-selling restriction | 「提示」 | OK | Click OK to close → `SHORT_SELLING_FORBIDDEN` (「不允许卖空」or 「提交失败」+「无证券」+「持仓信息」) | Trusted (clean exit) |
+| Fatal error | 「提示信息」 | OK | Close + classified error | **Untrusted** |
+
+> **Note**: single-button popups titled 「提示」 have only an OK button (cid=1) and cannot be triggered with letter keys. When debugging, if the Y key seems ineffective, check whether it's a single-button popup.
+
+#### Fine-Grained Classification of Submission-Failure Popups
+
+If the broker returns a 「提示」 popup (OK-only) after clicking buy, `_extract_popup_error_text()` extracts clean popup text from the control tree (container first, blacklist fallback), and `match_submit_error()` returns a precise error code and targeted suggestion via the rule table (`SUBMIT_ERROR_RULES`):
+
+| Popup keywords | error_code | Suggestion |
+|----------------|-----------|------------|
+| 清算 (clearing) | `SERVER_CLEARING` | Retry after clearing finishes |
+| 当前时间不允许委托 (not allowed at this time) | `OUTSIDE_TRADING_HOURS` | Operate within trading hours |
+| T+1 / 当日买入 / 未交收 (bought today / unsettled) | `T1_RESTRICTION` | Shares bought today can only be sold the next trading day |
+| 提交失败 + 余额/资金 + 还差 (submission failed + balance + shortfall) | `INSUFFICIENT_BALANCE` | Check available funds, adjust quantity or price |
+| 不允许卖空 / 提交失败 + 无证券 + 持仓信息 (no short selling / no securities) | `SHORT_SELLING_FORBIDDEN` | A-shares don't allow short selling; check sellable shares |
+| 可卖数量 / 可用余额不足 (sellable quantity / insufficient balance) | `INSUFFICIENT_SHARES` | Check sellable shares and adjust |
+| 事务处理机转发失败 (transaction-processor forwarding failed) | `SERVER_UNAVAILABLE` | Confirm the broker server is healthy |
+| Other | `ORDER_SUBMIT_FAILED` | Generic suggestion |
+
+`details.popup_text` returns the raw popup text for callers to parse themselves; `details.popup_title` returns the popup title. Buy and sell share the same `place_order()` flow, differing only in the F1/F2 switch; all classification logic applies equally to both.
+
+#### Popup Text Extraction and Blacklist Self-Learning
+
+`order_detail_text` reads from cid=1040 first, falling back to `_extract_dialog_text(title_el)` which collects text from the popup container (`title_el.parent()`); `_extract_popup_error_text` likewise prefers the **container first** (clean, no hard-coded UI-label blacklist, unaffected by broker UI upgrades), falling back to a global scan + two-layer blacklist only when container extraction is empty (last line of defense). The blacklist's first layer is a runtime snapshot of the quiet-time main-window texts taken at the start of each order (self-learning: new labels introduced by broker UI upgrades are filtered automatically, no code change needed); the second layer is the original hard-coded label list as a static floor; matching always uses the combined text (primary + fallback extraction), so error popups are still precisely classified when cid=1040 extraction is incomplete, instead of being treated as generic warnings and clicking Y.
+
+#### Server-Error Popup Defense
+
+When interacting with the broker server (querying price after entering code, switching price mode, clicking buy/sell), a 「提示」 popup may appear if the server is unavailable or outside trading hours. These popups only have an OK button and can't be operated with Y/N keys — they are closed via button clicks (cid=1/2) or ESC.
+
+| Trigger stage | Example popup content | Handling |
+|---------------|----------------------|----------|
+| After entering stock code | 事务处理机转发数据失败 / Begin failed! | `_dismiss_server_error_popup()` closes it |
+| Switching price mode | Same as above (server unresponsive) | Detect popup after timeout → `SERVER_UNAVAILABLE` |
+| Clicking buy/sell | 提交失败：清算中 / 当前时间不允许委托 / … | Extract text → classified error |
+
+Keywords are centralized in `constants.py:SERVER_ERROR_POPUP_KEYWORDS` (blocking popup keywords in `constants.py:BLOCKING_POPUP_KEYWORDS`). `WindowService.dismiss_blocking_popup()` defaults to bilingual keywords (`"失败"` / `"failed"` / `"事务处理机"`); all callers (after Trader code entry, after price-mode-switch timeout, F4 query panel, F3 cancel screen) share the same detection logic.
+
+### Limit/Market Mode Switching
+
+Clicking the "买入价格" (buy price) label (cid=1400) triggers a broker server request, toggling between limit/market (bidirectional). After entering the stock code, the **actual UI mode is auto-detected** — the broker may remember each stock's last mode and switch automatically after the code is entered (e.g. 000001 was last sold at market, so the UI shows 「市价卖出」 and won't accept a price).
+
+Strategy: `sleep(0.3)` then check for a popup first (server rejection popups appear in <0.5s) → if a popup exists, classify and report immediately → otherwise cache the label element reference and `poll_until` for text change (3s timeout, max 2 retries; each poll reads text only, no UIA traversal). The two failure scenarios are handled separately:
+
+| Scenario | Symptom | error_code |
+|----------|---------|-----------|
+| Server anomaly (maintenance) | Popup 「事务处理机转发数据失败」 | `SERVER_UNAVAILABLE` |
+| Simulated account doesn't support market | No popup, label silently unchanged | `MODE_SWITCH_FAILED` (suggests limit mode) |
+
+### Query Panel Standardization
+
+All queries enter the query panel via `_prepare_query_panel()` (sends F4 to switch to the query panel), then navigate explicitly to the target page (balance / today's trades / today's orders — no reliance on the "F4 default page" assumption, since the window may be parked on another page across consecutive queries). The TaskQueue worker already calls `reset_window_state()` (ESC×5→F1) before each task, so query methods don't reset again, saving ~1.7s each. Navigation itself triggers the broker server query; no extra F5 refresh needed. Empty tables (header only, no data rows) return an empty list.
+
+**Fake-data defense**: clipboard is cleared before Ctrl+C (so a failed copy never reads residue from the previous task); after copying, results are validated against feature columns (positions=`成本价`+`股票余额`, trades=`成交时间`+`成交编号`, orders=`委托价格`+`委托数量` — **measured headers**: the order table has no 「委托编号」 column; this version uses 「合同编号」, but the trades table also has 「合同编号」 so it lacks discrimination — the order table's unique features are 「委托价格/委托数量」). If page switching failed (window obscured/minimized, focus never entered the table, etc.) the copy comes from another query table; validation retries once and records the actual headers, and if it still fails, reports an explicit error (`INTERNAL_ERROR`) — never silently returns fake data.
+
+**Navigation & captcha double fallback** (2026-09-05): (1) after clicking a tree node, the selection state is verified via `is_selected()` and the click is retried when it did not register — on the simulated account, `click_input` occasionally failed to register, leaving the window on 「当日委托」 while an empty table bypassed feature-column validation and positions were silently returned as an empty list; this fix closes that path. (2) when no captcha popup is detected after the copy, the clipboard is validated as a fallback — when a copy happened not to trigger a captcha (occurs occasionally, typically the first copy after a longer idle gap), or the popup detection missed, valid table data is adopted directly instead of spinning through retries and mis-reporting OCR failure.
+
+### Event-Driven Waiting
+
+`src/utils/poll.py` provides `poll_until(condition, timeout, interval)` instead of fixed `time.sleep()`. Scenarios like waiting for the popup after placing an order, waiting for the captcha after Ctrl+C, and waiting for the confirm popup after canceling poll the UI state every 0.1s and continue as soon as the condition holds; `PollTimeoutError` is raised on timeout. The `timed` context manager records per-step durations.
+
+### Key-Sending Strategy
+
+| Method | Needs foreground | Use case |
+|--------|:---:|----------|
+| `keybd_event` + `background=True` | ✗ | Function keys (self-verifies foreground: zero-overhead direct send when already foreground; auto-activates if the window was switched away — keys never leak into the wrong window) |
+| `keybd_event` | ✓ | Function keys F1–F12, Ctrl+C combos |
+| `PostMessage` | ✗ | Letter keys Y/N, ENTER (no focus stealing in background) |
+
+Function keys go through foreground sending by default (`PostMessage` cannot trigger window shortcuts), with `click_input()` + `GetForegroundWindow()` handle verification before sending to ensure the window is in the foreground. `background=True` means "the caller already activated the window" (e.g. `place_order()` step 1) and skips the redundant activation, saving `click_input()` + `sleep(0.3s)` ×2 (~0.6s) — but it first runs a handle-level foreground self-check (microseconds): if the window was switched away, the full activation flow runs before sending, so keys never go into the wrong window (measured: an F4 sent into the void left the query page wrong and tree-node clicks unregistered, adding ~1.5s of navigation retries).
+
+### Ctrl+C Double-Send Mechanism
+
+```text
+Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 0.15s apart)
+
+1st send → Chinese IME intercepts (cancels combo state)
+2nd send → IME exited, delivered to broker → triggers captcha popup
+```
+
+- **0.1s delay**: lets `GetAsyncKeyState` see that Ctrl is held
+- **Double send**: bypasses the Chinese IME's interception of the first Ctrl+C
+- **No SendInput**: the broker may filter injected input via the `LLKHF_INJECTED` flag
+- **No PostMessage**: doesn't update the key-state table, which the broker's `GetAsyncKeyState` would not detect
+
+### Captcha OCR — Lightweight Template Matching
+
+THS Ctrl+C **almost always triggers a captcha popup** (4 digits, white background with blue digits, 92×38 px, regular font; rarely a copy goes through without one — see the clipboard fallback in [Query Panel Standardization](#query-panel-standardization)). The popup appearing is the confirmation that Ctrl+C was delivered.
+
+**Recognition flow**: proactive periodic scan detects the popup → screenshot → screenshot sanity check (file ≤5KB + dimensions near 92×38 + white-pixel ratio >50% + dark-pixel horizontal span 15%–85%, rejecting shots of the main window/popup edges/hidden controls) → grayscale → binarize → vertical projection segmentation → template matching → fill into the broker software. Up to 2 outer attempts; up to 3 inner OCR retries.
+
+#### Recognition Principle (pure NumPy/Pillow, no deep learning)
+
+```
+Raw image (92×38 RGB)        Grayscale              Binarize (threshold 200)
+┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
+│ 2 5 8 0         │  →   │ ■ ■ ■ ■         │  →   │ █ █ █ █         │
+│ white bg, blue  │      │ luminance only   │      │ strokes=black   │
+└─────────────────┘      └─────────────────┘      └─────────────────┘
+
+                              ↓ vertical projection
+                         ┌─────────────────┐
+                         │ ██  ██  ██  ██  │  4 dark-column groups = 4 digits
+                         │ ██  ██  ██  ██  │  gap >5px = different digit
+                         │ ██  ██  ██  ██  │  gap ≤5px merged (broken strokes)
+                         └─────────────────┘
+                              ↓ normalize to 28×38
+                              ↓ template matching (NCC normalized cross-correlation)
+
+    segmented digit ──→ cosine similarity against 1,200+ templates ──→ highest score
+                        essence: vector dot product = cos(angle)
+```
+
+- **Grayscale**: `.convert("L")` removes color; blue digits become gray, keeping only luminance
+- **Binarize**: threshold 200 — background/anti-aliased edges (>200) dropped, stroke cores (<200) kept
+- **Segmentation**: vertical projection → dark-column grouping → merge broken strokes (e.g. the horizontal/vertical gap in '5') → trim horizontal whitespace → normalize to 28×38
+- **Matching**: normalized cross-correlation (NCC). Treat the 28×38 = 1064 pixels as a 1064-dim vector; after normalization each template has unit length, so NCC = the dot product of the two vectors = cos(angle). Smaller angle = more similar, independent of brightness/contrast.
+
+  **Batch matrix multiplication**: templates are pre-normalized at load time and stacked into an (N, 1064) matrix; matching is one step:
+
+  ```
+  scores = T @ d    # (1208, 1064) × (1064,) → (1208,)   single BLAS call
+  best = argmax(scores)
+  ```
+
+  No Python loops, no per-template re-normalization. Takes < 0.01s (logs show 0.00s).
+
+  ```
+  input digit '5' → T @ d →
+    template0: 0.12   template1: -0.05   ...   template5₁: 0.91 ✓
+                                                 ↑ argmax → recognized as 5
+  ```
+
+#### Engine Comparison
+
+| Engine | Memory | Speed | Principle | Role |
+|--------|--------|-------|-----------|------|
+| Lightweight template matching | < 5MB | < 0.01s | NCC + BLAS batch matrix multiplication | The only engine in production |
+| ddddocr (optional) | ~150MB | 10–50ms | ONNX deep learning | Quality checker in debug mode, not loaded in production |
+
+1,200+ templates have been accumulated, covering all 10 digits; ddddocr is unnecessary for daily use.
+
+#### Offline Training
+
+Templates are no longer extracted at runtime, nor compared against ddddocr. Template training is now an offline operation:
+1. Failed captchas are auto-archived to `assets/captcha_archive/failed_*.png`
+2. Run `uv sync --extra ocr && uv run python scripts/train_ocr.py` to trigger real trading captchas and accumulate samples
+3. Run `uv run python scripts/generate_templates.py batch` to batch-extract templates from the archive
+
+#### Debug Mode
+
+`ddddocr_enabled: true` + `uv sync --extra ocr`: restores dual-engine behavior — ddddocr parallel verification, auto-archiving labeled captchas, live template extraction, accuracy comparison. Memory usage ~230–300MB.
+
+`GET /ocr/quality` returns runtime stats (recognition count, failure count, template count, covered digits, ddddocr mode status).
+
+### Control-Tree Caching and Performance
+
+`pywinauto`'s `descendants()` traversal of the UIA tree takes ~1s (the trading window has hundreds of controls); multiple independent calls in the original flow caused heavy cumulative latency. A three-level caching strategy eliminates redundant traversals:
+
+**Shared across the whole flow**: `place_order()` calls `descendants()` once after getting the window and passes the list to `input_text_to_element` (code/price/quantity) and `click_element` (order button), each avoiding its own `find_element_in_window` traversal.
+
+**Polling reuse**: the popup-handling loop performs one `descendants()` traversal that simultaneously covers detection (title image cid=1365, detail text cid=1040) + rule-table classification (`match_popup_rule`) + popup dismissal, all sharing the traversal result.
+
+| Optimization | Before | After |
+|--------------|--------|-------|
+| Fill stock code | 2.09s | 1.22s |
+| Fill quantity | 1.76s | 0.87s |
+| Click order button | 1.05s | 0.57s |
+| F1/F2 switch (skip redundant activation) | 1.10s | 0.16s |
+| Wait for order popup (merged two traversals) | 2.20s | 1.10s |
+| Popup-handling loop (cached reuse) | 33.60s | 0.62s |
+| Market-switch failure (retries 3→2, timeout 5→3s) | ~18s | ~12s |
+| Market-switch poll (cached label reference) | ~0.5s/poll | ~0ms/poll |
+| Submission-failure popup detection (skipped on happy path) | 1.17s | 0s |
+| **Total response (happy path)** | **~51s** | **~13.5s** |
+| **Total response (error path)** | **~51s** | **~14s** |
+
+`input_text_to_element` / `click_element` / `find_element_in_window` / `get_all_visible_texts` all accept an optional `descendants` parameter; on cache miss they degrade to a fresh scan.
+
+### Query Flow Performance
+
+The query flow (`_copy_table_via_clipboard` → `_solve_captcha`) implements the same class of optimizations independently:
+
+| Optimization | Description | Saved |
+|--------------|-------------|:--:|
+| UIA cache reuse | one `descendants()` in `_solve_captcha` shared across the whole flow (image/input/button) | ~1.5s each |
+| Deduped reset | TaskQueue worker already calls `reset_window_state()`, query methods don't repeat it | ~1.7s each |
+| Proactive periodic scan | Captcha detection uses timed scanning instead of idle `poll_until` | ~0.3s each |
+| Slimmed outer retries | Outer 3→2 attempts (inner OCR already retries 3×) | ~3s on failure path |
+| Faster verify polling | 2.0s→1.0s, removed redundant re-query after timeout | ~1s each |
+| On-demand diagnostics | `_auto_diagnostic` runs only on failure, skipped on success | ~0.5s/task |
+
+| Query type | Before | After | Reduction |
+|------------|--------|-------|:--:|
+| Balance | ~8s | ~4s | -50% |
+| Positions/trades/orders | ~15s | ~8–10s | -35% |
+
+### Performance Measurements
+
+Current single-operation latency (latest full re-measure 2026-09-05, after cross-request window-handle caching):
+
+| Operation | Cold start | Consecutive |
+|-----------|-----------|-------------|
+| Buy | ~6.9s | ~6.0s (same-direction) |
+| Cancel | ~4.9s | ~1.8s |
+| Positions | — | ~6.4s |
+| Trades | — | ~5.8s |
+| Balance | — | ~2.2s |
+
+- First query after a service restart: 17.0s → 9.0s — `WindowService` is a singleton, so the handle cache is reused across requests, eliminating the ~2s global window scan per request
+- Message-based copy (`query.copy_method=message`): copy stage 5.5s→~1.2s, end-to-end trades 6.25s→3.20s, positions 8.35s→5.92s (2026-09-09 baseline; 2026-09-22 re-test positions ~3.5s, trades ~4.5s, both incl. captcha)
+- A single order dropped from ~13.7s (pre-optimization baseline) to the current level — techniques and per-step breakdown in [Control-Tree Caching](#control-tree-caching-and-performance) and [Query Flow Performance](#query-flow-performance)
+
+## Known Limitations
+
+### Menu Bar Cannot Be Automated
+
+THS's menu bar uses fully custom rendering: Win32 `GetMenu()` returns 0 and the UIA tree has no PopupMenu children. The 「系统设置→快速交易」 (System Settings → Quick Trading) configuration cannot be automated and must be set **manually** (see [Prerequisites](#prerequisites-broker-software-settings)).
+
+### Closing Buy/Sell Sub-Panels
+
+Don't use ALT+F4 (closes the whole app) or ESC (the sub-panel is not a standalone dialog and ignores it). The correct way: send F4 to switch to the query view. `/actions/close-dialog` encapsulates this logic.
+
+### Logger Constraint
+
+The project's custom Logger accepts only a single message argument — pass parameters via f-strings (`%s` placeholders are not supported).
 
 ## Project Structure
 
@@ -540,231 +776,9 @@ xiadan-gateway/
 >
 > Fallback source: SZSE official monthly trading calendar API `https://www.szse.cn/api/report/exchange/onepersistenthour/monthList?month=YYYY-MM` (no `month` param = current month), returning per-day `jybz` (1=trading day, 0=non-trading) and `zrxh` (1=Sunday…7=Saturday); future months are covered only within the published year, and next year's calendar becomes queryable after its ~December release. Day-by-day identical to chinesecalendar across all of 2026 (242 trading days).
 
-## Key Design
-
-### Task Queue and Watchdog
-
-All operations run sequentially on a single worker thread (`TaskQueue`) to avoid concurrent conflicts on `xiadan.exe`. By default `WindowService.reset_window_state()` runs before each task, resetting the window to the F1-buy baseline (activation + ESC×5, including window position self-healing — auto-returns the window if dragged off-screen); consecutive clean exits in the same group skip the reset (see 「Consecutive clean skip」 in Core Features). On task timeout, the watchdog performs 「screenshot archive → activate window → ESC×3 reset」 recovery and **returns the error only after all recovery completes**, guaranteeing that when the caller receives `TASK_TIMEOUT`, `xiadan.exe` is already back to its initial state.
-
-> **Watchdog concurrency boundary**: recovery (ESC reset) runs on the watchdog timer thread while the timed-out task's worker thread may still be executing. The guarantee covers the window's final state, not the side effects of the abandoned task — a zombie task can still drive the UI (e.g. click buy) *after* recovery completed and the error was returned. The single-worker design ensures the next queued task only starts after the zombie returns; treat TASK_TIMEOUT as "order state unknown, verify before retrying" (see the idempotency rule that keeps dedup records on timeout).
-
-### Event-Driven Waiting
-
-`src/utils/poll.py` provides `poll_until(condition, timeout, interval)` instead of fixed `time.sleep()`. Scenarios like waiting for the popup after placing an order, waiting for the captcha after Ctrl+C, and waiting for the confirm popup after canceling poll the UI state every 0.1s and continue as soon as the condition holds; `PollTimeoutError` is raised on timeout. The `timed` context manager records per-step durations.
-
-### Key-Sending Strategy
-
-| Method | Needs foreground | Use case |
-|--------|:---:|----------|
-| `keybd_event` + `background=True` | ✗ | Function keys (self-verifies foreground: zero-overhead direct send when already foreground; auto-activates if the window was switched away — keys never leak into the wrong window) |
-| `keybd_event` | ✓ | Function keys F1–F12, Ctrl+C combos |
-| `PostMessage` | ✗ | Letter keys Y/N, ENTER (no focus stealing in background) |
-
-Function keys go through foreground sending by default (`PostMessage` cannot trigger window shortcuts), with `click_input()` + `GetForegroundWindow()` handle verification before sending to ensure the window is in the foreground. `background=True` means "the caller already activated the window" (e.g. `place_order()` step 1) and skips the redundant activation, saving `click_input()` + `sleep(0.3s)` ×2 (~0.6s) — but it first runs a handle-level foreground self-check (microseconds): if the window was switched away, the full activation flow runs before sending, so keys never go into the wrong window (measured: an F4 sent into the void left the query page wrong and tree-node clicks unregistered, adding ~1.5s of navigation retries).
-
-### Ctrl+C Double-Send Mechanism
-
-```text
-Ctrl Down → sleep(0.1s) → C Down → C Up → Ctrl Up    (×2, 0.15s apart)
-
-1st send → Chinese IME intercepts (cancels combo state)
-2nd send → IME exited, delivered to broker → triggers captcha popup
-```
-
-- **0.1s delay**: lets `GetAsyncKeyState` see that Ctrl is held
-- **Double send**: bypasses the Chinese IME's interception of the first Ctrl+C
-- **No SendInput**: the broker may filter injected input via the `LLKHF_INJECTED` flag
-- **No PostMessage**: doesn't update the key-state table, which the broker's `GetAsyncKeyState` would not detect
-
-### Captcha OCR — Lightweight Template Matching
-
-THS Ctrl+C **almost always triggers a captcha popup** (4 digits, white background with blue digits, 92×38 px, regular font; rarely a copy goes through without one — see the clipboard fallback in [Query Panel Standardization](#query-panel-standardization)). The popup appearing is the confirmation that Ctrl+C was delivered.
-
-**Recognition flow**: proactive periodic scan detects the popup → screenshot → screenshot sanity check (file ≤5KB + dimensions near 92×38 + white-pixel ratio >50% + dark-pixel horizontal span 15%–85%, rejecting shots of the main window/popup edges/hidden controls) → grayscale → binarize → vertical projection segmentation → template matching → fill into the broker software. Up to 2 outer attempts; up to 3 inner OCR retries.
-
-#### Recognition Principle (pure NumPy/Pillow, no deep learning)
-
-```
-Raw image (92×38 RGB)        Grayscale              Binarize (threshold 200)
-┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
-│ 2 5 8 0         │  →   │ ■ ■ ■ ■         │  →   │ █ █ █ █         │
-│ white bg, blue  │      │ luminance only   │      │ strokes=black   │
-└─────────────────┘      └─────────────────┘      └─────────────────┘
-
-                              ↓ vertical projection
-                         ┌─────────────────┐
-                         │ ██  ██  ██  ██  │  4 dark-column groups = 4 digits
-                         │ ██  ██  ██  ██  │  gap >5px = different digit
-                         │ ██  ██  ██  ██  │  gap ≤5px merged (broken strokes)
-                         └─────────────────┘
-                              ↓ normalize to 28×38
-                              ↓ template matching (NCC normalized cross-correlation)
-
-    segmented digit ──→ cosine similarity against 1,200+ templates ──→ highest score
-                        essence: vector dot product = cos(angle)
-```
-
-- **Grayscale**: `.convert("L")` removes color; blue digits become gray, keeping only luminance
-- **Binarize**: threshold 200 — background/anti-aliased edges (>200) dropped, stroke cores (<200) kept
-- **Segmentation**: vertical projection → dark-column grouping → merge broken strokes (e.g. the horizontal/vertical gap in '5') → trim horizontal whitespace → normalize to 28×38
-- **Matching**: normalized cross-correlation (NCC). Treat the 28×38 = 1064 pixels as a 1064-dim vector; after normalization each template has unit length, so NCC = the dot product of the two vectors = cos(angle). Smaller angle = more similar, independent of brightness/contrast.
-
-  **Batch matrix multiplication**: templates are pre-normalized at load time and stacked into an (N, 1064) matrix; matching is one step:
-
-  ```
-  scores = T @ d    # (1208, 1064) × (1064,) → (1208,)   single BLAS call
-  best = argmax(scores)
-  ```
-
-  No Python loops, no per-template re-normalization. Takes < 0.01s (logs show 0.00s).
-
-  ```
-  input digit '5' → T @ d →
-    template0: 0.12   template1: -0.05   ...   template5: 0.91 ✓
-                                                 ↑ argmax → recognized as 5
-  ```
-
-#### Engine Comparison
-
-| Engine | Memory | Speed | Principle | Role |
-|--------|--------|-------|-----------|------|
-| Lightweight template matching | < 5MB | < 0.01s | NCC + BLAS batch matrix multiplication | The only engine in production |
-| ddddocr (optional) | ~150MB | 10–50ms | ONNX deep learning | Quality checker in debug mode, not loaded in production |
-
-1,200+ templates have been accumulated, covering all 10 digits; ddddocr is unnecessary for daily use.
-
-#### Offline Training
-
-Templates are no longer extracted at runtime, nor compared against ddddocr. Template training is now an offline operation:
-1. Failed captchas are auto-archived to `assets/captcha_archive/failed_*.png`
-2. Run `uv sync --extra ocr && uv run python scripts/train_ocr.py` to trigger real trading captchas and accumulate samples
-3. Run `uv run python scripts/generate_templates.py batch` to batch-extract templates from the archive
-
-#### Debug Mode
-
-`ddddocr_enabled: true` + `uv sync --extra ocr`: restores dual-engine behavior — ddddocr parallel verification, auto-archiving labeled captchas, live template extraction, accuracy comparison. Memory usage ~230–300MB.
-
-`GET /ocr/quality` returns runtime stats (recognition count, failure count, template count, covered digits, ddddocr mode status).
-
-### Classified Popup Handling
-
-Popups during order/cancel are auto-detected and handled by type: order-confirm popups (click Y/N), warning popups (click Y to continue), price-out-of-range (click N to cancel), error popups (close then report). Classification is driven by the rule table in `src/core/popup_rules.py` (see [Adding a New Clean-Exit Scenario](#adding-a-new-clean-exit-scenario)); popups are closed via `_close_non_confirm_popup()` (batch lookup of standard buttons IDOK=1/IDCANCEL=2, ESC fallback), and server-error popups via `WindowService.dismiss_blocking_popup()` (keywords cover Chinese and English: `"失败"` / `"failed"` / `"事务处理机"`).
-
-**Fine-grained classification of submission-failure popups**: if the broker returns a 「提示」 popup (OK-only) after clicking buy, `_extract_popup_error_text()` extracts clean popup text from the control tree (container first, blacklist fallback), and `match_submit_error()` returns a precise error code and targeted suggestion via the rule table (`SUBMIT_ERROR_RULES`):
-
-| Popup keywords | error_code | Suggestion |
-|----------------|-----------|------------|
-| 清算 (clearing) | `SERVER_CLEARING` | Retry after clearing finishes |
-| 当前时间不允许委托 (not allowed at this time) | `OUTSIDE_TRADING_HOURS` | Operate within trading hours |
-| T+1 / 当日买入 / 未交收 (bought today / unsettled) | `T1_RESTRICTION` | Shares bought today can only be sold the next trading day |
-| 提交失败 + 余额/资金 + 还差 (submission failed + balance + shortfall) | `INSUFFICIENT_BALANCE` | Check available funds, adjust quantity or price |
-| 不允许卖空 / 提交失败 + 无证券 + 持仓信息 (no short selling / no securities) | `SHORT_SELLING_FORBIDDEN` | A-shares don't allow short selling; check sellable shares |
-| 可卖数量 / 可用余额不足 (sellable quantity / insufficient balance) | `INSUFFICIENT_SHARES` | Check sellable shares and adjust |
-| 事务处理机转发失败 (transaction-processor forwarding failed) | `SERVER_UNAVAILABLE` | Confirm the broker server is healthy |
-| Other | `ORDER_SUBMIT_FAILED` | Generic suggestion |
-
-`details.popup_text` returns the raw popup text for callers to parse themselves; `details.popup_title` returns the popup title. Buy and sell share the same `place_order()` flow, differing only in the F1/F2 switch; all classification logic applies equally to both.
-
-### Idempotency and Price Validation
-
-- **Mandatory idempotency key**: every `POST /orders` **requires** an `Idempotency-Key` header (1–128 chars). Key lifecycle = **one key per logical order**: an HTTP-timeout retry must **reuse the same key** (a same-key request within the window is rejected with `DUPLICATE_ORDER` — that is the retry protection); a genuinely new order (including multiple identical-parameter orders) must use a **new key**, and distinct keys pass immediately even with identical parameters. The server cannot verify randomness — the contract is **uniqueness**; uuid4 is the easiest way, "strategy-id + sequence number" works too.
-- **Window semantics**: `idempotency.order_dedup_window_seconds` (default 60, calibrated to the recommended 40s client timeout) is the same-key retry-block window. A failed order clears its record to allow same-key retry; a timed-out order does not (prevents duplicate submission). Missing/blank key → `VALIDATION_ERROR` with guidance.
-- **Price**: the API layer rejects prices with more than 2 decimals (`VALIDATION_ERROR`); the order layer auto-formats via `sanitize_price()` to 2 decimals.
-
-### Query Panel Standardization
-
-All queries enter the query panel via `_prepare_query_panel()` (sends F4 to switch to the query panel), then navigate explicitly to the target page (balance / today's trades / today's orders — no reliance on the "F4 default page" assumption, since the window may be parked on another page across consecutive queries). The TaskQueue worker already calls `reset_window_state()` (ESC×5→F1) before each task, so query methods don't reset again, saving ~1.7s each. Navigation itself triggers the broker server query; no extra F5 refresh needed. Empty tables (header only, no data rows) return an empty list.
-
-**Fake-data defense**: clipboard is cleared before Ctrl+C (so a failed copy never reads residue from the previous task); after copying, results are validated against feature columns (positions=`成本价`+`股票余额`, trades=`成交时间`+`成交编号`, orders=`委托价格`+`委托数量` — **measured headers**: the order table has no 「委托编号」 column; this version uses 「合同编号」, but the trades table also has 「合同编号」 so it lacks discrimination — the order table's unique features are 「委托价格/委托数量」). If page switching failed (window obscured/minimized, focus never entered the table, etc.) the copy comes from another query table; validation retries once and records the actual headers, and if it still fails, reports an explicit error (`INTERNAL_ERROR`) — never silently returns fake data.
-
-**Navigation & captcha double fallback** (2026-09-05): (1) after clicking a tree node, the selection state is verified via `is_selected()` and the click is retried when it did not register — on the simulated account, `click_input` occasionally failed to register, leaving the window on 「当日委托」 while an empty table bypassed feature-column validation and positions were silently returned as an empty list; this fix closes that path. (2) when no captcha popup is detected after the copy, the clipboard is validated as a fallback — when a copy happened not to trigger a captcha (occurs occasionally, typically the first copy after a longer idle gap), or the popup detection missed, valid table data is adopted directly instead of spinning through retries and mis-reporting OCR failure.
-
-## Known Limitations and Defenses
-
-### Menu Bar Cannot Be Automated
-
-THS's menu bar uses fully custom rendering: Win32 `GetMenu()` returns 0 and the UIA tree has no PopupMenu children. The 「系统设置→快速交易」 (System Settings → Quick Trading) configuration cannot be automated and must be set **manually** (see [Prerequisites](#prerequisites-broker-software-settings)).
-
-### Closing Buy/Sell Sub-Panels
-
-Don't use ALT+F4 (closes the whole app) or ESC (the sub-panel is not a standalone dialog and ignores it). The correct way: send F4 to switch to the query view. `/actions/close-dialog` encapsulates this logic.
-
-### Control-Tree Caching and Performance
-
-`pywinauto`'s `descendants()` traversal of the UIA tree takes ~1s (the trading window has hundreds of controls); multiple independent calls in the original flow caused heavy cumulative latency. A three-level caching strategy eliminates redundant traversals:
-
-**Shared across the whole flow**: `place_order()` calls `descendants()` once after getting the window and passes the list to `input_text_to_element` (code/price/quantity) and `click_element` (order button), each avoiding its own `find_element_in_window` traversal.
-
-**Polling reuse**: the popup-handling loop performs one `descendants()` traversal that simultaneously covers detection (title image cid=1365, detail text cid=1040) + rule-table classification (`match_popup_rule`) + popup dismissal, all sharing the traversal result.
-
-| Optimization | Before | After |
-|--------------|--------|-------|
-| Fill stock code | 2.09s | 1.22s |
-| Fill quantity | 1.76s | 0.87s |
-| Click order button | 1.05s | 0.57s |
-| F1/F2 switch (skip redundant activation) | 1.10s | 0.16s |
-| Wait for order popup (merged two traversals) | 2.20s | 1.10s |
-| Popup-handling loop (cached reuse) | 33.60s | 0.62s |
-| Market-switch failure (retries 3→2, timeout 5→3s) | ~18s | ~12s |
-| Market-switch poll (cached label reference) | ~0.5s/poll | ~0ms/poll |
-| Submission-failure popup detection (skipped on happy path) | 1.17s | 0s |
-| **Total response (happy path)** | **~51s** | **~13.5s** |
-| **Total response (error path)** | **~51s** | **~14s** |
-
-`input_text_to_element` / `click_element` / `find_element_in_window` / `get_all_visible_texts` all accept an optional `descendants` parameter; on cache miss they degrade to a fresh scan.
-
-### Query Flow Performance
-
-The query flow (`_copy_table_via_clipboard` → `_solve_captcha`) implements the same class of optimizations independently:
-
-| Optimization | Description | Saved |
-|--------------|-------------|:--:|
-| UIA cache reuse | one `descendants()` in `_solve_captcha` shared across the whole flow (image/input/button) | ~1.5s each |
-| Deduped reset | TaskQueue worker already calls `reset_window_state()`, query methods don't repeat it | ~1.7s each |
-| Proactive periodic scan | Captcha detection uses timed scanning instead of idle `poll_until` | ~0.3s each |
-| Slimmed outer retries | Outer 3→2 attempts (inner OCR already retries 3×) | ~3s on failure path |
-| Faster verify polling | 2.0s→1.0s, removed redundant re-query after timeout | ~1s each |
-| On-demand diagnostics | `_auto_diagnostic` runs only on failure, skipped on success | ~0.5s/task |
-
-| Query type | Before | After | Reduction |
-|------------|--------|-------|:--:|
-| Balance | ~8s | ~4s | -50% |
-| Positions/trades/orders | ~15s | ~8–10s | -35% |
-
-**Popup-dismissal mechanism**: non-order-confirm popups are closed via `_close_non_confirm_popup()` — batch lookup of standard Windows buttons first (IDOK=1 / IDCANCEL=2, one traversal finds both), falling back to sending ESC directly via `keybd_event` (bypassing `send_key` so foreground-window verification isn't blocked by the modal popup). The order-confirm popup's N-key fallback uses the same method.
-
-**Order-confirm safety check**: the popup-handling loop verifies the 「委托确认」 title (cid=1365 text match) before clicking Y/N — in quick-trading mode (no popup) the loop exits on the first round, so the Y key never leaks to other windows.
-
-### Limit/Market Mode Switching
-
-Clicking the "买入价格" (buy price) label (cid=1400) triggers a broker server request, toggling between limit/market (bidirectional). After entering the stock code, the **actual UI mode is auto-detected** — the broker may remember each stock's last mode and switch automatically after the code is entered (e.g. 000001 was last sold at market, so the UI shows 「市价卖出」 and won't accept a price).
-
-Strategy: `sleep(0.3)` then check for a popup first (server rejection popups appear in <0.5s) → if a popup exists, classify and report immediately → otherwise cache the label element reference and `poll_until` for text change (3s timeout, max 2 retries; each poll reads text only, no UIA traversal). The two failure scenarios are handled separately:
-
-| Scenario | Symptom | error_code |
-|----------|---------|-----------|
-| Server anomaly (maintenance) | Popup 「事务处理机转发数据失败」 | `SERVER_UNAVAILABLE` |
-| Simulated account doesn't support market | No popup, label silently unchanged | `MODE_SWITCH_FAILED` (suggests limit mode) |
-
-### Server-Error Popup Defense
-
-When interacting with the broker server (querying price after entering code, switching price mode, clicking buy/sell), a 「提示」 popup may appear if the server is unavailable or outside trading hours. These popups only have an OK button and can't be operated with Y/N keys — they are closed via button clicks (cid=1/2) or ESC.
-
-**Defense coverage points**:
-
-| Trigger stage | Example popup content | Handling |
-|---------------|----------------------|----------|
-| After entering stock code | 事务处理机转发数据失败 / Begin failed! | `_dismiss_server_error_popup()` closes it |
-| Switching price mode | Same as above (server unresponsive) | Detect popup after timeout → `SERVER_UNAVAILABLE` |
-| Clicking buy/sell | 提交失败：清算中 / 当前时间不允许委托 / … | Extract text → classified error |
-
-Keywords are centralized in `constants.py:SERVER_ERROR_POPUP_KEYWORDS` (blocking popup keywords in `constants.py:BLOCKING_POPUP_KEYWORDS`). `WindowService.dismiss_blocking_popup()` defaults to bilingual keywords (`"失败"` / `"failed"` / `"事务处理机"`); all callers (after Trader code entry, after price-mode-switch timeout, F4 query panel, F3 cancel screen) share the same detection logic.
-
-### Logger Constraint
-
-The project's custom Logger accepts only a single message argument — pass parameters via f-strings (`%s` placeholders are not supported).
-
 ## Development
+
+### Common Commands
 
 ```bash
 uv run pytest                          # run all tests
@@ -775,3 +789,28 @@ uv run python scripts/diagnose_settings.py  # broker UI structure diagnostic
 uv run python scripts/generate_templates.py status  # OCR template coverage status
 uv run python scripts/train_ocr.py     # iterative OCR training (auto-triggers captchas)
 ```
+
+### Adding a New Clean-Exit Scenario
+
+Classification is driven by the rule table in `src/core/popup_rules.py` — no changes to `TaskQueue` or the skip logic are needed:
+
+**1. Add an error code in `src/exceptions.py`:**
+```python
+NEW_ERROR = "NEW_ERROR"   # description
+```
+
+**2. Add a rule in `src/core/popup_rules.py`** (the popup action table `POPUP_RULES` or the error-code table `SUBMIT_ERROR_RULES`):
+```python
+PopupRule(
+    _or(("keyword1", "keyword2")),      # matches when ANY AND-group is fully hit
+    "raise_error",                      # action: raise_error / click_no / click_yes
+    ErrorCode.NEW_ERROR,
+    "Description: {text}",              # {text} placeholder, replaced with popup text
+    "Suggestion",
+    clean_dismiss=True,                 # popup closed normally, window trusted, next same-group task can skip
+),
+```
+
+**3. Add a parameterized test case in `tests/test_core.py`.**
+
+> The rule table is **order-sensitive**: multiple rules may share keywords (e.g. 「可卖数量」 appears in both T1 and `INSUFFICIENT_SHARES`); order decides classification — place new rules at the correct priority and add tests to prevent regressions.
