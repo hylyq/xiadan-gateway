@@ -40,6 +40,9 @@ config/app_config.json
 # OCR 存档（原始验证码图片，随时间增长，不提交）
 assets/captcha_archive/
 
+# 深交所日历缓存（运行时生成）
+data/
+
 # OS
 Thumbs.db
 desktop.ini

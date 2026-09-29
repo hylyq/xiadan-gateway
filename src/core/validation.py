@@ -1,4 +1,4 @@
-"""下单数据校验（纯函数，无外部依赖）"""
+"""下单数据校验（无第三方依赖；节假日历三级降级链见 _is_market_holiday 说明）"""
 from datetime import datetime, time
 
 
@@ -30,11 +30,13 @@ _TRADING_SESSIONS = (
 
 
 def _is_market_holiday(n: datetime) -> tuple:
-    """法定节假日判断（可选口径增强，失败优雅降级）
+    """法定节假日判断（三级降级，任何一级失败优雅降级，不阻塞下单）
 
-    依赖 chinesecalendar 包判断工作日是否为法定节假日。依赖缺失
-    （未安装）或数据未覆盖该年份（NotImplementedError）时静默退回
-    工作日粗判——节假日放行由券商报错兜底（既有行为），不阻塞下单。
+    一级 chinesecalendar：依赖缺失（ImportError）或数据未覆盖该年份
+    （NotImplementedError）时进入下一级。
+    二级 深交所官方月度日历（src/core/trading_calendar.py）：jybz 口径，
+    当年按年缓存到本地文件，API 也不可用时进入下一级。
+    三级 工作日粗判：节假日放行，由券商报错兜底（既有行为）。
 
     口径说明：只对「周一至周五但为法定节假日」生效。调休补班的
     周末 A 股同样休市，周末判断已在 check_trading_hours 前置处理，
@@ -43,27 +45,43 @@ def _is_market_holiday(n: datetime) -> tuple:
     Returns:
         (是否节假日休市, 拒绝原因)——非节假日原因为空串
     """
+    d = n.date()
+
+    # 一级：chinesecalendar
     try:
         from chinese_calendar import is_workday
     except ImportError:
-        return False, ""
+        is_workday = None
+    if is_workday is not None:
+        try:
+            workday = is_workday(d)
+        except NotImplementedError:
+            workday = None  # 数据未覆盖该年份 → 进入二级
+        except Exception:
+            workday = None  # 节假日判断失败不阻塞下单主流程
+        if workday is not None:
+            return (False, "") if workday else (True, "法定节假日休市")
+
+    # 二级：深交所官方月度日历（本地缓存优先，API 兜底）
     try:
-        if not is_workday(n.date()):
-            return True, "法定节假日休市"
-    except NotImplementedError:
-        pass  # 数据未覆盖该年份，退回工作日粗判
+        from src.core.trading_calendar import is_trading_day
+        trading = is_trading_day(d)
     except Exception:
-        pass  # 节假日判断失败不阻塞下单主流程
+        trading = None  # 兜底层任何异常都不阻塞下单主流程
+    if trading is not None:
+        return (False, "") if trading else (True, "非交易日休市（深交所日历）")
+
+    # 三级：工作日粗判（节假日放行，券商报错兜底）
     return False, ""
 
 
 def check_trading_hours(now: datetime = None) -> tuple:
     """交易时段预检（周末/节假日 + 时段粗判，快速失败用）
 
-    节假日判断依赖 chinesecalendar（见 _is_market_holiday 的降级说明）：
-    法定节假日的工作日时段直接拒绝；数据未覆盖时由券商报错兜底
-    （OUTSIDE_TRADING_HOURS / SERVER_CLEARING）。仅在配置
-    order.reject_outside_trading_hours=true 时被调用。
+    节假日判断走三级降级链（见 _is_market_holiday）：chinesecalendar →
+    深交所官方月度日历（本地按年缓存）→ 仅周末/工作日粗判。全链路不可用时
+    节假日放行，由券商报错兜底（OUTSIDE_TRADING_HOURS / SERVER_CLEARING）。
+    仅在配置 order.reject_outside_trading_hours=true 时被调用。
 
     Args:
         now: 注入时刻（测试用），缺省取当前时间

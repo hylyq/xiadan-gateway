@@ -6,6 +6,8 @@
 - 幂等检查
 - 撤单数量解析
 """
+import json
+
 import pytest
 
 from datetime import date, datetime, time as dtime
@@ -121,6 +123,36 @@ class TestTradingHoursCheck:
         mod.is_workday = is_workday_impl or (lambda d: True)
         monkeypatch.setitem(sys.modules, "chinese_calendar", mod)
 
+    @staticmethod
+    def _stub_szse(monkeypatch, tmp_path, fetch_impl=None):
+        """打桩深交所日历兜底层：默认 API 不可用；缓存目录隔离到 tmp_path"""
+        from src.core import trading_calendar
+
+        if fetch_impl is None:
+            def fetch_impl(year, month):
+                raise OSError("深交所 API 不可用")
+        monkeypatch.setattr(trading_calendar, "_fetch_month", fetch_impl)
+        monkeypatch.setattr(trading_calendar, "_CACHE_DIR", tmp_path)
+        monkeypatch.setattr(trading_calendar, "_last_fail_monotonic", 0.0)
+
+    @staticmethod
+    def _year_fetch(year, jybz_overrides):
+        """构造返回全年 12 个月数据的 _fetch_month 桩（缺省日 jybz=0），记录调用"""
+        import calendar
+
+        calls = []
+
+        def _fetch(y, m):
+            calls.append((y, m))
+            days = {}
+            for day in range(1, calendar.monthrange(y, m)[1] + 1):
+                d = date(y, m, day)
+                days[d.isoformat()] = int(jybz_overrides.get(d, 0))
+            return days
+
+        _fetch.calls = calls
+        return _fetch
+
     def test_weekday_holiday_rejected(self, monkeypatch):
         """工作日但为法定节假日 → 拒绝（依赖可用时）"""
         self._fake_calendar(monkeypatch, is_workday_impl=lambda d: False)
@@ -134,17 +166,19 @@ class TestTradingHoursCheck:
         ok, _reason = check_trading_hours(self._at(2026, 9, 15, 10, 0))
         assert ok is True
 
-    def test_calendar_data_uncovered_degrades_to_weekday(self, monkeypatch):
-        """数据未覆盖该年份（NotImplementedError）→ 退回工作日粗判放行"""
+    def test_calendar_data_uncovered_degrades_to_weekday(self, monkeypatch, tmp_path):
+        """数据未覆盖该年份 + 深交所 API 也不可用 → 退回工作日粗判放行"""
         def _raise(d):
             raise NotImplementedError("no data for year")
         self._fake_calendar(monkeypatch, is_workday_impl=_raise)
+        self._stub_szse(monkeypatch, tmp_path)
         ok, _reason = check_trading_hours(self._at(2027, 1, 5, 10, 0))
         assert ok is True
 
-    def test_calendar_absent_degrades_to_weekday(self, monkeypatch):
-        """未安装 chinesecalendar → 行为与旧版一致（工作日放行）"""
+    def test_calendar_absent_degrades_to_weekday(self, monkeypatch, tmp_path):
+        """未安装 chinesecalendar + 兜底 API 不可用 → 行为与旧版一致（工作日放行）"""
         self._fake_calendar(monkeypatch, absent=True)
+        self._stub_szse(monkeypatch, tmp_path)
         ok, _reason = check_trading_hours(self._at(2026, 9, 15, 10, 0))
         assert ok is True
 
@@ -159,6 +193,68 @@ class TestTradingHoursCheck:
         ok, reason = check_trading_hours(self._at(2026, 10, 10, 10, 0))
         assert ok is False
         assert "周末" in reason
+
+    # ── 深交所日历兜底（二级降级：chinesecalendar 不可用时） ─────
+
+    def test_szse_fallback_rejects_non_trading_weekday(self, monkeypatch, tmp_path):
+        """chinesecalendar 未覆盖 + 深交所 API 可用 → 按官方日历拒绝非交易日，并写完整缓存"""
+        def _raise(d):
+            raise NotImplementedError("no data for year")
+        self._fake_calendar(monkeypatch, is_workday_impl=_raise)
+        fetch = self._year_fetch(2027, {date(2027, 1, 4): 0})  # 2027-01-04 周一（元旦假期），缺省 0
+        self._stub_szse(monkeypatch, tmp_path, fetch_impl=fetch)
+        ok, reason = check_trading_hours(self._at(2027, 1, 4, 10, 0))
+        assert ok is False
+        assert "深交所" in reason
+        assert len(fetch.calls) == 12, "当年 12 个月应一次性拉取"
+        cache = json.loads(
+            (tmp_path / "szse_calendar_2027.json").read_text(encoding="utf-8"))
+        assert len(cache["months"]) == 12, "缓存应标记 12 个月全齐"
+
+    def test_szse_fallback_trading_day_allowed(self, monkeypatch, tmp_path):
+        """chinesecalendar 未覆盖 + 深交所判定交易日 → 正常按时段判定"""
+        def _raise(d):
+            raise NotImplementedError("no data for year")
+        self._fake_calendar(monkeypatch, is_workday_impl=_raise)
+        self._stub_szse(monkeypatch, tmp_path,
+                        fetch_impl=self._year_fetch(2027, {date(2027, 1, 5): 1}))
+        ok, _reason = check_trading_hours(self._at(2027, 1, 5, 10, 0))
+        assert ok is True
+
+    def test_szse_complete_cache_skips_api(self, monkeypatch, tmp_path):
+        """完整年度缓存已存在 → 直接读文件，零 API 访问"""
+        def _raise(d):
+            raise NotImplementedError("no data for year")
+        self._fake_calendar(monkeypatch, is_workday_impl=_raise)
+        (tmp_path / "szse_calendar_2027.json").write_text(
+            json.dumps({"year": 2027,
+                        "months": [f"{m:02d}" for m in range(1, 13)],
+                        "days": {date(2027, 1, 4).isoformat(): 0}}),
+            encoding="utf-8")
+        fetch = self._year_fetch(2027, {})
+        self._stub_szse(monkeypatch, tmp_path, fetch_impl=fetch)
+        ok, reason = check_trading_hours(self._at(2027, 1, 4, 10, 0))
+        assert ok is False
+        assert "深交所" in reason
+        assert fetch.calls == [], "有完整缓存时不应访问 API"
+
+    def test_szse_api_down_degrades_with_cooldown(self, monkeypatch, tmp_path):
+        """chinesecalendar 未覆盖 + 深交所 API 失败 → 工作日粗判放行；冷却期内不再打 API"""
+        def _raise(d):
+            raise NotImplementedError("no data for year")
+        self._fake_calendar(monkeypatch, is_workday_impl=_raise)
+        calls = []
+
+        def _fail(y, m):
+            calls.append((y, m))
+            raise OSError("api down")
+        self._stub_szse(monkeypatch, tmp_path, fetch_impl=_fail)
+        ok, _reason = check_trading_hours(self._at(2027, 1, 5, 10, 0))
+        assert ok is True
+        assert len(calls) == 1, "首月失败应立即止损，不连打 12 次"
+        ok, _reason = check_trading_hours(self._at(2027, 1, 6, 10, 0))
+        assert ok is True
+        assert len(calls) == 1, "冷却期内第二次下单不应再访问 API"
 
 
 class TestTableDataFormatting:

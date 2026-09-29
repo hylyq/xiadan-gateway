@@ -138,7 +138,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `alerts.format` | generic | `generic`=完整结构化 JSON（自建 receiver）；`text`=企业微信群机器人/钉钉自定义机器人文本格式；`feishu`=飞书/Lark 自定义机器人文本格式 |
 | `alerts.timeout_seconds` | 5 | webhook POST 超时（秒）。后台 daemon 线程发送，不阻塞交易路径 |
 | `ocr.max_retry` | 3 | 验证码识别最大重试次数 |
-| `order.reject_outside_trading_hours` | false | 下单入口交易时段预检（工作日 + 法定节假日 + 9:15-11:30 / 13:00-15:00 粗判，节假日历由 chinesecalendar 提供——依赖缺失或数据年份未覆盖时降级为仅工作日判断，节假日由券商报错兜底）。开启后非交易时段秒级返回 `OUTSIDE_TRADING_HOURS`，免走完整 UI 流程 ~11s；默认关闭以保留收盘后挂单行为 |
+| `order.reject_outside_trading_hours` | false | 下单入口交易时段预检（工作日 + 法定节假日 + 9:15-11:30 / 13:00-15:00 粗判，节假日历三级降级：chinesecalendar → 深交所官方月度日历（当年 12 个月一次性拉取并缓存到 `data/trading_calendar/`，缓存齐全后离线读取）→ 仅周末/工作日粗判，节假日由券商报错兜底）。开启后非交易时段秒级返回 `OUTSIDE_TRADING_HOURS`，免走完整 UI 流程 ~11s；默认关闭以保留收盘后挂单行为 |
 | `order.verify_entrust_no` | false | 下单成功拿到委托号后自动追加一笔当日委托查询对账（响应附加 `entrust_no_verified`：命中/未命中/查询失败）。开启后接口耗时增加一次查询，调用方 timeout 需相应放大。需配合 `order.capture_entrust_no` 使用 |
 | `order.verify_code_input` | true | 输入代码后校验证券名称联动（非空=代码被接受），未联动重输一次仍失败则拒绝提交（`INPUT_VERIFY_FAILED`）。失败路径增加约 3-6s |
 | `ocr.ddddocr_enabled` | false | ddddocr 调试开关（开启后可启用双引擎质检+模板提取，需 `uv sync --extra ocr`） |
@@ -454,7 +454,8 @@ xiadan-gateway/
 │   │   ├── ocr_lightweight.py   # 轻量 OCR（模板匹配，纯 NumPy/Pillow）
 │   │   ├── entrust_capture.py   # 下单横幅截获线程（右下角条带抓取）
 │   │   ├── banner_ocr.py        # 横幅数字识别（微软雅黑模板 + IoU）
-│   │   └── validation.py        # 数据校验纯函数（价格/交易时段+节假日）
+│   │   ├── validation.py        # 数据校验纯函数（价格/交易时段+节假日）
+│   │   └── trading_calendar.py  # 深交所月度日历兜底（按年缓存，chinesecalendar 不可用时）
 │   ├── services/
 │   │   ├── window_service.py    # 窗口/控件操作基础服务
 │   │   ├── window_monitor.py    # 窗口最小化监控线程
@@ -482,6 +483,7 @@ xiadan-gateway/
 ├── assets/
 │   ├── digit_templates/          # 数字模板（Git 跟踪，离线训练生成）
 │   └── captcha_archive/          # 失败验证码存档（gitignore，供离线训练使用）
+├── data/                        # 深交所日历缓存（运行时生成，gitignore）
 ├── logs/                        # 运行时生成（gitignore）
 ├── main.py                      # 启动入口（waitress + 单实例 + 优雅关闭 + 控制台 UTF-8）
 └── pyproject.toml               # 依赖与构建配置
@@ -503,11 +505,13 @@ xiadan-gateway/
 | **chinesecalendar** | 交易时段预检的法定节假日判断（数据未覆盖时自动降级） |
 | **pytest** | 单元测试 |
 
-> 📅 **chinesecalendar 年度维护**：节假日数据随国务院发布节奏更新，覆盖次年数据的新版一般在**每年 11 月前后**发布。数据未覆盖当前年份时，交易时段预检**静默降级**为仅周末/工作日判断（节假日交由券商报错兜底，无任何告警）——建议每年 11 月新版发布后手动升级一次：
+> 📅 **chinesecalendar 年度维护**：节假日数据随国务院发布节奏更新，覆盖次年数据的新版一般在**每年 11 月前后**发布。数据未覆盖当前年份时，交易时段预检自动切换深交所官方月度日历兜底（当年 12 个月一次性拉取并缓存到 `data/trading_calendar/`，缓存齐全后离线读取；API 也不可用才退回仅周末/工作日粗判）——仍建议每年 11 月新版发布后手动升级一次，保持无网络依赖：
 >
 > ```bash
 > uv lock --upgrade-package chinesecalendar && uv sync
 > ```
+>
+> 兜底数据源：深交所官方月度交易日历接口 `https://www.szse.cn/api/report/exchange/onepersistenthour/monthList?month=YYYY-MM`（无 `month` 参数返回当月），逐日返回 `jybz`（1=交易日，0=非交易日）与 `zrxh`（1=周日…7=周六）；未来仅覆盖当年已公布月份，次年日历约每年 12 月发布后可查。2026 全年与 chinesecalendar 逐日比对一致（242 个交易日）。
 
 ## 关键设计
 

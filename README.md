@@ -140,7 +140,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
 | `alerts.format` | generic | `generic`=full structured JSON (custom receiver); `text`=WeCom group-bot / DingTalk custom-bot text format; `feishu`=Feishu/Lark custom-bot text format |
 | `alerts.timeout_seconds` | 5 | Webhook POST timeout (seconds). Sent on a background daemon thread, never blocks the trading path |
 | `ocr.max_retry` | 3 | Max captcha OCR retries |
-| `order.reject_outside_trading_hours` | false | Fail fast at `place_order` entry outside trading hours (weekday + statutory holidays via chinesecalendar + 9:15-11:30 / 13:00-15:00; degrades to weekday-only when the package is missing or its data doesn't cover the year — broker errors remain the fallback). Off by default to preserve after-hours order queuing |
+| `order.reject_outside_trading_hours` | false | Fail fast at `place_order` entry outside trading hours (weekday + statutory holidays + 9:15-11:30 / 13:00-15:00; three-tier holiday calendar: chinesecalendar → SZSE official monthly calendar (current year fetched once and cached under `data/trading_calendar/`, offline reads once complete) → weekday-only — broker errors remain the fallback). Off by default to preserve after-hours order queuing |
 | `order.capture_entrust_no` | false | After a successful order, capture the contract number from the bottom-right success banner (background screen-grab + template OCR, trailing-period anchored — broker number lengths vary). `null` on capture failure; order success is independent (see the response note). Adds ~1s on success, up to the 5s capture timeout on failure. Pair with `order.verify_entrust_no` for reconciliation |
 | `order.recover_entrust_no` | true | When banner capture fails, look the contract number up in today's orders by **submit-click moment × parameter quadruple** (action+code+price+amount; the click second-bucket window [-1,+2] is applied to the full-precision click time as a second-bucket closure so second-granularity 委托时间 is fully covered). Adopted only on a unique match (0 or ≥2 candidates → stays `null`, never guesses). Chained as a separate queued query — adds ~6-8s only on the capture-failure path; successful captures are unaffected. Sets `entrust_no_recovered: true` when adopted |
 | `order.verify_entrust_no` | false | After a successful order with a captured entrust number, automatically query today's orders to reconcile (response gains `entrust_no_verified`). On a miss, the query page is refreshed (F5) and re-copied once before reporting `false` — the broker's order list can lag a few seconds for new orders (2026-09-29 stress-test observed). Adds one query to the response time — enlarge client timeout accordingly. Requires `order.capture_entrust_no` |
@@ -478,7 +478,8 @@ xiadan-gateway/
 │   │   ├── ocr_lightweight.py   # lightweight OCR (template matching, pure NumPy/Pillow)
 │   │   ├── entrust_capture.py   # order banner capture thread (bottom-right strip grab)
 │   │   ├── banner_ocr.py        # banner digit recognition (MS YaHei templates + IoU)
-│   │   └── validation.py        # pure validation functions (price / trading hours + holidays)
+│   │   ├── validation.py        # pure validation functions (price / trading hours + holidays)
+│   │   └── trading_calendar.py  # SZSE monthly calendar fallback (per-year cache, when chinesecalendar is unavailable)
 │   ├── services/
 │   │   ├── window_service.py    # base window/control operations
 │   │   ├── window_monitor.py    # window-minimized monitor thread
@@ -506,6 +507,7 @@ xiadan-gateway/
 ├── assets/
 │   ├── digit_templates/          # digit templates (git-tracked, produced by offline training)
 │   └── captcha_archive/          # failed-captcha archive (gitignored, for offline training)
+├── data/                        # SZSE calendar cache (generated at runtime, gitignored)
 ├── logs/                        # generated at runtime (gitignored)
 ├── main.py                      # entry point (waitress + single instance + graceful shutdown + UTF-8 console)
 └── pyproject.toml               # dependencies and build config
@@ -527,11 +529,13 @@ xiadan-gateway/
 | **chinesecalendar** | Statutory-holiday awareness for trading-hours precheck (auto-degrades when data year is uncovered) |
 | **pytest** | Unit tests |
 
-> 📅 **chinesecalendar annual maintenance**: holiday data follows the State Council's release cadence; a new version covering the next year usually ships around **November** each year. When installed data doesn't cover the current year, the trading-hours precheck **silently degrades** to weekend/weekday-only checks (statutory holidays fall back to broker-side rejection, with no local warning) — manually upgrade once after each November release:
+> 📅 **chinesecalendar annual maintenance**: holiday data follows the State Council's release cadence; a new version covering the next year usually ships around **November** each year. When installed data doesn't cover the current year, the trading-hours precheck automatically falls back to the SZSE official monthly calendar (the current year's 12 months are fetched once and cached under `data/trading_calendar/`, then read offline; only if the API is also unavailable does it degrade to weekend/weekday-only checks) — upgrading once after each November release is still recommended to stay network-free:
 >
 > ```bash
 > uv lock --upgrade-package chinesecalendar && uv sync
 > ```
+>
+> Fallback source: SZSE official monthly trading calendar API `https://www.szse.cn/api/report/exchange/onepersistenthour/monthList?month=YYYY-MM` (no `month` param = current month), returning per-day `jybz` (1=trading day, 0=non-trading) and `zrxh` (1=Sunday…7=Saturday); future months are covered only within the published year, and next year's calendar becomes queryable after its ~December release. Day-by-day identical to chinesecalendar across all of 2026 (242 trading days).
 
 ## Key Design
 
