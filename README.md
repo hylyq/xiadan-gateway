@@ -59,6 +59,7 @@ Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──�
 | Alert webhook | Consecutive task failures ≥3, order-dialog drift, and task timeouts → POST to a webhook (generic JSON or WeCom/DingTalk `text` format) on a background thread, never blocking the trading path |
 | Stock-name linkage verification | After typing the code, polls the name-linkage control (cid=1036 Static) for non-empty text — a reliable signal that the client fully parsed the code (1032 is a shell control whose read-back is always empty). On no linkage, clears and retypes once; still failing raises `INPUT_VERIFY_FAILED` and blocks submission; degrades to pass-through if the name control is missing. Disable via `order.verify_code_input` |
 | Entrust-no banner capture | After the submit click, a background thread screen-grabs the bottom-right yellow banner (~12fps; it is a self-drawn overlay invisible to `PrintWindow`), localizes it by yellow mask, and reads the contract number via template OCR. Parsing is length-agnostic, anchored on the trailing fullwidth period — broker/exchange display formats vary (sim client shows 10 digits; SZSE spec is 22). Returns `entrust_no` on success; `null` on failure (occluded / minimized / off-screen / unreadable frame) without affecting the order itself. Requires the banner strip on-screen and unoccluded; off-screen is self-healed before each task |
+| Order status & fill report | `GET /orders/{entrust_no}/status` joins today's orders × today's fills by contract number: order status derived from quantities (not broker remark text), fill aggregation with weighted avg price and per-trade numbers — the polling counterpart of the order response for strategy callers |
 | Window position self-healing | Before each task, checks window/workarea intersection (60% threshold); auto-moves the window back if it was dragged off-screen (`click_input`/screenshots are coordinate-based and fail off-screen) |
 | MCP adapter | `scripts/mcp_server.py` exposes the gateway as standard MCP tools for LLM agents — read-only queries always registered; `place_order`/`cancel_orders` only with `XIADAN_MCP_TRADING=1`; raw `/actions/*` never exposed (see [MCP Server](#mcp-server-agent-access)) |
 
@@ -257,6 +258,7 @@ PopupRule(
 | GET | `/positions` | Position query | ✓ | 40s |
 | GET | `/trades/today` | Today's trades | ✓ | 40s |
 | GET | `/orders/pending` | Today's orders | ✓ | 40s |
+| GET | `/orders/{entrust_no}/status` | Order status + fill report by contract number (joins today's orders × trades; two table copies per call) | ✓ | 60s |
 | POST | `/orders` | Place order (limit/market) | ✓ | 40s |
 | POST | `/orders/cancel-all` | Cancel orders (all / buys / sells / last) | ✓ | 40s |
 | POST | `/actions/send-key` | Send a key manually | ✓ | 30s |
@@ -317,6 +319,19 @@ curl -X POST http://localhost:5000/orders \
 > order query before per-order operations, or enable `order.verify_entrust_no`
 > to get the reconciliation result (`entrust_no_verified`) directly in the
 > order response.
+
+### GET /orders/{entrust_no}/status — Order Status & Fill Report
+
+Joins today's orders × today's fills by **contract number** (the join key between the two tables; broker-generated, length varies by broker/exchange — sim client shows 10 digits, SZSE spec is 22; trade numbers are exchange-generated: SSE 16-digit zero-padded, SZSE 8-digit). One queued task runs both table copies (typically 8–15s).
+
+- `found: false` — no order with this contract number in today's bookings (not placed today, or wrong number)
+- `order.status` — derived from quantities, not broker remark text (stable across brokers): `全部成交` / `部分成交` / `部分成交后撤单` / `全部撤单` / `未成交` / `未知`（quantities missing）
+- `order.is_final` — `filled + cancelled >= amount`: the order is no longer live in the market
+- `fills` — per-contract fill aggregation: `count` / `total_qty` / `total_amount` / `avg_price` (weighted by amount/qty, `null` when unfilled) / `trades[]` (`time` / `trade_no` / `qty` / `price` / `amount`, sorted by time)
+
+```bash
+curl -H "X-API-Key: $TOKEN" http://localhost:5000/orders/6284424619/status
+```
 
 ### POST /orders/cancel-all — Cancel Orders
 

@@ -92,6 +92,38 @@ def get_today_trades():
         return error_response_from_exception(e, request_id)
 
 
+@query_bp.route("/orders/<entrust_no>/status", methods=["GET"])
+def get_order_status(entrust_no: str):
+    """按合同编号查询委托状态与成交回报
+
+    合同编号 join 当日委托 × 当日成交：返回委托状态（由数量推导）、
+    成交聚合（数量/金额/加权均价）与逐笔成交编号列表。
+    found=false 表示当日委托中无此编号（非当日委托或编号有误）。
+    流程: 当日委托查询 → 命中后当日成交查询 → 纯函数聚合（一次排队）。
+    """
+    request_id = generate_request_id()
+    _start = time.time()
+    config = AppConfig()
+    task_queue = TaskQueue.get_instance()
+    try:
+        if not (entrust_no.isdigit() and 6 <= len(entrust_no) <= 24):
+            from src.core.exceptions import ApiError, ErrorCode
+            raise ApiError(
+                ErrorCode.VALIDATION_ERROR,
+                f"entrust_no 格式错误: {entrust_no}",
+                suggestion="合同编号为 6-24 位纯数字（不同券商/交易所长度不同）")
+        query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
+        result = task_queue.submit(
+            func=lambda: _get_position_service().get_order_status(entrust_no),
+            task_name="get_order_status",
+            params={"entrust_no": entrust_no},
+            timeout=query_timeout * 2  # 复合查询：最多两次表格复制
+        )
+        return success_response(result, request_id, duration_ms=(time.time() - _start) * 1000)
+    except Exception as e:
+        return error_response_from_exception(e, request_id)
+
+
 @query_bp.route("/orders/pending", methods=["GET"])
 def get_today_orders():
     """获取当日委托

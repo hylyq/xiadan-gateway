@@ -206,6 +206,15 @@ def get_today_orders() -> str:
     return client.call("GET", "/orders/pending")
 
 
+@mcp.tool()
+def get_order_status(entrust_no: str) -> str:
+    """按合同编号查询单笔委托的状态与成交回报：委托状态（全部成交/部分成交/
+    部分成交后撤单/全部撤单/未成交）、成交数量、加权均价、逐笔成交编号列表。
+    entrust_no 为纯数字合同编号（不同券商长度不同）。found=false 表示当日委托
+    中无此编号。耗时约 8~15 秒（串行查当日委托+当日成交两张表）。"""
+    return client.call("GET", f"/orders/{entrust_no}/status")
+
+
 # ============================================================
 # 交易工具（XIADAN_MCP_TRADING=1 才注册；描述内强制人工确认工作流）
 # ============================================================

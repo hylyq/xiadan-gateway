@@ -783,6 +783,116 @@ class PositionService:
                                          page_name="当日委托")
 
     # ------------------------------------------------------------
+    # 委托状态/成交回报（合同编号 join 当日委托 × 当日成交）
+    # ------------------------------------------------------------
+
+    def get_order_status(self, entrust_no: str) -> dict:
+        """按合同编号查询委托状态与成交回报
+
+        两段式：先查当日委托找委托行，找不到直接返回 found=False
+        （省一次当日成交查询）；找到再查当日成交做 join 聚合。
+        两次查询同属 query 组，复用连续查询的窗口跳过优化。
+        """
+        orders = self.get_today_orders()
+        if not any(str(r.get("合同编号", "")).strip() == entrust_no
+                   for r in orders):
+            self.logger.info(f"当日委托中未找到合同编号 {entrust_no}")
+            return {"found": False, "entrust_no": entrust_no}
+        fills = self.get_today_trades()
+        return self.build_order_status(entrust_no, orders, fills)
+
+    @staticmethod
+    def _num(value, cast=float):
+        """表格数字字段容错转换：空串/None → 0，去千分位"""
+        if value is None:
+            return cast(0)
+        s = str(value).strip().replace(",", "")
+        if not s:
+            return cast(0)
+        try:
+            return cast(float(s)) if cast is float else int(float(s))
+        except ValueError:
+            return cast(0)
+
+    @staticmethod
+    def build_order_status(entrust_no: str, order_rows: list, fill_rows: list) -> dict:
+        """按合同编号 join 当日委托 × 当日成交，产出状态+回报汇总（纯函数）
+
+        委托状态由数量推导而非券商「备注」文案（跨券商稳定）：
+        全部成交 / 部分成交 / 部分成交后撤单 / 全部撤单 / 未成交 / 未知
+        （amount=0 等无法判定时为未知）。is_final = 成交+撤消 ≥ 委托量，
+        即该委托不再在市。
+
+        合同编号由券商生成、显示长度因券商而异（模拟户 10 位、深交所
+        规范 22 位），故仅做等值匹配不做长度假设；成交编号由交易所生成
+        （沪 16 位补零 / 深 8 位），仅作回报明细字段透出。
+        """
+        entrust_no = str(entrust_no).strip()
+        order_row = next(
+            (r for r in order_rows
+             if str(r.get("合同编号", "")).strip() == entrust_no), None)
+        if order_row is None:
+            return {"found": False, "entrust_no": entrust_no}
+
+        filled = PositionService._num(order_row.get("成交数量"), int)
+        cancelled = PositionService._num(order_row.get("撤消数量"), int)
+        amount = PositionService._num(order_row.get("委托数量"), int)
+        if amount > 0 and filled >= amount:
+            status = "全部成交"
+        elif filled == 0 and cancelled > 0:
+            status = "全部撤单"
+        elif 0 < filled < amount and filled + cancelled >= amount > 0:
+            status = "部分成交后撤单"
+        elif 0 < filled < amount:
+            status = "部分成交"
+        elif filled == 0 and cancelled == 0 and amount > 0:
+            status = "未成交"
+        else:
+            status = "未知"
+
+        fills = sorted(
+            (r for r in fill_rows
+             if str(r.get("合同编号", "")).strip() == entrust_no),
+            key=lambda r: str(r.get("成交时间", "")))
+        total_qty = sum(PositionService._num(r.get("成交数量"), int) for r in fills)
+        total_amount = sum(PositionService._num(r.get("成交金额")) for r in fills)
+        avg_price = round(total_amount / total_qty, 3) if total_qty > 0 else None
+
+        return {
+            "found": True,
+            "entrust_no": entrust_no,
+            "order": {
+                "code": order_row.get("证券代码", ""),
+                "name": order_row.get("证券名称", ""),
+                "action": order_row.get("操作", ""),
+                "price": order_row.get("委托价格", ""),
+                "amount": amount,
+                "filled_qty": filled,
+                "cancelled_qty": cancelled,
+                "status": status,
+                "remark": order_row.get("备注", ""),
+                "entrust_time": order_row.get("委托时间", ""),
+                "is_final": amount > 0 and filled + cancelled >= amount,
+            },
+            "fills": {
+                "count": len(fills),
+                "total_qty": total_qty,
+                "total_amount": round(total_amount, 3),
+                "avg_price": avg_price,
+                "trades": [
+                    {
+                        "time": r.get("成交时间", ""),
+                        "trade_no": r.get("成交编号", ""),
+                        "qty": PositionService._num(r.get("成交数量"), int),
+                        "price": PositionService._num(r.get("成交均价")),
+                        "amount": PositionService._num(r.get("成交金额")),
+                    }
+                    for r in fills
+                ],
+            },
+        }
+
+    # ------------------------------------------------------------
     # OCR 验证码处理
     # ------------------------------------------------------------
 

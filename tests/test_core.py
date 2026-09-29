@@ -2394,3 +2394,99 @@ class TestCancelValidation:
         with pytest.raises(ApiError) as exc_info:
             service.cancel_all_orders("Q")
         assert exc_info.value.error_code == ErrorCode.VALIDATION_ERROR
+
+
+class TestOrderStatusBuilder:
+    """按合同编号 join 当日委托×当日成交 的纯函数测试"""
+
+    ORD = {"合同编号": "6284424619", "证券代码": "601991", "证券名称": "大唐发电",
+           "操作": "买入", "委托价格": "5.350", "委托数量": "100",
+           "成交数量": "100", "撤消数量": "0", "备注": "全部成交", "委托时间": "10:52:56"}
+    FILL = {"成交时间": "10:52:58", "证券代码": "601991", "操作": "买入",
+            "成交数量": "100", "成交均价": "5.280", "成交金额": "528.000",
+            "合同编号": "6284424619", "成交编号": "6660162516"}
+
+    def test_fully_filled(self):
+        """全部成交：聚合成交回报，均价按金额/数量"""
+        r = PositionService.build_order_status(
+            "6284424619", [self.ORD], [self.FILL])
+        assert r["found"] is True
+        assert r["order"]["status"] == "全部成交"
+        assert r["order"]["filled_qty"] == 100
+        assert r["order"]["is_final"] is True
+        assert r["fills"]["count"] == 1
+        assert r["fills"]["total_qty"] == 100
+        assert r["fills"]["avg_price"] == 5.28
+        assert r["fills"]["trades"][0]["trade_no"] == "6660162516"
+
+    def test_partial_fill(self):
+        """部分成交未撤：在市"""
+        o = dict(self.ORD, 成交数量="50", 备注="部分成交")
+        f = dict(self.FILL, 成交数量="50", 成交金额="264.000")
+        r = PositionService.build_order_status("6284424619", [o], [f])
+        assert r["order"]["status"] == "部分成交"
+        assert r["order"]["is_final"] is False
+
+    def test_partially_filled_then_cancelled(self):
+        """部成部撤：50 成交 + 50 撤销"""
+        o = dict(self.ORD, 成交数量="50", 撤消数量="50", 备注="部成部撤")
+        f = dict(self.FILL, 成交数量="50", 成交金额="264.000")
+        r = PositionService.build_order_status("6284424619", [o], [f])
+        assert r["order"]["status"] == "部分成交后撤单"
+        assert r["order"]["is_final"] is True
+
+    def test_fully_cancelled_no_fill(self):
+        """全部撤单：无成交回报，均价为 None"""
+        o = dict(self.ORD, 成交数量="0", 撤消数量="100", 备注="全部撤单")
+        r = PositionService.build_order_status("6284424619", [o], [])
+        assert r["order"]["status"] == "全部撤单"
+        assert r["fills"]["count"] == 0
+        assert r["fills"]["avg_price"] is None
+        assert r["order"]["is_final"] is True
+
+    def test_pending(self):
+        """未成交：挂单中"""
+        o = dict(self.ORD, 成交数量="0", 撤消数量="0", 备注="未成交")
+        r = PositionService.build_order_status("6284424619", [o], [])
+        assert r["order"]["status"] == "未成交"
+        assert r["order"]["is_final"] is False
+
+    def test_multiple_fills_weighted_avg(self):
+        """同一合同编号多笔成交：数量累加、加权均价"""
+        f1 = dict(self.FILL, 成交时间="10:52:58", 成交数量="60",
+                  成交金额="316.800", 成交编号="6660162516")
+        f2 = dict(self.FILL, 成交时间="10:53:01", 成交数量="40",
+                  成交金额="212.000", 成交编号="6660162901")
+        r = PositionService.build_order_status("6284424619", [self.ORD], [f1, f2])
+        assert r["fills"]["count"] == 2
+        assert r["fills"]["total_qty"] == 100
+        assert r["fills"]["avg_price"] == 5.288
+
+    def test_not_found(self):
+        """无此合同编号：found=False 且不含 order 字段"""
+        r = PositionService.build_order_status("9999999999", [self.ORD], [self.FILL])
+        assert r == {"found": False, "entrust_no": "9999999999"}
+
+    def test_malformed_numbers_tolerated(self):
+        """空串/None/带千分位的数量字段容忍处理"""
+        o = dict(self.ORD, 委托数量=None, 成交数量="", 撤消数量="1,000")
+        r = PositionService.build_order_status("6284424619", [o], [])
+        assert r["order"]["amount"] == 0
+        assert r["order"]["filled_qty"] == 0
+        assert r["order"]["cancelled_qty"] == 1000
+        # 数量缺失但 0 成交+有撤销：仍可判全部撤单
+        assert r["order"]["status"] == "全部撤单"
+
+    def test_unknown_when_all_quantities_missing(self):
+        """三个数量字段全部缺失时才判未知"""
+        o = dict(self.ORD, 委托数量=None, 成交数量=None, 撤消数量=None)
+        r = PositionService.build_order_status("6284424619", [o], [])
+        assert r["order"]["status"] == "未知"
+
+    def test_fills_sorted_by_time(self):
+        """成交回报按成交时间升序"""
+        f1 = dict(self.FILL, 成交时间="10:53:01", 成交编号="6660162901")
+        f2 = dict(self.FILL, 成交时间="10:52:58", 成交编号="6660162516")
+        r = PositionService.build_order_status("6284424619", [self.ORD], [f1, f2])
+        assert [t["trade_no"] for t in r["fills"]["trades"]] == \
+            ["6660162516", "6660162901"]
