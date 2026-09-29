@@ -1,11 +1,21 @@
-"""下单幂等检查
+"""下单幂等检查（强制客户端幂等键）
 
-防止 HTTP 超时后客户端重试导致重复下单。
-60 秒窗口内相同参数的下单请求会被拒绝。
+API 契约：POST /orders 必须携带 Idempotency-Key 请求头（≤128 字符）。
+
+- **key 生命周期**：每个逻辑订单一个 key；HTTP 超时重试必须复用同一 key
+  （窗口内同 key 拒绝 = 重试保护）；确要新单（含同参数多单）请新 key
+  （不同 key 同参数立即放行——显式意图优于服务端猜测）
+- 服务端不校验"随机性"（无法校验），契约是**唯一性**；uuid4 是最省力的
+  达成方式，"策略ID+自增序号"同样合法
+- 去重窗口语义 = 同 key 重试拦截窗（order_dedup_window_seconds，默认 60s，
+  与推荐客户端超时 40s 校准）
+
+历史注记：2026-09-29 前为"可选 key + 参数指纹兜底"双通道，混合使用存在
+穿透缺口（keyed 下单后 keyless 重试不被指纹拦截），key 必填后该缺口在
+构造上消失（无 keyless 路径）。
 """
 import time
 from threading import Lock
-from typing import Optional
 
 from src.exceptions import ApiError, ErrorCode, TaskTimeoutError
 from src.models.config import AppConfig
@@ -45,46 +55,20 @@ class IdempotencyChecker(Singleton):
         self._records = {}
         self._records_lock = Lock()
 
-    def _make_key(self, code: str, status: str, amount: Optional[str],
-                  price: Optional[str], price_type: str) -> str:
-        """生成任务唯一键"""
-        return f"{code}_{status}_{amount or ''}_{price or ''}_{price_type}"
-
-    def _resolve_key(self, idem_key: Optional[str], code: str, status: str,
-                     amount: Optional[str], price: Optional[str],
-                     price_type: str) -> str:
-        """解析幂等键：客户端 Idempotency-Key 优先，缺省回退参数指纹
-
-        客户端键加 "client:" 前缀隔离命名空间，避免与参数指纹撞键；
-        同一策略重试传同一 key 即可去重，不同策略同参数互不干扰
-        （参数指纹模式下的互撞问题）。
-        """
-        if idem_key:
-            return f"client:{idem_key}"
-        return self._make_key(code, status, amount, price, price_type)
-
-    def check_and_record(
-        self,
-        code: str,
-        status: str,
-        amount: Optional[str] = None,
-        price: Optional[str] = None,
-        price_type: str = "limit",
-        idem_key: Optional[str] = None
-    ) -> None:
+    def check_and_record(self, idem_key: str) -> None:
         """检查是否重复，如果不重复则记录
 
         Args:
-            idem_key: 客户端幂等键（Idempotency-Key 请求头）。提供时以它
-                为去重依据（60s 窗口内同 key 拒绝），参数指纹退居其次；
-                缺省时按参数指纹去重（向后兼容）。
+            idem_key: 客户端幂等键（Idempotency-Key 请求头，必填）。
+                同 key 窗口内重复 → DUPLICATE_ORDER；不同 key 一律放行。
 
         Raises:
-            ApiError: 60 秒内重复下单
+            ApiError: key 缺失（VALIDATION_ERROR）或窗口内同 key 重复
+                （DUPLICATE_ORDER）
         """
-        window = self.config.get_idempotency_config().get("order_dedup_window_seconds", 60)
-        key = self._resolve_key(idem_key, code, status, amount, price, price_type)
+        key = self._normalize_key(idem_key)
         now = time.time()
+        window = self.config.get_idempotency_config().get("order_dedup_window_seconds", 60)
 
         with self._records_lock:
             # 清理过期记录
@@ -99,12 +83,13 @@ class IdempotencyChecker(Singleton):
                 self.logger.warning(f"重复下单被拒绝: {key}, 距上次 {elapsed}s")
                 raise ApiError(
                     error_code=ErrorCode.DUPLICATE_ORDER,
-                    message=f"{window}秒内已提交相同订单（{elapsed}秒前），请勿重复下单",
+                    message=f"同一 Idempotency-Key 在 {window}秒内已提交过"
+                            f"（{elapsed}秒前）",
                     suggestion=(
-                        "请先确认上一笔订单状态: "
-                        "1) 调用 GET /trades/today 查询订单是否已成交；"
-                        "2) 如需撤单请调用 POST /orders/cancel-all；"
-                        "3) 确认后再重新下单"
+                        "同 key = 同一笔逻辑订单。若这是一次超时重试，请先确认"
+                        "上笔状态: 1) GET /orders/{entrust_no}/status 查询委托"
+                        "状态与成交；2) 如需撤单调用 POST /orders/cancel-all。"
+                        "若确要新下一笔（含同参数多单），请新生成一个 key"
                     ),
                     details={
                         "task_key": key,
@@ -117,31 +102,40 @@ class IdempotencyChecker(Singleton):
             self._records[key] = now
             self.logger.info(f"记录下单任务: {key}")
 
-    def clear_record(
-        self,
-        code: str,
-        status: str,
-        amount: Optional[str] = None,
-        price: Optional[str] = None,
-        price_type: str = "limit",
-        idem_key: Optional[str] = None
-    ) -> bool:
-        """清除下单记录（下单失败时调用，允许重试）
+    def clear_record(self, idem_key: str) -> bool:
+        """清除下单记录（下单失败时调用，允许同 key 重试）
 
         Args:
-            idem_key: 与 check_and_record 相同的客户端幂等键，确保清除的
-                是同一把键（客户端键模式下参数指纹里没有记录）
+            idem_key: 与 check_and_record 相同的客户端幂等键
 
         Returns:
             是否清除了记录
         """
-        key = self._resolve_key(idem_key, code, status, amount, price, price_type)
+        key = self._normalize_key(idem_key)
         with self._records_lock:
             if key in self._records:
                 del self._records[key]
                 self.logger.info(f"下单失败，已清除幂等记录: {key}")
                 return True
             return False
+
+    @staticmethod
+    def _normalize_key(idem_key) -> str:
+        """幂等键规范化：非空校验 + 统一命名空间前缀
+
+        空/纯空白 key 直接 VALIDATION_ERROR（路由层已前置校验，此处兜底）。
+        """
+        k = str(idem_key or "").strip()
+        if not k:
+            raise ApiError(
+                ErrorCode.VALIDATION_ERROR,
+                "缺少 Idempotency-Key（幂等键必填）",
+                suggestion=(
+                    "为每笔逻辑订单生成一个唯一键（如 uuid4），"
+                    "HTTP 超时重试必须复用同一 key；确要新下一笔请新 key"
+                ),
+            )
+        return f"client:{k}"
 
     def get_status(self) -> dict:
         """获取幂等检查状态"""

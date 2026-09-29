@@ -47,7 +47,7 @@ Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──�
 | Pipelined mode switching | Click the limit/market toggle without waiting, immediately fill the quantity — the ~0.7s fill overlaps the label change; verification is naturally ready after filling |
 | Classified popup handling | Order confirm → Y/N; warning → Y to continue; **price out of range → N to cancel + `PRICE_OUT_OF_RANGE`**; error → close + report |
 | Watchdog recovery | On task timeout: screenshot + activate + ESC×3, reset, then return an error |
-| Idempotency | Orders with identical parameters within a 60s window are rejected, preventing duplicate orders from HTTP timeout retries; optional client `Idempotency-Key` header deduplicates by key |
+| Idempotency | **Required** `Idempotency-Key` header (1–128 chars) — one key per logical order: same key within the window is rejected (`DUPLICATE_ORDER`, HTTP-timeout retry protection); a new key = a new order, identical-parameter multi-orders included |
 | OCR captcha | Lightweight template-matching engine; failures auto-archived; optional ddddocr offline training |
 | Production server | `waitress` WSGI + graceful shutdown (SIGINT/SIGTERM) |
 | Hot config reload | `POST /admin/reload-config` without restart |
@@ -135,7 +135,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
 | `task_queue.query_timeout_seconds` | 30 | Query operation timeout (seconds) |
 | `task_queue.confirm_timeout_seconds` | 10 | Confirm/keypress operation timeout (seconds) |
 | `task_queue.max_size` | 50 | Max queue length |
-| `idempotency.order_dedup_window_seconds` | 60 | Order dedup window (seconds) |
+| `idempotency.order_dedup_window_seconds` | 60 | Same-key retry-block window (seconds), calibrated to the recommended 40s client timeout |
 | `alerts.webhook_url` | empty | Alert webhook (**empty=disabled**): consecutive task failures ≥3, order-dialog behavior drift, and watchdog timeouts POST JSON in the background; hot-reloadable |
 | `alerts.format` | generic | `generic`=full structured JSON (custom receiver); `text`=WeCom group-bot / DingTalk custom-bot text format; `feishu`=Feishu/Lark custom-bot text format |
 | `alerts.timeout_seconds` | 5 | Webhook POST timeout (seconds). Sent on a background daemon thread, never blocks the trading path |
@@ -183,7 +183,7 @@ All responses return HTTP 200; success/failure is distinguished by the JSON `sta
 | Error code | Description |
 |------------|-------------|
 | `VALIDATION_ERROR` | Parameter validation failed |
-| `DUPLICATE_ORDER` | Duplicate order within 60s |
+| `DUPLICATE_ORDER` | Same `Idempotency-Key` submitted within the retry-block window |
 | `AUTH_REQUIRED` | Auth token missing |
 | `AUTH_FAILED` | Auth token invalid |
 | `WINDOW_NOT_FOUND` | Trading window not found |
@@ -282,22 +282,25 @@ PopupRule(
 | `price_type` | | `limit`=limit (default), `market`=market |
 | `confirm` | | `true`=auto-confirm (default). `false`=click N to cancel **only if the client pops the「委托确认」dialog** — with the recommended quick-trading setup (client confirmations off, see setup section) no dialog appears and the order submits directly, so `false` is NOT a guaranteed preview/interception |
 
-> An optional `Idempotency-Key` header (≤128 chars) is also supported for client-key dedup — see [Idempotency and Price Validation](#idempotency-and-price-validation).
+> **A required `Idempotency-Key` header (1–128 chars) is enforced** — see [Idempotency and Price Validation](#idempotency-and-price-validation). Key lifecycle: one key per logical order, reuse it on timeout retries; use a new key for each genuinely new order (identical-parameter multi-orders included).
 
 ```bash
 # Market buy
 curl -X POST http://localhost:5000/orders \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d '{"code":"601991","status":"1","amount":"100","price_type":"market"}'
 
 # Limit buy
 curl -X POST http://localhost:5000/orders \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d '{"code":"600000","status":"1","amount":"100","price":"10.50","price_type":"limit"}'
 
 # Market sell
 curl -X POST http://localhost:5000/orders \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d '{"code":"601991","status":"2","amount":"100","price_type":"market"}'
 ```
 
@@ -415,7 +418,7 @@ The exposure surface is deliberately layered:
 Safety design:
 
 - The adapter imports nothing from `src/` and never touches the trading path — queue serialization, idempotency, and alerting are all inherited via the HTTP layer
-- `place_order` maps `buy`/`sell` to `1`/`2`, validates locally (6-digit code, positive integer amount, ≤2-decimal price), **requires an explicit numeric price for limit orders** ("latest price" is rejected), and its description forces a confirm-then-verify workflow: query positions/balance → repeat the parameters verbatim to the user and get consent → place → verify with `get_order_status` (per-order status + fills; falls back to `get_today_orders` when the banner number wasn't captured)
+- `place_order` maps `buy`/`sell` to `1`/`2`, validates locally (6-digit code, positive integer amount, ≤2-decimal price), **requires an explicit numeric price for limit orders** ("latest price" is rejected), and its description forces a confirm-then-verify workflow: query positions/balance → repeat the parameters verbatim to the user and get consent → place → verify with `get_order_status` (per-order status + fills; falls back to `get_today_orders` when the banner number wasn't captured). The API's mandatory `Idempotency-Key` is auto-filled with a uuid4 unless the agent passes `idempotency_key` — auto-generation means a re-invocation after timeout counts as a NEW order (no retry protection unless the agent reuses its own key)
 - Gateway auth is reused: token from `XIADAN_MCP_TOKEN`, auto-read from `config/app_config.json` if unset; requests never carry an `Origin` header (compatible with the cross-site defense)
 - Gateway errors surface as MCP `isError` results formatted as `[ERROR_CODE] message | suggestion | request_id`; an unreachable gateway returns actionable guidance instead of a stack trace
 
@@ -467,7 +470,7 @@ xiadan-gateway/
 │   │   ├── task_queue.py        # global task queue + watchdog recovery + runtime stats
 │   │   ├── response.py          # unified response wrapper (success/error)
 │   │   ├── helpers.py           # route-layer shared utilities
-│   │   └── idempotency.py       # order idempotency check (param fingerprint / Idempotency-Key)
+│   │   └── idempotency.py       # order idempotency check (mandatory Idempotency-Key)
 │   ├── core/
 │   │   ├── trader.py            # order orchestration
 │   │   ├── popup_rules.py       # popup/submit-error classification rule table (action + error code)
@@ -651,8 +654,8 @@ Popups during order/cancel are auto-detected and handled by type: order-confirm 
 
 ### Idempotency and Price Validation
 
-- **Idempotency**: orders with the same `code+status+amount+price+price_type` within 60s are rejected (`DUPLICATE_ORDER`). A failed order clears its record to allow retry; a timed-out order does not (prevents duplicate submission).
-- **Client idempotency key**: `POST /orders` accepts an optional `Idempotency-Key` header (≤128 chars) — when present, dedup is keyed by it: retrying after an HTTP timeout with the same key is safe (neither mis-rejected nor duplicated), and identical parameters from different strategies no longer collide. Without the header, the parameter fingerprint applies (backward compatible).
+- **Mandatory idempotency key**: every `POST /orders` **requires** an `Idempotency-Key` header (1–128 chars). Key lifecycle = **one key per logical order**: an HTTP-timeout retry must **reuse the same key** (a same-key request within the window is rejected with `DUPLICATE_ORDER` — that is the retry protection); a genuinely new order (including multiple identical-parameter orders) must use a **new key**, and distinct keys pass immediately even with identical parameters. The server cannot verify randomness — the contract is **uniqueness**; uuid4 is the easiest way, "strategy-id + sequence number" works too.
+- **Window semantics**: `idempotency.order_dedup_window_seconds` (default 60, calibrated to the recommended 40s client timeout) is the same-key retry-block window. A failed order clears its record to allow same-key retry; a timed-out order does not (prevents duplicate submission). Missing/blank key → `VALIDATION_ERROR` with guidance.
 - **Price**: the API layer rejects prices with more than 2 decimals (`VALIDATION_ERROR`); the order layer auto-formats via `sanitize_price()` to 2 decimals.
 
 ### Query Panel Standardization

@@ -36,6 +36,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -252,8 +253,10 @@ def _register_trading_tools() -> None:
                 显式价格——禁止自行估算"最新价/现价"；市价单不填。
             price_type: limit=限价（默认），market=市价。实测该券商市价委托
                 常被拒（ORDER_PRICE_REQUIRED），优先使用限价。
-            idempotency_key: 可选幂等键（≤128 字符）。同一键 60 秒内重试
-                不会重复下单——本工具超时后重试时请复用同一键。
+            idempotency_key: 可选幂等键（1-128 字符，API 必填——未提供时本
+                工具自动生成 uuid）。注意：自动生成意味着超时后"再次调用
+                本工具"会被视为新订单、无重试保护；需要重试保护时请显式
+                传入并在重试时复用同一键。
         """
         code = (code or "").strip()
         if len(code) != 6 or not code.isdigit():
@@ -284,10 +287,11 @@ def _register_trading_tools() -> None:
         }
         if price is not None:
             body["price"] = f"{price:.2f}"
-        headers = None
-        if idempotency_key and idempotency_key.strip():
-            headers = {"Idempotency-Key": idempotency_key.strip()}
-        return client.call("POST", "/orders", body=body, extra_headers=headers)
+        # 幂等键必填（API 契约）：未提供时自动生成 uuid——代价是 agent
+        # 超时后重新调用本工具视为新订单（无重试保护），见参数说明
+        key = (idempotency_key or "").strip() or str(uuid.uuid4())
+        return client.call("POST", "/orders", body=body,
+                           extra_headers={"Idempotency-Key": key})
 
     @mcp.tool()
     def cancel_orders(

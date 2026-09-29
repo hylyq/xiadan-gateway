@@ -664,7 +664,7 @@ class TestRouteErrorPaths:
             ErrorCode.PRICE_OUT_OF_RANGE, "价格超出涨跌停限制", suggestion="调整价格"))
         IdempotencyChecker._reset_instance()
 
-        r = client.post("/orders", json={
+        r = client.post("/orders", headers={"Idempotency-Key": "t-fail-1"}, json={
             "code": "601991", "status": "1", "amount": "100", "price": "1.00"})
 
         body = r.get_json()
@@ -684,7 +684,7 @@ class TestRouteErrorPaths:
             ErrorCode.TASK_TIMEOUT, "任务执行超时", suggestion="检查订单状态"))
         IdempotencyChecker._reset_instance()
 
-        r = client.post("/orders", json={
+        r = client.post("/orders", headers={"Idempotency-Key": "t-timeout-1"}, json={
             "code": "601991", "status": "1", "amount": "100", "price": "1.00"})
 
         body = r.get_json()
@@ -693,6 +693,18 @@ class TestRouteErrorPaths:
         assert body["error_code"] == "TASK_TIMEOUT"
         # 超时订单可能仍在执行 → 记录必须保留
         assert len(IdempotencyChecker.get_instance()._records) == 1
+
+    def test_order_missing_key_rejected(self, monkeypatch, tmp_path):
+        """缺 Idempotency-Key → VALIDATION_ERROR 且现场教学 key 生命周期"""
+        client = self._make_client(monkeypatch, tmp_path)
+
+        r = client.post("/orders", json={
+            "code": "601991", "status": "1", "amount": "100", "price": "1.00"})
+
+        body = r.get_json()
+        assert body["status"] == "error"
+        assert body["error_code"] == "VALIDATION_ERROR"
+        assert "Idempotency-Key" in body["message"]
 
     def test_query_failure_returns_json(self, monkeypatch, tmp_path):
         """查询任务失败（OCR_FAILED）→ 统一 JSON 错误"""
@@ -1412,51 +1424,59 @@ class TestIdempotencyRecordRetention:
         assert should_keep_record_on_error(ValueError("x")) is False
 
     def test_duplicate_rejected_then_cleared_allows_retry(self):
-        """记录→重复被拒→清除→可重新记录（失败重试路径）"""
+        """记录→同 key 重复被拒→清除→同 key 可重新记录（失败重试路径）"""
         from src.exceptions import ApiError, ErrorCode
         chk = self._checker()
-        chk.check_and_record("601991", "1", "100", "10.50", "limit")
+        chk.check_and_record("retry-abc")
         with pytest.raises(ApiError) as exc_info:
-            chk.check_and_record("601991", "1", "100", "10.50", "limit")
+            chk.check_and_record("retry-abc")
         assert exc_info.value.error_code == ErrorCode.DUPLICATE_ORDER
-        # 不同参数不受影响
-        chk.check_and_record("601991", "2", "100", None, "market")
-        # 清除后同参数可再次记录
-        assert chk.clear_record("601991", "1", "100", "10.50", "limit") is True
-        chk.check_and_record("601991", "1", "100", "10.50", "limit")
+        # 不同 key = 新订单：同参数也放行（多单需求的正解）
+        chk.check_and_record("order-2")
+        # 清除后同 key 可再次记录
+        assert chk.clear_record("retry-abc") is True
+        chk.check_and_record("retry-abc")
 
     def test_expired_window_allows_retry(self):
-        """超过去重窗口后允许再次下单"""
+        """超过去重窗口后允许同 key 再次下单"""
         chk = self._checker()
-        chk._records["601991_1_100__limit"] = 0  # 1970 年 → 必然过期
-        chk.check_and_record("601991", "1", "100", "10.50", "limit")
+        chk._records["client:retry-abc"] = 0  # 1970 年 → 必然过期
+        chk.check_and_record("retry-abc")
 
-    def test_client_key_dedup_independent_of_params(self):
-        """客户端幂等键：同 key 不同参数也去重；不同 key 同参数不互撞"""
+    def test_key_is_the_only_dedup_basis(self):
+        """key 是唯一去重依据：同 key 不同参数也拒；不同 key 同参数放行"""
         from src.exceptions import ApiError, ErrorCode
         chk = self._checker()
 
-        chk.check_and_record("601991", "1", "100", "10.50", "limit", idem_key="retry-abc")
-        # 同 key 不同参数 → 仍拒绝（键优先于参数指纹）
+        chk.check_and_record("retry-abc")
+        # 同 key 重试 → 拒绝（key 生命周期：重试必须复用同一 key）
         with pytest.raises(ApiError) as exc_info:
-            chk.check_and_record("600000", "2", "200", None, "market", idem_key="retry-abc")
+            chk.check_and_record("retry-abc")
         assert exc_info.value.error_code == ErrorCode.DUPLICATE_ORDER
 
-        # 不同 key 同参数 → 不互撞（参数指纹模式的痛点）
-        chk.check_and_record("601991", "1", "100", "10.50", "limit", idem_key="strategy-b")
+        # 不同 key = 调用方声明的新订单 → 放行
+        chk.check_and_record("strategy-b")
 
-    def test_client_key_clear_uses_same_key(self):
-        """失败清除必须走同一把客户端键，重试才能通过"""
+    def test_clear_uses_same_key(self):
+        """失败清除必须走同一把 key，重试才能通过"""
         chk = self._checker()
-        chk.check_and_record("601991", "1", "100", "10.50", "limit", idem_key="retry-xyz")
-        # 按参数指纹清除（旧调用方式）→ 清不掉客户端键记录
-        assert chk.clear_record("601991", "1", "100", "10.50", "limit") is False
+        chk.check_and_record("retry-xyz")
+        # 用另一把键清除 → 清不掉
+        assert chk.clear_record("other-key") is False
         with pytest.raises(Exception):
-            chk.check_and_record("601991", "1", "100", "10.50", "limit", idem_key="retry-xyz")
+            chk.check_and_record("retry-xyz")
         # 用同一把键清除 → 重试放行
-        assert chk.clear_record("601991", "1", "100", "10.50", "limit",
-                                idem_key="retry-xyz") is True
-        chk.check_and_record("601991", "1", "100", "10.50", "limit", idem_key="retry-xyz")
+        assert chk.clear_record("retry-xyz") is True
+        chk.check_and_record("retry-xyz")
+
+    def test_missing_key_rejected(self):
+        """空/缺失 key 在检查层即拒绝（路由层前置校验的兜底）"""
+        from src.exceptions import ApiError, ErrorCode
+        chk = self._checker()
+        for bad in ("", "   ", None):
+            with pytest.raises(ApiError) as exc_info:
+                chk.check_and_record(bad)
+            assert exc_info.value.error_code == ErrorCode.VALIDATION_ERROR
 
 
 class TestDiagnosticSnapshotConcurrency:
@@ -1603,14 +1623,15 @@ class TestIdempotencyKeyRoute:
                         headers={"Idempotency-Key": "k" * 129})
         assert r.get_json()["error_code"] == "VALIDATION_ERROR"
 
-    def test_no_header_falls_back_to_param_fingerprint(self, monkeypatch, tmp_path):
-        """不带头时行为不变：相同参数 60s 内仍被参数指纹拦截"""
+    def test_no_header_rejected_with_teaching_error(self, monkeypatch, tmp_path):
+        """不带头 → VALIDATION_ERROR（key 必填契约，错误信息现场教学）"""
         self._ok_submit(monkeypatch, [{"confirmed": True}])
         client = self._make_client(monkeypatch, tmp_path)
         payload = {"code": "601991", "status": "1", "amount": "100"}
-        assert client.post("/orders", json=payload).get_json()["status"] == "success"
-        r2 = client.post("/orders", json=payload)
-        assert r2.get_json()["error_code"] == "DUPLICATE_ORDER"
+        body = client.post("/orders", json=payload).get_json()
+        assert body["status"] == "error"
+        assert body["error_code"] == "VALIDATION_ERROR"
+        assert "Idempotency-Key" in body["message"]
 
 
 class TestEntrustNoVerification:
@@ -1654,7 +1675,7 @@ class TestEntrustNoVerification:
 
         self._stub_submit(monkeypatch, _handler)
         client = self._make_client(monkeypatch, tmp_path)
-        r = client.post("/orders", json={"code": "601991", "status": "1", "amount": "100"})
+        r = client.post("/orders", headers={"Idempotency-Key": "t-verify"}, json={"code": "601991", "status": "1", "amount": "100"})
         body = r.get_json()
         assert body["status"] == "success"
         assert body["data"]["confirmed"] is True
@@ -1669,7 +1690,7 @@ class TestEntrustNoVerification:
 
         self._stub_submit(monkeypatch, _handler)
         client = self._make_client(monkeypatch, tmp_path)
-        r = client.post("/orders", json={"code": "601991", "status": "1", "amount": "100"})
+        r = client.post("/orders", headers={"Idempotency-Key": "t-verify"}, json={"code": "601991", "status": "1", "amount": "100"})
         body = r.get_json()
         assert body["status"] == "success", "对账未命中不改变下单成功语义"
         assert body["data"]["entrust_no_verified"] is False
@@ -1685,7 +1706,7 @@ class TestEntrustNoVerification:
 
         self._stub_submit(monkeypatch, _handler)
         client = self._make_client(monkeypatch, tmp_path)
-        r = client.post("/orders", json={"code": "601991", "status": "1", "amount": "100"})
+        r = client.post("/orders", headers={"Idempotency-Key": "t-verify"}, json={"code": "601991", "status": "1", "amount": "100"})
         body = r.get_json()
         assert body["status"] == "success"
         assert body["data"]["entrust_no_verified"] is None
@@ -1702,13 +1723,13 @@ class TestEntrustNoVerification:
 
         # 开启但无 entrust_no → 不查询
         client = self._make_client(monkeypatch, tmp_path, verify=True)
-        client.post("/orders", json={"code": "601991", "status": "1", "amount": "100"})
+        client.post("/orders", headers={"Idempotency-Key": "t-verify"}, json={"code": "601991", "status": "1", "amount": "100"})
         assert "get_today_orders" not in submitted
 
         # 关闭对账 → 不查询
         submitted.clear()
         client = self._make_client(monkeypatch, tmp_path, verify=False)
-        client.post("/orders", json={"code": "601991", "status": "1", "amount": "100"})
+        client.post("/orders", headers={"Idempotency-Key": "t-verify"}, json={"code": "601991", "status": "1", "amount": "100"})
         assert "get_today_orders" not in submitted
 
 

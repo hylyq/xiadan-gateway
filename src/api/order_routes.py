@@ -149,9 +149,10 @@ def xiadan():
         POST /orders  {"code": "600000", "status": "1", "amount": "100", "price": "10.5", "price_type": "limit"}
 
     幂等:
-        可选请求头 Idempotency-Key（≤128 字符）——提供时按它去重（60s 窗口），
-        HTTP 超时重试带同一 key 即不会被 DUPLICATE_ORDER 误拦也不会重复下单；
-        缺省按 参数指纹 去重（60s 内相同 code+status+amount+price+price_type 拒绝）。
+        必填请求头 Idempotency-Key（1-128 字符）。key 生命周期 = 每个逻辑
+        订单一个 key：HTTP 超时重试必须复用同一 key（窗口内同 key 拒绝，
+        即重试保护）；确要新下一笔（含同参数多单）请新 key——不同 key 同
+        参数立即放行。服务端不校验随机性，契约是唯一性（uuid4 即可）。
     """
     request_id = generate_request_id()
     config = AppConfig()
@@ -213,10 +214,18 @@ def xiadan():
 
     confirm = (confirm_str == "true")
 
-    # 客户端幂等键（可选）：Idempotency-Key 请求头优先于参数指纹去重。
-    # HTTP 超时重试时携带同一 key 即可安全重试，且不同策略同参数不再互撞。
-    idem_key = (request.headers.get("Idempotency-Key") or "").strip() or None
-    if idem_key and len(idem_key) > 128:
+    # 客户端幂等键（必填）：key 生命周期 = 每个逻辑订单一个 key，
+    # 超时重试复用同一 key（窗口内同 key 拒绝 = 重试保护）；新单请新 key
+    idem_key = (request.headers.get("Idempotency-Key") or "").strip()
+    if not idem_key:
+        return error_response(
+            ErrorCode.VALIDATION_ERROR, "缺少 Idempotency-Key（幂等键必填）",
+            request_id,
+            "为每笔逻辑订单生成一个唯一键（如 uuid4，1-128 字符）；"
+            "HTTP 超时重试必须复用同一 key；确要新下一笔（含同参数多单）"
+            "请新生成一个 key"
+        )
+    if len(idem_key) > 128:
         return error_response(
             ErrorCode.VALIDATION_ERROR, "Idempotency-Key 过长", request_id,
             "Idempotency-Key 请求头最长 128 字符"
@@ -224,8 +233,7 @@ def xiadan():
 
     # 幂等检查
     try:
-        idempotency.check_and_record(code, status, amount, price, price_type,
-                                     idem_key=idem_key)
+        idempotency.check_and_record(idem_key)
     except ApiError as e:
         return error_response(
             e.error_code, e.message, request_id,
@@ -255,8 +263,7 @@ def xiadan():
         # 任务可能仍在执行/排队（看门狗超时、队列超时）时保留幂等记录，
         # 防止客户端立即重试导致重复下单
         if not should_keep_record_on_error(e):
-            idempotency.clear_record(code, status, amount, price, price_type,
-                                     idem_key=idem_key)
+            idempotency.clear_record(idem_key)
         return error_response_from_exception(e, request_id)
 
 
