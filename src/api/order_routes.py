@@ -56,9 +56,18 @@ def _maybe_recover_entrust_no(config: AppConfig, task_queue: TaskQueue, result: 
     logger = Logger.get_instance()
     try:
         query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
+        _click = result["submit_click_epoch"]
+        _code, _action = result.get("code"), result.get("action")
+        _price, _amount = result.get("price"), result.get("amount")
+
+        def _match(rows):
+            return PositionService.recover_entrust_no(
+                _click, rows, _code, _action, _price, _amount) is not None
+
         orders = task_queue.submit(
             func=lambda: PositionService(
-                WindowService(), OcrService.get_instance()).get_today_orders(),
+                WindowService(), OcrService.get_instance()).get_today_orders(
+                refresh_until_match=_match),
             task_name="get_today_orders",
             params={"recover_entrust_no": True},
             timeout=query_timeout,
@@ -105,9 +114,13 @@ def _maybe_verify_entrust_no(config: AppConfig, task_queue: TaskQueue, result: d
         query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
         # OCR 服务必须显式传入——对账查询可能触发验证码，缺省会话
         # OCR 未初始化导致对账必然失败（2026-09-28 盘中实测）
+        # 首查未命中时 F5 刷新当日委托页重查一次（券商列表对新委托有秒级可见性延迟）
         orders = task_queue.submit(
             func=lambda: PositionService(
-                WindowService(), OcrService.get_instance()).get_today_orders(),
+                WindowService(), OcrService.get_instance()).get_today_orders(
+                refresh_until_match=lambda rows: any(
+                    str(r.get("合同编号", "")).strip() == entrust_no
+                    for r in rows or [] if isinstance(r, dict))),
             task_name="get_today_orders",
             params={"verify_entrust_no": entrust_no},
             timeout=query_timeout,

@@ -160,7 +160,7 @@ def test_place_order_buy_mapping(mod_trading, monkeypatch):
     assert fake.calls[0]["body"] == {
         "code": "601991", "status": "1", "amount": "100",
         "price": "10.50", "price_type": "limit"}
-    assert fake.calls[0]["headers"] is None
+    assert "Idempotency-Key" in (fake.calls[0]["headers"] or {})
 
 
 def test_place_order_sell_mapping(mod_trading, monkeypatch):

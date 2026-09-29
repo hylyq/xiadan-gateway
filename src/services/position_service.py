@@ -763,11 +763,18 @@ class PositionService:
     # 当日委托（树形菜单 + Ctrl+C + OCR 兜底）
     # ------------------------------------------------------------
 
-    def get_today_orders(self) -> list:
+    def get_today_orders(self, refresh_until_match=None) -> list:
         """获取当日委托
 
         返回字段：时间、委托号、证券代码、证券名称、操作、委托价格、委托数量、
                   成交数量、撤单数量、状态、交易市场
+
+        Args:
+            refresh_until_match: 可选谓词 (rows) -> bool。首次复制后若谓词
+                不满足（如对账委托号未命中、回补条件无匹配——券商当日委托
+                列表对新委托有秒级可见性延迟，2026-09-29 压测实测），按
+                F5 刷新当前查询页后重新复制确认一次；仍不满足则原样返回，
+                由调用方按未命中处理（宁可放弃、绝不循环重试）。
         """
         self.logger.info("开始获取当日委托")
 
@@ -779,8 +786,18 @@ class PositionService:
             window = self._cached_window
             self._navigate_to_query_page(window, "当日委托")
 
-        return self._copy_table_verified("委托", self.ORDERS_TABLE_COLUMNS,
+        rows = self._copy_table_verified("委托", self.ORDERS_TABLE_COLUMNS,
                                          page_name="当日委托")
+        if refresh_until_match is not None and not refresh_until_match(rows):
+            self.logger.info("当日委托首查未满足匹配条件，F5 刷新后重新复制确认")
+            with timed("F5 刷新重查当日委托", self.logger):
+                self._refresh_window_ref()
+                window = self._cached_window
+                self.window_service.send_key("F5", background=True)
+                time.sleep(0.8)  # 等券商服务器重新返回列表
+                rows = self._copy_table_verified(
+                    "委托", self.ORDERS_TABLE_COLUMNS, page_name="当日委托")
+        return rows
 
     # ------------------------------------------------------------
     # 委托状态/成交回报（合同编号 join 当日委托 × 当日成交）
