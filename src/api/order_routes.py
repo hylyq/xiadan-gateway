@@ -93,7 +93,8 @@ def xiadan():
         amount: 委托数量（可选）
         price: 委托价格（仅限价模式，可选）
         price_type: 'limit'=限价(默认), 'market'=市价
-        confirm: 'true'=自动确认(默认), 'false'=不确认
+        confirm: 'true'=自动确认(默认)；'false'=客户端弹「委托确认」框时点否取消，
+                 推荐的快速交易配置（客户端关闭确认）下无弹窗，不会拦截下单
 
     示例:
         POST /orders  {"code": "601991", "status": "1", "amount": "100", "price_type": "market"}

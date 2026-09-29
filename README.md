@@ -275,7 +275,7 @@ PopupRule(
 | `amount` | | Order quantity |
 | `price` | | Order price (limit mode, max 2 decimals) |
 | `price_type` | | `limit`=limit (default), `market`=market |
-| `confirm` | | `true`=auto-confirm (default), `false`=preview mode (clicks N to cancel) |
+| `confirm` | | `true`=auto-confirm (default). `false`=click N to cancel **only if the client pops the「委托确认」dialog** — with the recommended quick-trading setup (client confirmations off, see setup section) no dialog appears and the order submits directly, so `false` is NOT a guaranteed preview/interception |
 
 > An optional `Idempotency-Key` header (≤128 chars) is also supported for client-key dedup — see [Idempotency and Price Validation](#idempotency-and-price-validation).
 
