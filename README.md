@@ -18,7 +18,7 @@ A trading gateway for TongHuaShun `xiadan.exe` — controls the THS order-entry 
 ## Table of Contents
 
 - [Core Features](#core-features)
-- [Quick Start](#quick-start) (incl. [Prerequisites: Broker Software Settings](#prerequisites-broker-software-settings))
+- [Quick Start](#quick-start) (incl. [Prerequisites: Broker Software Settings](#prerequisites-broker-software-settings) / [Unattended Operation on a Server (VNC)](#unattended-operation-on-a-server-vnc-recommended))
 - [Required Before Going Live (Security Checklist)](#required-before-going-live-security-checklist)
 - [Configuration](#configuration)
 - [API](#api): [Response Format](#response-format) / [Error Codes](#error-codes) / [Endpoints](#endpoints) / [Place Order](#post-orders--place-order) / [Order Status & Fill Report](#get-ordersentrust_nostatus--order-status--fill-report) / [Cancel Orders](#post-orderscancel-all--cancel-orders) / [Auxiliary Endpoints](#auxiliary-endpoints) / [Client Timeout Configuration](#client-timeout-configuration)
@@ -68,6 +68,8 @@ uv run python main.py             # start the service (default http://localhost:
 uv run python main.py --dev       # dev mode (hot reload)
 ```
 
+> **Runtime library prerequisite**: pywin32's `win32ui` depends on the Microsoft MFC runtime (`mfc140u.dll`). Clean Windows / Windows Server images often lack it — `uv sync` succeeds, but startup then fails with `ImportError: DLL load failed while importing win32ui`. Fix: install the [Visual C++ 2015-2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe) (interactive install; on a headless server run it from an RDP/VNC desktop session — it can hang in a service session), then verify `C:\Windows\System32\mfc140u.dll` exists.
+
 ### Prerequisites: Broker Software Settings
 
 Configure the following manually before starting — disabling confirmation popups speeds up trading.
@@ -82,6 +84,31 @@ Configure the following manually before starting — disabling confirmation popu
 | 委托成功后是否弹出提示对话框 (Prompt dialog after order success) | **No** | Reduce post-trade popup interference |
 
 > Configure once. With confirmations off (quick-trading mode), orders submit directly with no popups, cutting ~1.4s per order.
+
+### Unattended Operation on a Server (VNC Recommended)
+
+The gateway drives `xiadan.exe` with **real mouse/keyboard input** (`SetForegroundWindow` + `click_input` + `keybd_event`), which requires the hosting session to have an **active desktop**. On a cloud/remote server this constrains how you connect:
+
+| Access mode | After the client disconnects | Automation |
+|---|---|---|
+| **VNC (recommended)** — session lives on the console | VNC is only a mirror; the session stays attached to the console | ✅ Keeps working — connect/disconnect anytime |
+| RDP — session on the RDP transport | Session enters the "disconnected" state, no active desktop | ❌ Fails: `There is no active desktop required for moving mouse cursor!` |
+| RDP + `tscon <id> /dest:console` before disconnecting | Desktop redirected back to the console | ✅ Keeps working |
+
+**One-time setup**: install [TightVNC Server](https://www.tightvnc.com/) (runs as a Windows service and serves the console session), set a strong VNC password, and restrict the VNC port in the firewall — never expose it to the public internet (prefer an SSH tunnel).
+
+**Daily flow**:
+
+1. Connect via VNC → log in to Windows at the console → start `xiadan.exe` and log in to the broker
+2. Start the gateway in a terminal there: `uv run python main.py`
+3. Disconnect the VNC client freely — the console session and all processes keep running; queries and orders are unaffected (verified in practice: balance/positions/trades queries all succeed after VNC disconnect)
+
+**Rules**:
+
+- **Do not RDP into that session afterwards** — an RDP reconnect pulls the session off the console back onto the RDP transport; a plain RDP disconnect then breaks automation until you re-run `tscon <id> /dest:console` (find the session id with `qwinsta`)
+- **Do not lock the desktop** (`Win+L` or a locking screensaver switches to the secure desktop — automation fails)
+- **A Windows service / scheduled task "run whether user is logged on or not" does not work**: those run in Session 0 and cannot see or operate the windows of an interactive session (window enumeration comes up empty). Boot auto-start therefore also requires an interactive logon first — log in via VNC, then start `xiadan.exe` and the gateway
+- After a reboot: VNC in → log on → start `xiadan.exe` + broker login → start the gateway
 
 ## Required Before Going Live (Security Checklist)
 

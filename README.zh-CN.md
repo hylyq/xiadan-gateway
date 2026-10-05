@@ -18,7 +18,7 @@
 ## 目录
 
 - [核心特性](#核心特性)
-- [快速开始](#快速开始)（含[前置准备：券商软件设置](#前置准备券商软件设置)）
+- [快速开始](#快速开始)（含[前置准备：券商软件设置](#前置准备券商软件设置) / [服务器无人值守运行（VNC 方案）](#服务器无人值守运行vnc-方案)）
 - [上线前必改（安全检查）](#上线前必改安全检查)
 - [配置](#配置)
 - [API 接口](#api-接口)：[响应格式](#响应格式) / [错误码](#错误码) / [接口总表](#接口总表) / [下单](#post-orders--下单) / [委托状态与成交回报](#get-ordersentrust_nostatus--委托状态与成交回报) / [撤单](#post-orderscancel-all--撤单) / [辅助接口](#辅助接口) / [调用方 timeout 配置](#调用方-timeout-配置)
@@ -68,6 +68,8 @@ uv run python main.py             # 启动服务（默认 http://localhost:5000�
 uv run python main.py --dev       # 开发模式（热加载）
 ```
 
+> **运行库前置提示**：pywin32 的 `win32ui` 依赖微软 MFC 运行库（`mfc140u.dll`）。纯净的 Windows / Windows Server 镜像通常没有——`uv sync` 能装完依赖，但启动时报 `ImportError: DLL load failed while importing win32ui`。解决办法：安装 [Visual C++ 2015-2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe)（需交互式安装；无头服务器请在 RDP/VNC 桌面会话里运行，服务会话中会卡住），装完确认 `C:\Windows\System32\mfc140u.dll` 存在。
+
 ### 前置准备：券商软件设置
 
 启动前必须手动配置以下设置，跳过确认弹窗以提升交易速度。
@@ -82,6 +84,31 @@ uv run python main.py --dev       # 开发模式（热加载）
 | 委托成功后是否弹出提示对话框 | **否** | 减少交易成功后的提示弹窗干扰 |
 
 > 只需配置一次。关闭确认后（快速交易模式），委托直接提交不再弹窗，下单耗时减少 ~1.4s。
+
+### 服务器无人值守运行（VNC 方案）
+
+本网关通过**真实鼠标/键盘输入**驱动 `xiadan.exe`（`SetForegroundWindow` + `click_input` + `keybd_event`），要求所在会话拥有**活动桌面**。在云服务器/远程服务器上，这决定了你用什么方式连接：
+
+| 接入方式 | 客户端断开后 | 自动化 |
+|---|---|---|
+| **VNC（推荐）**——会话常驻 console | VNC 只是桌面的镜像，会话保持挂接在 console 上 | ✅ 持续可用，随时连/断 |
+| RDP——会话在 RDP 通道上 | 会话进入「已断开」状态，无活动桌面 | ❌ 报错：`There is no active desktop required for moving mouse cursor!` |
+| RDP + 断开前执行 `tscon <id> /dest:console` | 桌面重定向回 console | ✅ 持续可用 |
+
+**一次性安装**：安装 [TightVNC Server](https://www.tightvnc.com/)（以 Windows 服务运行，镜像 console 会话），设置强 VNC 密码，并在防火墙限制 VNC 端口——**切勿暴露公网**（建议走 SSH 隧道访问）。
+
+**日常流程**：
+
+1. VNC 连入 → 在 console 登录 Windows → 启动 `xiadan.exe` 并登录券商
+2. 在该会话的终端里启动网关：`uv run python main.py`
+3. 随时断开 VNC 客户端——console 会话与所有进程照常运行，查询/下单不受影响（实测：VNC 断开后资金/持仓/成交查询全部成功）
+
+**规则**：
+
+- **之后不要再用 RDP 连入该会话**——RDP 重连会把会话从 console 拉回 RDP 通道，此后普通方式断开 RDP 会让自动化失效，需要重跑 `tscon <id> /dest:console` 恢复（会话 id 用 `qwinsta` 查）
+- **不要锁屏**（`Win+L` 或带锁定的屏保会切到安全桌面，自动化失效）
+- **注册为 Windows 服务 / 计划任务「不管用户是否登录都要运行」不可行**：它们落在 Session 0，看不到也无法操作交互会话的窗口（窗口枚举为空）。因此开机自启同样要求先有人登录——VNC 登录后手动启动 `xiadan.exe` 与网关
+- 服务器重启后：VNC 连入 → 登录 → 启动 `xiadan.exe` + 券商登录 → 启动网关
 
 ## 上线前必改（安全检查）
 
