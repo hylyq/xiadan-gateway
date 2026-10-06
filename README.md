@@ -43,7 +43,7 @@ A trading gateway for TongHuaShun `xiadan.exe` — controls the THS order-entry 
 | Classified popup handling | Order confirm → Y/N; warning → Y to continue; **price out of range → N to cancel + `PRICE_OUT_OF_RANGE`**; error → close + report (see [Classified Popup Handling](#classified-popup-handling)) |
 | Watchdog recovery | On task timeout: screenshot + activate + ESC×3, reset, then return an error |
 | Idempotency | **Required** `Idempotency-Key` header (1–128 chars) — one key per logical order: same key within the window is rejected (`DUPLICATE_ORDER`, HTTP-timeout retry protection); a new key = a new order, identical-parameter multi-orders included |
-| OCR captcha | Lightweight template-matching engine; failures auto-archived; optional ddddocr offline training |
+| OCR captcha | Lightweight template-matching engine (noise filter keeps thin-but-tall strokes — a '1' is 3px wide); solve loop re-captures per retry, detects client-side rejection, archives confident misreads (`wrong_*.png`), and safely closes the dialog on exhaustion; failures auto-archived; optional ddddocr offline training |
 | Production server | `waitress` WSGI + graceful shutdown (SIGINT/SIGTERM) |
 | Hot config reload | `POST /admin/reload-config` without restart |
 | Startup config validation | Validates config types/ranges (port/timeouts/paths) at startup; aborts with fix guidance on invalid config |
@@ -582,6 +582,8 @@ THS Ctrl+C **almost always triggers a captcha popup** (4 digits, white backgroun
 
 **Recognition flow**: proactive periodic scan detects the popup → screenshot → screenshot sanity check (file ≤5KB + dimensions near 92×38 + white-pixel ratio >50% + dark-pixel horizontal span 15%–85%, rejecting shots of the main window/popup edges/hidden controls) → grayscale → binarize → vertical projection segmentation → template matching → fill into the broker software. Up to 2 outer attempts; up to 3 inner OCR retries.
 
+**Solve-loop hardening** (all from live-fire incidents): each inner retry **re-captures a fresh screenshot** (segmentation outcome depends on the digit combination — retrying the same image is meaningless; three identical archived failures were observed); after submitting, the popup is scanned for the rejection text — a destroyed dialog is **not** treated as success, because the client destroys-and-recreates it right after rejecting a wrong code (this recreate gap once produced a false "verified" log); confident-but-rejected reads are archived as `wrong_<value>_<ts>.png` (the only failure mode that leaves no evidence otherwise); when retries are exhausted the dialog is closed safely (Cancel/WM_CLOSE) so it cannot deadlock the foreground. Leftover dialogs found at task start are **never solved** — leftover captchas are usually expired (a correctly-read, correctly-typed code was still rejected in practice) — they are closed-only with evidence archived first (see the Runtime popup self-healing row above). To inspect dialog control structures, use the probe tool `scripts/probe_captcha_dialog.py` (run inside a desktop session shared with xiadan.exe).
+
 #### Recognition Principle (pure NumPy/Pillow, no deep learning)
 
 ```
@@ -606,7 +608,7 @@ Raw image (92×38 RGB)        Grayscale              Binarize (threshold 200)
 
 - **Grayscale**: `.convert("L")` removes color; blue digits become gray, keeping only luminance
 - **Binarize**: threshold 200 — background/anti-aliased edges (>200) dropped, stroke cores (<200) kept
-- **Segmentation**: vertical projection → dark-column grouping → merge broken strokes (e.g. the horizontal/vertical gap in '5') → trim horizontal whitespace → normalize to 28×38
+- **Segmentation**: vertical projection → dark-column grouping → merge broken strokes (e.g. the horizontal/vertical gap in '5') → trim horizontal whitespace → normalize to 28×38. The noise filter drops a group only when it is **both narrow (<4px) and short** (column height <4): a '1' is naturally ~3px wide but tall, and a pure width filter used to kill it — segmenting `0102` into 3 digits (`002`) and surfacing as "empty recognition"; with the tall-stroke exception, all historical failure archives recovered correctly (0102/7617/9315)
 - **Matching**: normalized cross-correlation (NCC). Treat the 28×38 = 1064 pixels as a 1064-dim vector; after normalization each template has unit length, so NCC = the dot product of the two vectors = cos(angle). Smaller angle = more similar, independent of brightness/contrast.
 
   **Batch matrix multiplication**: templates are pre-normalized at load time and stacked into an (N, 1064) matrix; matching is one step:
