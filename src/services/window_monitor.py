@@ -210,7 +210,7 @@ class WindowMonitor:
 
             state = win32ts.WTSQuerySessionInformation(
                 win32ts.WTS_CURRENT_SERVER_HANDLE,
-                win32ts.WTS_CURRENT_SESSION, 16)
+                win32ts.WTS_CURRENT_SESSION, win32ts.WTSConnectState)
             if isinstance(state, tuple):
                 state = state[0]
             if state != self.WTS_STATE_DISCONNECTED:

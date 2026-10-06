@@ -2849,9 +2849,10 @@ class TestWindowMonitorSelfHeal:
         run.assert_not_called()
 
     def test_session_recovery_tscon_on_disconnected(self, mocker):
-        """会话已断开 → 对自己的会话执行 tscon /dest:console"""
+        """会话已断开 → 用 WTSConnectState 类查询并执行 tscon /dest:console"""
+        import win32ts
         m = self._monitor(mocker)
-        mocker.patch("win32ts.WTSQuerySessionInformation", return_value=4)
+        query = mocker.patch("win32ts.WTSQuerySessionInformation", return_value=4)
         mocker.patch("win32ts.ProcessIdToSessionId", return_value=2)
         mocker.patch("os.getpid", return_value=1234)
         run = mocker.patch(
@@ -2860,6 +2861,9 @@ class TestWindowMonitorSelfHeal:
 
         m._recover_session_if_disconnected()
 
+        query.assert_called_once_with(
+            win32ts.WTS_CURRENT_SERVER_HANDLE,
+            win32ts.WTS_CURRENT_SESSION, win32ts.WTSConnectState)
         run.assert_called_once_with(
             ["tscon", "2", "/dest:console"],
             capture_output=True, text=True, timeout=15)
