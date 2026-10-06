@@ -29,8 +29,8 @@ DEFAULT_CONFIG = {
     },
     "session_monitor": {
         "enabled": True,          # 会话断开自愈开关：手动重连 RDP 前可热关闭（防 tscon 接管竞态）
-        "debounce_seconds": 30,   # 连续断开满此时长才自愈（重连换轨的瞬时断开态不触发）
-        "cooldown_seconds": 300   # 两次自愈最小间隔（冷却期=重连保护窗）
+        "debounce_seconds": 30,   # 连续断开满此时长才自愈；30s≈mstsc 自动重连+常见短断网总时长，勿设 0/低于 10——断网期间 TCP 判别器是盲区，本层唯一兜底（依据见 window_monitor._recover_session_if_disconnected docstring 存档）
+        "cooldown_seconds": 300   # 两次自愈最小间隔（冷却期=重连保护窗；console 挂接后会话不会自发再断，实际代价≈0）
     },
     "task_queue": {
         "max_size": 50,
