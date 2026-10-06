@@ -3066,3 +3066,32 @@ class TestCaptchaSweep:
             svc._solve_captcha(window)
 
         click_btn.assert_called_once_with(dlg, CAPTCHA_CANCEL_BUTTON_ID)
+
+    def test_task_queue_sweeps_before_reset(self, mocker):
+        """任务队列在窗口复位前调用弹窗清扫（避免盲点击落在弹窗按钮上）"""
+        from src.api.task_queue import TaskQueue
+        tq = object.__new__(TaskQueue)
+        tq.logger = mocker.MagicMock()
+        tq.window_service = mocker.MagicMock()
+        mocker.patch("src.core.ocr.OcrService.get_instance",
+                     return_value=mocker.MagicMock())
+        ps = mocker.MagicMock()
+        mocker.patch("src.services.position_service.PositionService",
+                     return_value=ps)
+
+        tq._sweep_blocking_captcha()
+
+        ps._sweep_blocking_captcha.assert_called_once()
+
+    def test_task_queue_sweep_swallows_errors(self, mocker):
+        """清扫自身异常不外溢（任务自身校验兜底）"""
+        from src.api.task_queue import TaskQueue
+        tq = object.__new__(TaskQueue)
+        tq.logger = mocker.MagicMock()
+        tq.window_service = mocker.MagicMock()
+        mocker.patch("src.services.position_service.PositionService",
+                     side_effect=RuntimeError("init fail"))
+
+        tq._sweep_blocking_captcha()  # 不应抛出
+
+        tq.logger.debug.assert_called_once()
