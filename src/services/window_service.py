@@ -289,19 +289,20 @@ class WindowService(Singleton):
             return 0.0
         return max(0, inter_w) * max(0, inter_h) / (win_w * win_h)
 
-    def close_process_dialogs(self, hwnd: int) -> int:
-        """关闭同进程内残留的可见 #32770 对话框（验证码弹窗外壳等）
+    def find_process_dialogs(self, hwnd: int) -> list:
+        """枚举同进程内可见 #32770 对话框（验证码弹窗等），不关闭
 
-        场景: 脚本/任务异常退出时验证码弹窗未关闭，空标题 #32770 对话框
-        挡在前台导致主窗口 SetForegroundWindow 失败（实测多次）。
-        Returns: 关闭的对话框数量
+        供任务开始时清扫残留弹窗用：含验证码图片控件的应 OCR 求解，
+        不含的才走 close_process_dialogs 关闭。
+
+        Returns: 对话框 hwnd 列表（EnumWindows 顺序）
         """
         import win32process
 
         try:
             _, pid = win32process.GetWindowThreadProcessId(hwnd)
         except Exception:
-            return 0
+            return []
         targets = []
 
         def cb(h, acc):
@@ -317,7 +318,17 @@ class WindowService(Singleton):
         try:
             win32gui.EnumWindows(cb, targets)
         except Exception:
-            return 0
+            return []
+        return targets
+
+    def close_process_dialogs(self, hwnd: int) -> int:
+        """关闭同进程内残留的可见 #32770 对话框（验证码弹窗外壳等）
+
+        场景: 脚本/任务异常退出时验证码弹窗未关闭，空标题 #32770 对话框
+        挡在前台导致主窗口 SetForegroundWindow 失败（实测多次）。
+        Returns: 关闭的对话框数量
+        """
+        targets = self.find_process_dialogs(hwnd)
         closed = 0
         for h in targets:
             try:

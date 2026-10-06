@@ -2837,3 +2837,160 @@ class TestWindowMonitorSelfHeal:
         startfile = mocker.patch("os.startfile")
         assert m._relaunch_app() is False
         startfile.assert_not_called()
+
+
+class TestCaptchaSweep:
+    """任务开始的验证码弹窗清扫测试（风控弹窗持有前台场景）"""
+
+    MAIN = 0x64
+
+    def _svc(self, mocker):
+        from src.services.position_service import PositionService
+        svc = PositionService(window_service=mocker.MagicMock())
+        svc.logger = mocker.MagicMock()
+        return svc
+
+    def test_find_process_dialogs_filters(self, mocker):
+        """find_process_dialogs 只收同进程/可见/#32770/非主窗口"""
+        from src.services.window_service import WindowService
+        ws = WindowService()
+        ws.logger = mocker.MagicMock()
+        meta = {
+            0x100: (4908, True, "#32770"),      # 命中
+            0x200: (4908, True, "Other"),       # 类名不符
+            0x300: (4908, False, "#32770"),     # 不可见
+            0x400: (999, True, "#32770"),       # 异进程
+            0x500: (4908, True, "#32770"),      # 命中
+        }
+        mocker.patch(
+            "src.services.window_service.win32process.GetWindowThreadProcessId",
+            side_effect=lambda h: (0, 4908 if h == self.MAIN else meta[h][0]))
+        mocker.patch(
+            "src.services.window_service.win32gui.EnumWindows",
+            side_effect=lambda cb, extra: [cb(h, extra) for h in meta])
+        mocker.patch("src.services.window_service.win32gui.IsWindowVisible",
+                     side_effect=lambda h: meta[h][1])
+        mocker.patch("src.services.window_service.win32gui.GetClassName",
+                     side_effect=lambda h: meta[h][2])
+        assert ws.find_process_dialogs(self.MAIN) == [0x100, 0x500]
+
+    def test_sweep_solves_captcha_dialog(self, mocker):
+        """含验证码图片控件的弹窗 → 自动求解，求解后 _captcha_window 复位"""
+        svc = self._svc(mocker)
+        mocker.patch.object(svc, "_refresh_window_ref")
+        svc._cached_window = mocker.MagicMock(handle=self.MAIN)
+        svc.window_service.find_process_dialogs.return_value = [0x100]
+        dlg = mocker.MagicMock()
+        app = mocker.MagicMock()
+        app.connect.return_value = app  # connect 链式返回自身
+        app.window.return_value = dlg
+        mocker.patch("pywinauto.Application", return_value=app)
+        solve = mocker.patch.object(svc, "_solve_captcha", return_value=True)
+
+        svc._sweep_blocking_captcha()
+
+        solve.assert_called_once_with(dlg)
+        assert svc._captcha_window is None  # finally 复位
+
+    def test_sweep_skips_non_captcha_dialog(self, mocker):
+        """无验证码图片控件的弹窗 → 不求解（交给 close_process_dialogs 兜底）"""
+        svc = self._svc(mocker)
+        mocker.patch.object(svc, "_refresh_window_ref")
+        svc._cached_window = mocker.MagicMock(handle=self.MAIN)
+        svc.window_service.find_process_dialogs.return_value = [0x100]
+        svc.window_service.find_element_in_window.return_value = None
+        mocker.patch("pywinauto.Application")
+        solve = mocker.patch.object(svc, "_solve_captcha", return_value=True)
+
+        svc._sweep_blocking_captcha()
+
+        solve.assert_not_called()
+
+    def test_sweep_closes_dialog_when_solve_fails(self, mocker):
+        """求解失败 → 点取消关闭，恢复干净窗口状态（不动用 WM_CLOSE）"""
+        from src.constants import CAPTCHA_CANCEL_BUTTON_ID
+        svc = self._svc(mocker)
+        mocker.patch.object(svc, "_refresh_window_ref")
+        svc._cached_window = mocker.MagicMock(handle=self.MAIN)
+        svc.window_service.find_process_dialogs.return_value = [0x100]
+        dlg = mocker.MagicMock()
+        app = mocker.MagicMock()
+        app.connect.return_value = app
+        app.window.return_value = dlg
+        mocker.patch("pywinauto.Application", return_value=app)
+        mocker.patch.object(svc, "_solve_captcha", return_value=False)
+        click_btn = mocker.patch.object(svc, "_click_button", return_value=True)
+
+        svc._sweep_blocking_captcha()
+
+        click_btn.assert_called_once_with(dlg, CAPTCHA_CANCEL_BUTTON_ID)
+        svc.window_service.close_process_dialogs.assert_not_called()
+
+    def test_sweep_falls_back_to_wmclose_on_raise(self, mocker):
+        """求解抛异常且取消按钮点不到 → close_process_dialogs WM_CLOSE 兜底"""
+        svc = self._svc(mocker)
+        mocker.patch.object(svc, "_refresh_window_ref")
+        svc._cached_window = mocker.MagicMock(handle=self.MAIN)
+        svc.window_service.find_process_dialogs.return_value = [0x100]
+        dlg = mocker.MagicMock()
+        app = mocker.MagicMock()
+        app.connect.return_value = app
+        app.window.return_value = dlg
+        mocker.patch("pywinauto.Application", return_value=app)
+        mocker.patch.object(svc, "_solve_captcha",
+                            side_effect=RuntimeError("ocr fail"))
+        mocker.patch.object(svc, "_click_button", return_value=False)
+
+        svc._sweep_blocking_captcha()
+
+        svc.window_service.close_process_dialogs.assert_called_once_with(self.MAIN)
+
+    def test_sweep_solves_child_dialog_via_main_window(self, mocker):
+        """主窗口的子 #32770 验证码弹窗 → 以主窗口为根求解（与原生复制流程同路径）"""
+        svc = self._svc(mocker)
+        mocker.patch.object(svc, "_refresh_window_ref")
+        main = mocker.MagicMock(handle=self.MAIN)
+        svc._cached_window = main
+        svc.window_service.find_process_dialogs.return_value = []  # 无顶层弹窗
+        ch = mocker.MagicMock()
+        ch.class_name.return_value = "#32770"
+        ch.handle = 0x77
+        main.children.return_value = [ch]
+        svc.window_service.find_element_in_window.return_value = mocker.MagicMock()
+        solve = mocker.patch.object(svc, "_solve_captcha", return_value=True)
+
+        svc._sweep_blocking_captcha()
+
+        solve.assert_called_once_with(main)
+        assert svc._captcha_window is None  # finally 复位
+
+    def test_sweep_skips_non_captcha_child(self, mocker):
+        """子 #32770 无验证码图片控件 → 不求解"""
+        svc = self._svc(mocker)
+        mocker.patch.object(svc, "_refresh_window_ref")
+        main = mocker.MagicMock(handle=self.MAIN)
+        svc._cached_window = main
+        svc.window_service.find_process_dialogs.return_value = []
+        ch = mocker.MagicMock()
+        ch.class_name.return_value = "#32770"
+        main.children.return_value = [ch]
+        svc.window_service.find_element_in_window.return_value = None
+        solve = mocker.patch.object(svc, "_solve_captcha", return_value=True)
+
+        svc._sweep_blocking_captcha()
+
+        solve.assert_not_called()
+
+    def test_prepare_query_panel_sweeps_before_skip(self, mocker):
+        """连续查询跳过路径同样先清扫（弹窗在场时跳过路径后续也会被阻塞）"""
+        svc = self._svc(mocker)
+        sweep = mocker.patch.object(svc, "_sweep_blocking_captcha")
+        task_queue = mocker.MagicMock()
+        task_queue.consume_window_setup_skip.return_value = True
+        mocker.patch("src.api.task_queue.TaskQueue.get_instance",
+                     return_value=task_queue)
+
+        svc._prepare_query_panel()
+
+        sweep.assert_called_once()
+        svc.window_service.send_key.assert_not_called()
