@@ -18,7 +18,7 @@ A trading gateway for TongHuaShun `xiadan.exe` — controls the THS order-entry 
 ## Table of Contents
 
 - [Core Features](#core-features)
-- [Quick Start](#quick-start) (incl. [Prerequisites: Broker Software Settings](#prerequisites-broker-software-settings) / [Unattended Operation on a Server (VNC Recommended, Not Required)](#unattended-operation-on-a-server-vnc-recommended-not-required))
+- [Quick Start](#quick-start) (incl. [Prerequisites: Broker Software Settings](#prerequisites-broker-software-settings) / [Unattended Operation on a Server (RDP Works; VNC Optional)](#unattended-operation-on-a-server-rdp-works-vnc-optional))
 - [Required Before Going Live (Security Checklist)](#required-before-going-live-security-checklist)
 - [Configuration](#configuration)
 - [API](#api): [Response Format](#response-format) / [Error Codes](#error-codes) / [Endpoints](#endpoints) / [Place Order](#post-orders--place-order) / [Order Status & Fill Report](#get-ordersentrust_nostatus--order-status--fill-report) / [Cancel Orders](#post-orderscancel-all--cancel-orders) / [Auxiliary Endpoints](#auxiliary-endpoints) / [Client Timeout Configuration](#client-timeout-configuration)
@@ -57,7 +57,7 @@ A trading gateway for TongHuaShun `xiadan.exe` — controls the THS order-entry 
 | Order status & fill report | `GET /orders/{entrust_no}/status` joins today's orders × today's fills by contract number: order status derived from quantities (not broker remark text), fill aggregation with weighted avg price and per-trade numbers — the polling counterpart of the order response for strategy callers |
 | Window position self-healing | Before each task, checks window/workarea intersection (60% threshold); auto-moves the window back if it was dragged off-screen (`click_input`/screenshots are coordinate-based and fail off-screen) |
 | Window visibility self-healing | Background monitor (every 2s) restores both minimized and **tray-hidden** windows (`IsIconic` **or** `IsWindowVisible` — hidden-to-tray is not iconic and was a blind spot); if soft restore keeps failing (3 consecutive rounds), relaunches the exe **of the running process** (hwnd→PID→psutil; configured `trading_app_paths` as fallback, 60s cooldown) — single-instance clients bring their existing window back, and multi-install machines never launch the wrong copy. The query path also `SW_SHOW`s hidden windows before activation |
-| Session-disconnect self-healing | A background check (every 10s) detects when the hosting session enters the *disconnected* state (plain RDP client disconnect, no `tscon` exit) and runs `tscon <own-id> /dest:console` itself — as the session owner this reattaches the session to the console **and clears the lock in one step** (verified in practice). Only acts on disconnected sessions — an interactively-used RDP session is never hijacked; 60s cooldown |
+| Session-disconnect self-healing | A background check every 10s (`win32ts` `WTSConnectState`) detects when the hosting session enters the *disconnected* state (plain RDP client disconnect, no `tscon` exit) and runs `tscon <own-id> /dest:console` itself — as the session owner this reattaches the session to the console **and clears the lock in one step**. Only acts on disconnected sessions — an interactively-used RDP session is never hijacked; 60s cooldown. Verified: **VNC server stopped + plain RDP disconnect → auto-recovery within ~30s, all queries green** |
 | Runtime popup self-healing | Every task starts (before window reset/activation) by sweeping leftover dialogs (both forms: top-level `#32770` and child-of-main-window `#32770`) — **close-only, never solve, never click OK**: leftover captchas are usually expired (a correctly-read, correctly-typed code was still rejected in practice), so solving only adds the risk of submitting wrong codes to the broker; clicking OK on unknown error popups could have side effects. Closing uses safe means only — the Cancel button or WM_CLOSE (equivalent to clicking X, dialogs default to the cancel path). Before closing, evidence is auto-archived: full-desktop screenshot + trading-window screenshot + dialog control texts into the log (a closed popup is gone forever; bounded by the screenshot cleanup policy). Fresh captchas are triggered and solved in-flow by the copy flow. Sweeping before reset prevents the activation logic's real-mouse clicks from landing on dialog buttons (observed pressing a dialog's OK repeatedly) |
 | MCP adapter | `scripts/mcp_server.py` exposes the gateway as standard MCP tools for LLM agents — read-only queries always registered; `place_order`/`cancel_orders` only with `XIADAN_MCP_TRADING=1`; raw `/actions/*` never exposed (see [MCP Server](#mcp-server-agent-access)) |
 
@@ -88,36 +88,30 @@ Configure the following manually before starting — disabling confirmation popu
 
 > Configure once. With confirmations off (quick-trading mode), orders submit directly with no popups, cutting ~1.4s per order.
 
-### Unattended Operation on a Server (VNC Recommended, Not Required)
+### Unattended Operation on a Server (RDP Works; VNC Optional)
 
-The gateway drives `xiadan.exe` with **real mouse/keyboard input** (`SetForegroundWindow` + `click_input` + `keybd_event`), which requires the hosting session to have an **active desktop** (a console-attached interactive session). Any one of the access modes below works — VNC is the most convenient, but **not required**:
+The gateway drives `xiadan.exe` with **real mouse/keyboard input** (`SetForegroundWindow` + `click_input` + `keybd_event`), which requires the hosting session to have an **active desktop** (a console-attached interactive session). **Plain RDP is the default and sufficient** — the gateway self-recovers after disconnect (verified); VNC is an optional convenience, not a dependency:
 
 | Access mode | After the client disconnects | Automation |
 |---|---|---|
-| **VNC (recommended, not required)** — session lives on the console | VNC is only a mirror; the session stays attached to the console | ✅ Keeps working — connect/disconnect anytime |
-| RDP plain disconnect | Session disconnects + locks → **session self-healing runs `tscon` automatically within ~10s** | ⚠️ Brief outage, then auto-recovery ✅ |
-| RDP + `tscon $env:SESSIONNAME /dest:console` on exit | Session lands on the console seamlessly, no lock | ✅ Keeps working (zero-downtime path) |
+| **RDP plain disconnect (default path)** | Session disconnects + locks → **session self-healing runs `tscon` automatically (lock cleared too)** | ⚠️ Brief outage (~10-30s), then auto-recovery ✅ Verified with the VNC server stopped: balance/positions/trades queries all recovered |
+| RDP + `tscon $env:SESSIONNAME /dest:console` (PowerShell) / `tscon %sessionname% /dest:console` (cmd.exe) on exit | Session lands on the console seamlessly, no lock | ✅ Keeps working (zero-downtime path, for outage-sensitive setups) |
+| VNC (optional convenience) — session lives on the console | VNC is only a mirror; the session stays attached to the console | ✅ Keeps working — connect/disconnect anytime |
 
-**One-time setup (optional)**: install [TightVNC Server](https://www.tightvnc.com/) (runs as a Windows service and serves the console session), set a strong VNC password, and restrict the VNC port in the firewall — never expose it to the public internet (prefer an SSH tunnel). Without VNC, RDP + session self-healing works fine; the value of installing VNC is explained in "Does the VNC server need to stay running?" below.
+**Daily flow (default, RDP)**:
 
-**Daily flow**:
-
-1. Connect via VNC → log in to Windows at the console → start `xiadan.exe` and log in to the broker
-2. Start the gateway in a terminal there: `uv run python main.py`
-3. Disconnect the VNC client freely — the console session and all processes keep running; queries and orders are unaffected (verified in practice: balance/positions/trades queries all succeed after VNC disconnect)
+1. RDP in → (first time / after reboot) start `xiadan.exe` + broker login → start the gateway in a terminal: `uv run python main.py`
+2. **Just close the RDP client when done** — the gateway self-recovers within ~10-30s, no command needed (verified with the VNC server stopped throughout)
+3. To come back, simply RDP in again; after handling things (e.g. broker re-login), disconnect plainly and self-healing takes over
 
 **Rules**:
 
-- **RDP survival rule** — an RDP reconnect pulls the session off the console back onto the RDP transport, and a plain RDP client disconnect **both disconnects and locks** the session (Windows security design; automation fails — injected clicks land nowhere and foreground checks reject key delivery). **The gateway self-heals this**: on detecting the disconnected state it runs `tscon <id> /dest:console` automatically within ~10s, reattaching the console and clearing the lock (verified; no manual action needed). For instant recovery you can also run it manually: `tscon <id> /dest:console` (find the id with `qwinsta`). Cleaner still: when leaving RDP, run `tscon $env:SESSIONNAME /dest:console` (PowerShell) or `tscon %sessionname% /dest:console` (cmd.exe) inside the RDP session instead of closing the client — the session lands on the console without locking at all
-- **Do not lock the desktop** (`Win+L` or a locking screensaver switches to the secure desktop — automation fails)
-- **A Windows service / scheduled task "run whether user is logged on or not" does not work**: those run in Session 0 and cannot see or operate the windows of an interactive session (window enumeration comes up empty). Boot auto-start therefore also requires an interactive logon first — log in via VNC, then start `xiadan.exe` and the gateway
-- After a reboot: VNC in → log on → start `xiadan.exe` + broker login → start the gateway
+- **RDP survival rule** — an RDP reconnect pulls the session off the console back onto the RDP transport, and a plain disconnect **both disconnects and locks** the session (Windows security design; injected clicks land nowhere and foreground checks reject key delivery). **The gateway self-heals this**: a background check every 10s (`win32ts` `WTSConnectState`) detects the disconnected state and runs `tscon <id> /dest:console` — as the session owner this reattaches the console and clears the lock in one step; it only acts on *disconnected* sessions and never hijacks one in interactive use. For instant recovery you can also run `tscon <id> /dest:console` manually (find the id with `qwinsta`)
+- **Do not lock the desktop** (`Win+L` or a locking screensaver switches to the secure desktop — automation fails; a locked-but-console-attached session reports Active and is not self-healed)
+- **A Windows service / scheduled task "run whether user is logged on or not" does not work**: those run in Session 0 and cannot see or operate the windows of an interactive session (window enumeration comes up empty). Boot auto-start therefore also requires an interactive logon first — log in via RDP or VNC, then start `xiadan.exe` and the gateway
+- After a reboot: RDP (or VNC) in → log on → start `xiadan.exe` + broker login → start the gateway
 
-**Does the VNC server need to stay running?** — Not for automation. The VNC server is only a *mirror* of the console desktop: with it stopped, the desktop still exists and every gateway capability (queries/orders, session-disconnect self-healing, window self-healing, popup sweep, captcha solving) works unchanged — verified in practice (VNC client disconnects never affect the session). It is still recommended to keep the service running (it auto-starts and idles at zero cost):
-
-1. **Reboot recovery**: logging in via VNC keeps the session console-native from the very start — not even the ~10s self-healing window of the RDP path
-2. **Broker re-login** (session expiry) and **emergency visual inspection** (lock screens, dialogs, abnormal states) need a human access path
-3. With session-disconnect self-healing, RDP can serve as that access path too (log in → work → plain disconnect → auto-recovery in ~10s); VNC remains the zero-session-churn, preferred one
+**VNC (optional convenience)**: install [TightVNC Server](https://www.tightvnc.com/) (runs as a Windows service and serves the console session), set a strong VNC password, and restrict the VNC port in the firewall — never expose it to the public internet (prefer an SSH tunnel). Automation does not depend on it (verified running with the server stopped); its remaining value is: console-native login after reboot (no self-healing window), zero-session-churn continuity, and mirror-style emergency inspection. Entirely optional.
 
 ## Required Before Going Live (Security Checklist)
 
