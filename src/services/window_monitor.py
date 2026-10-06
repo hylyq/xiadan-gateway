@@ -33,6 +33,11 @@ class WindowMonitor:
     BAD_STATE_RELAUNCH_THRESHOLD = 3
     # 重拉冷却秒数，防止异常状态下高频拉起进程
     RELAUNCH_COOLDOWN_SECONDS = 60.0
+    # 会话断开自愈：检查间隔与 tscon 冷却（秒）
+    SESSION_CHECK_INTERVAL = 10.0
+    SESSION_RECOVERY_COOLDOWN = 60.0
+    # WTS 连接状态枚举（win32ts）：0=Active 1=Connected 4=Disconnected
+    WTS_STATE_DISCONNECTED = 4
 
     def __init__(self, check_interval: float = 2.0):
         self.logger = Logger.get_instance()
@@ -44,6 +49,7 @@ class WindowMonitor:
         self._lock = threading.Lock()
         self._bad_state_count = 0
         self._last_relaunch = 0.0
+        self._last_session_recovery = 0.0
 
     def start(self, app_paths: Union[str, List[str]]) -> bool:
         """启动监控
@@ -179,6 +185,54 @@ class WindowMonitor:
         except Exception as e:
             self.logger.error(f"强制前台失败: {str(e)}")
 
+    def _recover_session_if_disconnected(self) -> None:
+        """会话断开自愈：RDP 直接断开（未执行 tscon 退出）时自动重挂 console
+
+        RDP 普通断开会话进入"已断开"态（无活动桌面），click_input 全部
+        失败。检测到本会话处于断开态时，对自己的会话执行
+        tscon <id> /dest:console——以会话属主（Administrator）身份执行，
+        重挂 console 并同步解除锁定（实测验证）。
+
+        只在"已断开"（WTSDisconnected）时动作：有人正在交互使用
+        （WTSActive/Connected）绝不干预——不会把正在使用的 RDP 会话
+        劫持到 console 导致对方客户端掉线。
+
+        注意：锁定但挂接 console 的会话（如在 VNC 里按 Win+L）状态为
+        Active，本自愈不处理——请勿在交易会话内锁屏。
+        """
+        if time.time() - self._last_session_recovery < self.SESSION_RECOVERY_COOLDOWN:
+            return
+        try:
+            import os
+            import subprocess
+
+            import win32ts
+
+            state = win32ts.WTSQuerySessionInformation(
+                win32ts.WTS_CURRENT_SERVER_HANDLE,
+                win32ts.WTS_CURRENT_SESSION, 16)
+            if isinstance(state, tuple):
+                state = state[0]
+            if state != self.WTS_STATE_DISCONNECTED:
+                return
+
+            sid = win32ts.ProcessIdToSessionId(os.getpid())
+            self.logger.warning(
+                f"检测到会话已断开（state={state}），自愈执行: "
+                f"tscon {sid} /dest:console")
+            result = subprocess.run(
+                ["tscon", str(sid), "/dest:console"],
+                capture_output=True, text=True, timeout=15)
+            self._last_session_recovery = time.time()
+            if result.returncode == 0:
+                self.logger.info("会话已重挂 console（含解除锁定），自动化恢复")
+            else:
+                self.logger.warning(
+                    f"tscon 执行失败 rc={result.returncode}: "
+                    f"{(result.stderr or '').strip()}")
+        except Exception as e:
+            self.logger.warning(f"会话断开自愈失败: {e}")
+
     def _process_window_state(self, hwnd: int) -> None:
         """按窗口可见性分派恢复动作（最小化/隐藏 → 软恢复 → 重拉兜底）"""
         if win32gui.IsIconic(hwnd) or not win32gui.IsWindowVisible(hwnd):
@@ -252,8 +306,17 @@ class WindowMonitor:
         self.logger.info("窗口监控线程已启动")
         consecutive_failures = 0
         startup_skip = True  # 启动初期跳过日志噪音
+        next_session_check = 0.0
 
         while self._running:
+            # 会话断开自愈（时间触发，独立于窗口检查节奏）
+            try:
+                if time.time() >= next_session_check:
+                    self._recover_session_if_disconnected()
+                    next_session_check = time.time() + self.SESSION_CHECK_INTERVAL
+            except Exception as e:
+                self.logger.warning(f"会话自愈检查异常: {e}")
+
             try:
                 hwnd = self._find_target_window()
                 if hwnd is None:

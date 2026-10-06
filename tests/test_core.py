@@ -2838,6 +2838,58 @@ class TestWindowMonitorSelfHeal:
         assert m._relaunch_app() is False
         startfile.assert_not_called()
 
+    def test_session_recovery_skips_when_active(self, mocker):
+        """会话 Active（有人正在交互使用）→ 绝不干预，不劫持 RDP"""
+        m = self._monitor(mocker)
+        mocker.patch("win32ts.WTSQuerySessionInformation", return_value=0)
+        run = mocker.patch("subprocess.run")
+
+        m._recover_session_if_disconnected()
+
+        run.assert_not_called()
+
+    def test_session_recovery_tscon_on_disconnected(self, mocker):
+        """会话已断开 → 对自己的会话执行 tscon /dest:console"""
+        m = self._monitor(mocker)
+        mocker.patch("win32ts.WTSQuerySessionInformation", return_value=4)
+        mocker.patch("win32ts.ProcessIdToSessionId", return_value=2)
+        mocker.patch("os.getpid", return_value=1234)
+        run = mocker.patch(
+            "subprocess.run",
+            return_value=mocker.MagicMock(returncode=0, stderr=""))
+
+        m._recover_session_if_disconnected()
+
+        run.assert_called_once_with(
+            ["tscon", "2", "/dest:console"],
+            capture_output=True, text=True, timeout=15)
+
+    def test_session_recovery_handles_tuple_state(self, mocker):
+        """状态返回为元组时取首元素（pywin32 版本差异防御）"""
+        m = self._monitor(mocker)
+        mocker.patch("win32ts.WTSQuerySessionInformation", return_value=(4,))
+        mocker.patch("win32ts.ProcessIdToSessionId", return_value=2)
+        mocker.patch("os.getpid", return_value=1234)
+        run = mocker.patch(
+            "subprocess.run",
+            return_value=mocker.MagicMock(returncode=0, stderr=""))
+
+        m._recover_session_if_disconnected()
+
+        run.assert_called_once()
+
+    def test_session_recovery_cooldown(self, mocker):
+        """冷却期内不重复执行 tscon"""
+        import time as _time
+        m = self._monitor(mocker)
+        m._last_session_recovery = _time.time()
+        mocker.patch("win32ts.WTSQuerySessionInformation", return_value=4)
+        run = mocker.patch("subprocess.run")
+
+        m._recover_session_if_disconnected()
+
+        run.assert_not_called()
+
 
 class TestDialogSweep:
     """任务开始的残留弹窗清扫测试（只关闭模式：存档→安全关闭）"""
