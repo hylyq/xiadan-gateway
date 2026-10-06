@@ -1,0 +1,101 @@
+# xiadan-gateway API 参考（CLI 子命令背后的 HTTP 契约）
+
+CLI 子命令与 HTTP 端点一一对应；本文供需要理解响应字段全貌/排错时按需阅读。
+网关所有响应统一 HTTP 200，JSON `status` 字段区分成功（`success` + `data`）与
+失败（`error` + `error_code`/`message`/`suggestion`/`request_id`）。CLI 已自动
+解包 `data`、格式化错误。
+
+## 端点总表
+
+| CLI 命令 | HTTP | 路径 | 参考耗时 |
+|----------|------|------|--------|
+| `health` | GET | `/health` | <1s |
+| `queue` | GET | `/queue/status` | <1s |
+| `balance` | GET | `/account/balance` | 2~4s |
+| `positions` | GET | `/positions` | 3~8s |
+| `trades` | GET | `/trades/today` | 4~5s |
+| `orders` | GET | `/orders/pending` | 3~5s |
+| `order-status <NO>` | GET | `/orders/{entrust_no}/status` | 8~15s |
+| `buy` / `sell` | POST | `/orders`（头 `Idempotency-Key` 必填） | 2~10s |
+| `cancel [type]` | POST | `/orders/cancel-all` | 2~5s |
+
+> 网关另有 `/actions/*`（裸 UI 操作）、`/admin/*`（管理）、`/diagnostic/*`（诊断）、
+> `/ocr/quality`——skill 刻意不暴露，需要时由用户手动操作。
+
+## health 响应字段
+
+- `xiadan_running` / `logged_in`：交易客户端进程在跑 / 主窗口存在（≈已登录）。
+  登录前或 RDP 会话断开时窗口不存在，`logged_in=false`
+- `queue_status`：队列忙闲
+- `stats`：近 1 小时各错误码成功率、连续失败计数、下单弹窗统计
+- `config.recommended_client_timeout_seconds`：官方推荐客户端超时
+
+## orders / order-status 响应字段
+
+当日委托表（`orders`）**无独立状态列**——委托状态通过「备注」（如「全部撤单」）
+与「撤消数量/成交数量」体现。
+
+`POST /orders` 响应 `data`：
+
+| 字段 | 说明 |
+|------|------|
+| `action`/`mode`/`code`/`amount`/`price` | 回显下单参数 |
+| `confirmed` | `true`=已提交（快速交易模式下无错误弹窗即判定成功） |
+| `entrust_no` | 合同编号。仅启用截获时返回；截获失败或未启用为 `null`。**`null` 不代表下单失败**——成败判定基于弹窗检测，与横幅截获解耦；此时**不要重试**（会重复下单），需要编号时用 `orders` 按代码+价格+数量+时间反查 |
+| `entrust_no_recovered` | 截获失败后按点击时刻窗口×参数匹配反查当日委托，唯一命中才为 `true` |
+| `entrust_no_verified` | 委托号对账结果（开启时返回）：`true`=当日委托落表命中 / `false`=刷新重拷后仍未命中（以查询为准）/ `null`=对账查询失败（不影响下单结果语义） |
+
+`GET /orders/{entrust_no}/status` 响应 `data`：
+
+- `found: false`——当日委托中无此合同编号（非当日下单，或编号有误）
+- `order.status`——由数量推导、跨券商稳定：`全部成交` / `部分成交` /
+  `部分成交后撤单` / `全部撤单` / `未成交` / `未知`（数量缺失）
+- `order.is_final`——`filled + cancelled >= amount`，该笔委托已不再留在市场
+- `fills`——按合同编号聚合的成交：`count`/`total_qty`/`total_amount`/
+  `avg_price`（加权均价，未成交为 `null`）/`trades[]`（时间/成交编号/数量/价格/金额）
+
+## cancel 响应字段
+
+- `cancel_type`：操作名（全部撤单/撤买/撤卖/撤最后）
+- `success`：是否执行了撤单（按钮灰显=当前无可撤委托时为 `false`，不算错误）
+- `cancelled_count`：撤单数量（从确认弹窗解析；无弹窗/解析失败为 `null`）
+
+## 幂等键契约（POST /orders）
+
+- 请求头 `Idempotency-Key`（1–128 字符）**必填**，CLI 缺省自动生成 uuid4 并打印到
+  stderr；`--idem-key` 显式指定
+- key 生命周期 = 每个逻辑订单一个 key：**超时重试必须复用同一 key**（窗口内同 key
+  拒绝 = 重试保护，`DUPLICATE_ORDER`）；确要新单（含同参数多单）用新 key
+- 去重窗口默认 60s（`order_dedup_window_seconds`）
+
+## 认证
+
+- 网关启用认证时接受 `Authorization: Bearer <token>` 或 `X-API-Key: <token>`；
+  CLI 自动携带（环境变量优先，缺省回落 `config/app_config.json` 的 `auth.token`）
+- 任何请求**不带 Origin 头**（网关跨站防御会拒绝带 Origin 的请求）——CLI 已处理
+
+## 环境变量（与 MCP 适配器通用，均可缺省）
+
+| 变量 | 缺省值 | 含义 |
+|------|--------|------|
+| `XIADAN_MCP_URL` | 读配置文件，否则 `http://127.0.0.1:5000` | 网关基地址 |
+| `XIADAN_MCP_TOKEN` | 配置文件 `auth.token`（启用认证时） | 认证 token |
+| `XIADAN_MCP_CONFIG` | `config/app_config.json` | 网关配置文件路径 |
+| `XIADAN_MCP_TRADING` | `0` | `1`/`true` 启用 buy/sell/cancel |
+| `XIADAN_MCP_TIMEOUT_SECONDS` | `60` | HTTP 超时（建议 ≥40） |
+
+## 全量错误码
+
+`VALIDATION_ERROR` 参数校验失败；`DUPLICATE_ORDER` 重试拦截窗口内同 key 重复提交；
+`AUTH_REQUIRED`/`AUTH_FAILED` 认证缺失/无效；`WINDOW_NOT_FOUND` 交易窗口未找到；
+`CONTROL_NOT_FOUND` 控件未找到；`MODE_SWITCH_FAILED` 限价/市价切换失败；
+`ORDER_SUBMIT_FAILED` 提交失败（通用，含弹窗原文）；`SERVER_CLEARING` 券商清算中；
+`OUTSIDE_TRADING_HOURS` 非交易时段；`T1_RESTRICTION` T+1 限制；
+`INSUFFICIENT_SHARES`/`INSUFFICIENT_BALANCE` 份额/资金不足；
+`SHORT_SELLING_FORBIDDEN` 不允许卖空；`PRICE_OUT_OF_RANGE` 价格超涨跌停；
+`ORDER_PRICE_REQUIRED` 券商要求显式价格（改限价）；`SERVER_UNAVAILABLE` 券商
+服务器不可用；`OCR_FAILED` 验证码识别失败；`INPUT_VERIFY_FAILED` 证券名称联动
+校验失败；`INTERNAL_ERROR` 未知异常；`QUEUE_TIMEOUT` 排队超时（任务稍后仍可能
+被执行——同幂等键重试安全）；`QUEUE_FULL` 队列已满；`TASK_TIMEOUT` 任务超时
+恢复成功（结果未知，查单核实）；`TASK_TIMEOUT_RECOVERY_FAILED` 超时且恢复失败
+（结果未知，查单核实）。
