@@ -937,6 +937,7 @@ class TestWindowStateReporting:
         finally:
             tq._last_task_info = None
 
+
     def test_report_decorator_writes_task_state(self):
         """装饰器端到端：业务方法执行后 task.window_state 已写入"""
         from src.api.task_queue import Task, TaskQueue, report_window_state
@@ -982,6 +983,82 @@ class TestWindowStateReporting:
             assert task.window_state == {"had_dialog": True, "clean": True}
         finally:
             tq._current_task = None
+
+
+class TestSkipPathPositionHeal:
+    """跳过窗口准备路径仍执行位置自愈（2026-10-06 实弹发现的缺口）
+
+    窗口 21% 可见时连续同组查询跳过了位置自愈（自愈只存在于
+    reset_window_state 内部，跳过 reset 时连带跳过）——查询碰巧成功
+    属侥幸，click_input/截图按屏幕坐标工作，出屏即失效。
+    """
+
+    @staticmethod
+    def _make_task_queue():
+        from src.api.task_queue import TaskQueue
+        return TaskQueue.get_instance()
+
+    @staticmethod
+    def _stub_window_service(monkeypatch, tq, window):
+        """替身 WindowService：记录 reset/ensure 调用"""
+        calls = {"reset": 0, "ensure": 0}
+
+        class _StubWS:
+            def get_trading_window(self):
+                return window
+
+            def reset_window_state(self):
+                calls["reset"] += 1
+
+            def ensure_window_onscreen(self, handle):
+                calls["ensure"] += 1
+
+        monkeypatch.setattr(tq, "window_service", _StubWS())
+        return calls
+
+    def test_skip_path_runs_ensure_not_reset(self, monkeypatch):
+        """同组连续干净任务 → 跳过重置/激活，但位置自愈必须执行"""
+        from src.api.task_queue import Task
+        tq = self._make_task_queue()
+        window = type("W", (), {"handle": 12345})()
+        calls = self._stub_window_service(monkeypatch, tq, window)
+        tq._last_task_info = {"name": "get_position", "group": "query",
+                              "had_dialog": False}
+        try:
+            task = Task(lambda: None, "get_position", {}, 30)
+            tq._prepare_window_for_task(task)
+            assert tq._skip_window_setup is True
+            assert calls["ensure"] == 1, "跳过路径必须执行位置自愈"
+            assert calls["reset"] == 0, "跳过路径不应重置/激活窗口"
+        finally:
+            tq._last_task_info = None
+
+    def test_nonskip_path_runs_reset(self, monkeypatch):
+        """无上笔记录 → 正常重置路径（位置自愈由 reset_window_state 内部承担）"""
+        from src.api.task_queue import Task
+        tq = self._make_task_queue()
+        window = type("W", (), {"handle": 12345})()
+        calls = self._stub_window_service(monkeypatch, tq, window)
+        tq._last_task_info = None
+        task = Task(lambda: None, "get_position", {}, 30)
+        tq._prepare_window_for_task(task)
+        assert tq._skip_window_setup is False
+        assert calls["reset"] == 1
+        assert calls["ensure"] == 0
+
+    def test_skip_path_window_missing_no_raise(self, monkeypatch):
+        """跳过路径窗口缺失 → 不抛异常（任务自身会以 WINDOW_NOT_FOUND 报错）"""
+        from src.api.task_queue import Task
+        tq = self._make_task_queue()
+        calls = self._stub_window_service(monkeypatch, tq, None)
+        tq._last_task_info = {"name": "get_position", "group": "query",
+                              "had_dialog": False}
+        try:
+            task = Task(lambda: None, "get_position", {}, 30)
+            tq._prepare_window_for_task(task)  # 不应抛异常
+            assert calls["ensure"] == 0
+        finally:
+            tq._last_task_info = None
 
 
 class _FakeEl:

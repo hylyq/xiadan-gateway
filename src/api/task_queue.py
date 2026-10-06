@@ -200,9 +200,7 @@ class TaskQueue(Singleton):
 
                 # 连续同向订单优化：买入→买入 或 卖出→卖出 跳过窗口准备
                 # 上次任务成功后窗口仍停留在对应界面，无需重置/激活/按键
-                self._skip_window_setup = self._can_skip_window_setup(task)
-                if not self._skip_window_setup:
-                    self._reset_trading_window()
+                self._prepare_window_for_task(task)
 
                 # 执行任务
                 task.result = task.func()
@@ -370,6 +368,29 @@ class TaskQueue(Singleton):
             self.window_service.reset_window_state()
         except Exception as e:
             self.logger.warning(f"重置交易窗口到基准态失败: {str(e)}")
+
+    def _prepare_window_for_task(self, task: Task) -> None:
+        """任务前窗口准备：决定重置或跳过；跳过路径仍做位置自愈
+
+        跳过激活的优化不豁免位置自愈——连续同组任务期间窗口被拖出屏幕
+        时，click_input/截图按屏幕坐标工作会落空（2026-10-06 实弹：窗口
+        21% 可见时连续查询跳过了位置自愈，查询碰巧成功属侥幸）。检查
+        本身是 GetWindowRect 级开销，仅在确实出屏时才发生实际移动。
+        """
+        self._skip_window_setup = self._can_skip_window_setup(task)
+        if not self._skip_window_setup:
+            self._reset_trading_window()
+        else:
+            self._ensure_window_in_workarea()
+
+    def _ensure_window_in_workarea(self) -> None:
+        """跳过窗口准备路径上的位置自愈（不激活、无按键，失败不阻塞任务）"""
+        try:
+            window = self.window_service.get_trading_window()
+            if window is not None:
+                self.window_service.ensure_window_onscreen(window.handle)
+        except Exception as e:
+            self.logger.warning(f"跳过路径窗口位置自愈失败: {e}")
 
     def _handle_timeout(self, task: Task) -> None:
         """看门狗：任务超时后的恢复流程
