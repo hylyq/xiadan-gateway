@@ -18,7 +18,7 @@ A trading gateway for TongHuaShun `xiadan.exe` — controls the THS order-entry 
 ## Table of Contents
 
 - [Core Features](#core-features)
-- [Quick Start](#quick-start) (incl. [Prerequisites: Broker Software Settings](#prerequisites-broker-software-settings) / [Unattended Operation on a Server (VNC)](#unattended-operation-on-a-server-vnc-recommended))
+- [Quick Start](#quick-start) (incl. [Prerequisites: Broker Software Settings](#prerequisites-broker-software-settings) / [Unattended Operation on a Server (VNC Recommended, Not Required)](#unattended-operation-on-a-server-vnc-recommended-not-required))
 - [Required Before Going Live (Security Checklist)](#required-before-going-live-security-checklist)
 - [Configuration](#configuration)
 - [API](#api): [Response Format](#response-format) / [Error Codes](#error-codes) / [Endpoints](#endpoints) / [Place Order](#post-orders--place-order) / [Order Status & Fill Report](#get-ordersentrust_nostatus--order-status--fill-report) / [Cancel Orders](#post-orderscancel-all--cancel-orders) / [Auxiliary Endpoints](#auxiliary-endpoints) / [Client Timeout Configuration](#client-timeout-configuration)
@@ -88,17 +88,17 @@ Configure the following manually before starting — disabling confirmation popu
 
 > Configure once. With confirmations off (quick-trading mode), orders submit directly with no popups, cutting ~1.4s per order.
 
-### Unattended Operation on a Server (VNC Recommended)
+### Unattended Operation on a Server (VNC Recommended, Not Required)
 
-The gateway drives `xiadan.exe` with **real mouse/keyboard input** (`SetForegroundWindow` + `click_input` + `keybd_event`), which requires the hosting session to have an **active desktop**. On a cloud/remote server this constrains how you connect:
+The gateway drives `xiadan.exe` with **real mouse/keyboard input** (`SetForegroundWindow` + `click_input` + `keybd_event`), which requires the hosting session to have an **active desktop** (a console-attached interactive session). Any one of the access modes below works — VNC is the most convenient, but **not required**:
 
 | Access mode | After the client disconnects | Automation |
 |---|---|---|
-| **VNC (recommended)** — session lives on the console | VNC is only a mirror; the session stays attached to the console | ✅ Keeps working — connect/disconnect anytime |
-| RDP — session on the RDP transport | Session enters the "disconnected" state, no active desktop | ❌ Fails: `There is no active desktop required for moving mouse cursor!` |
-| RDP + `tscon <id> /dest:console` before disconnecting | Desktop redirected back to the console | ✅ Keeps working |
+| **VNC (recommended, not required)** — session lives on the console | VNC is only a mirror; the session stays attached to the console | ✅ Keeps working — connect/disconnect anytime |
+| RDP plain disconnect | Session disconnects + locks → **session self-healing runs `tscon` automatically within ~10s** | ⚠️ Brief outage, then auto-recovery ✅ |
+| RDP + `tscon $env:SESSIONNAME /dest:console` on exit | Session lands on the console seamlessly, no lock | ✅ Keeps working (zero-downtime path) |
 
-**One-time setup**: install [TightVNC Server](https://www.tightvnc.com/) (runs as a Windows service and serves the console session), set a strong VNC password, and restrict the VNC port in the firewall — never expose it to the public internet (prefer an SSH tunnel).
+**One-time setup (optional)**: install [TightVNC Server](https://www.tightvnc.com/) (runs as a Windows service and serves the console session), set a strong VNC password, and restrict the VNC port in the firewall — never expose it to the public internet (prefer an SSH tunnel). Without VNC, RDP + session self-healing works fine; the value of installing VNC is explained in "Does the VNC server need to stay running?" below.
 
 **Daily flow**:
 

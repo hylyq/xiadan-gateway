@@ -18,7 +18,7 @@
 ## 目录
 
 - [核心特性](#核心特性)
-- [快速开始](#快速开始)（含[前置准备：券商软件设置](#前置准备券商软件设置) / [服务器无人值守运行（VNC 方案）](#服务器无人值守运行vnc-方案)）
+- [快速开始](#快速开始)（含[前置准备：券商软件设置](#前置准备券商软件设置) / [服务器无人值守运行（VNC 推荐但非必需）](#服务器无人值守运行vnc-推荐但非必需)）
 - [上线前必改（安全检查）](#上线前必改安全检查)
 - [配置](#配置)
 - [API 接口](#api-接口)：[响应格式](#响应格式) / [错误码](#错误码) / [接口总表](#接口总表) / [下单](#post-orders--下单) / [委托状态与成交回报](#get-ordersentrust_nostatus--委托状态与成交回报) / [撤单](#post-orderscancel-all--撤单) / [辅助接口](#辅助接口) / [调用方 timeout 配置](#调用方-timeout-配置)
@@ -88,17 +88,17 @@ uv run python main.py --dev       # 开发模式（热加载）
 
 > 只需配置一次。关闭确认后（快速交易模式），委托直接提交不再弹窗，下单耗时减少 ~1.4s。
 
-### 服务器无人值守运行（VNC 方案）
+### 服务器无人值守运行（VNC 推荐但非必需）
 
-本网关通过**真实鼠标/键盘输入**驱动 `xiadan.exe`（`SetForegroundWindow` + `click_input` + `keybd_event`），要求所在会话拥有**活动桌面**。在云服务器/远程服务器上，这决定了你用什么方式连接：
+本网关通过**真实鼠标/键盘输入**驱动 `xiadan.exe`（`SetForegroundWindow` + `click_input` + `keybd_event`），要求所在会话拥有**活动桌面**（console 挂接的交互会话）。接入方式可任选其一，VNC 是其中最省心的，但**不是必需**：
 
 | 接入方式 | 客户端断开后 | 自动化 |
 |---|---|---|
-| **VNC（推荐）**——会话常驻 console | VNC 只是桌面的镜像，会话保持挂接在 console 上 | ✅ 持续可用，随时连/断 |
-| RDP——会话在 RDP 通道上 | 会话进入「已断开」状态，无活动桌面 | ❌ 报错：`There is no active desktop required for moving mouse cursor!` |
-| RDP + 断开前执行 `tscon <id> /dest:console` | 桌面重定向回 console | ✅ 持续可用 |
+| **VNC（推荐，非必需）**——会话常驻 console | VNC 只是桌面的镜像，会话保持挂接在 console 上 | ✅ 持续可用，随时连/断 |
+| RDP 直接断开 | 会话「断开+锁定」→ **会话自愈 ~10s 内自动 tscon 恢复** | ⚠️ 短暂失效后自动恢复 ✅ |
+| RDP + 离开时执行 `tscon $env:SESSIONNAME /dest:console` | 会话无缝落回 console，不锁屏 | ✅ 持续可用（零停机路径） |
 
-**一次性安装**：安装 [TightVNC Server](https://www.tightvnc.com/)（以 Windows 服务运行，镜像 console 会话），设置强 VNC 密码，并在防火墙限制 VNC 端口——**切勿暴露公网**（建议走 SSH 隧道访问）。
+**一次性安装（可选）**：安装 [TightVNC Server](https://www.tightvnc.com/)（以 Windows 服务运行，镜像 console 会话），设置强 VNC 密码，并在防火墙限制 VNC 端口——**切勿暴露公网**（建议走 SSH 隧道访问）。不装 VNC 时，用 RDP + 会话自愈即可运行；装 VNC 的价值见下方「VNC 服务端需要保持运行吗」。
 
 **日常流程**：
 
