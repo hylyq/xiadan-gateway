@@ -56,6 +56,7 @@
 | 委托号横幅截获 | 提交点击后后台线程抓取右下角黄色横幅（~12fps 抓屏；自绘覆盖层，`PrintWindow` 不可见）+黄色掩码定位+模板 OCR 读出合同编号，解析以尾部全角句号为锚、与字长无关（券商编号长度不一）。成功返回 `entrust_no`，失败返回 `null` 不影响下单，可配 `order.recover_entrust_no` 自动回补（见[下单响应](#post-orders--下单)） |
 | 委托状态与成交回报 | `GET /orders/{entrust_no}/status` 按合同编号 join 当日委托 × 当日成交：委托状态由数量推导（不依赖券商备注文本），成交聚合含加权均价与逐笔明细——下单响应的轮询侧对应物 |
 | 窗口位置自愈 | 任务开始前检查窗口与工作区交集（阈值 60%），窗口被误拖出屏幕时自动移回（`click_input`/截图按屏幕坐标工作，出屏会失效） |
+| 窗口可见性自愈 | 后台监控（每 2s）同时恢复最小化与**托盘隐藏**窗口（`IsIconic` **或** `IsWindowVisible`——托盘隐藏态非 iconic，曾是盲区）；软恢复连续 3 轮无效时，按**运行中进程**的 exe 重拉兜底（hwnd→PID→psutil 取路径，配置 `trading_app_paths` 兜底，60s 冷却）——单实例客户端会唤起既有窗口，多套安装并存也不会拉错程序。查询路径激活前同样对隐藏窗口 `SW_SHOW` |
 | MCP 适配器 | `scripts/mcp_server.py` 将网关暴露为标准 MCP 工具供大模型 agent 调用——只读查询恒注册；`place_order`/`cancel_orders` 需 `XIADAN_MCP_TRADING=1`；`/actions/*` 裸操作永不暴露（见 [MCP 服务](#mcp-服务agent-接入)） |
 
 ## 快速开始
@@ -105,7 +106,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 
 **规则**：
 
-- **之后不要再用 RDP 连入该会话**——RDP 重连会把会话从 console 拉回 RDP 通道，此后普通方式断开 RDP 会让自动化失效，需要重跑 `tscon <id> /dest:console` 恢复（会话 id 用 `qwinsta` 查）
+- **RDP 存活规则**——RDP 重连会把会话从 console 拉回 RDP 通道，而普通方式断开 RDP 客户端会**断开并锁定**会话（Windows 安全设计；此时自动化失效——注入的点击落空、前台校验拒绝发键）。恢复只需一条命令：`tscon <id> /dest:console`（会话 id 用 `qwinsta` 查）——以会话属主的管理员身份执行，重挂 console **并同步解除锁定**（实测验证，无需 VNC 登录）。更省事的做法：离开 RDP 时在会话内终端执行 `tscon %sessionname% /dest:console` 代替直接关闭客户端——会话直接落回 console 且完全不锁屏
 - **不要锁屏**（`Win+L` 或带锁定的屏保会切到安全桌面，自动化失效）
 - **注册为 Windows 服务 / 计划任务「不管用户是否登录都要运行」不可行**：它们落在 Session 0，看不到也无法操作交互会话的窗口（窗口枚举为空）。因此开机自启同样要求先有人登录——VNC 登录后手动启动 `xiadan.exe` 与网关
 - 服务器重启后：VNC 连入 → 登录 → 启动 `xiadan.exe` + 券商登录 → 启动网关
