@@ -113,6 +113,12 @@ The gateway drives `xiadan.exe` with **real mouse/keyboard input** (`SetForegrou
 - **A Windows service / scheduled task "run whether user is logged on or not" does not work**: those run in Session 0 and cannot see or operate the windows of an interactive session (window enumeration comes up empty). Boot auto-start therefore also requires an interactive logon first — log in via VNC, then start `xiadan.exe` and the gateway
 - After a reboot: VNC in → log on → start `xiadan.exe` + broker login → start the gateway
 
+**Does the VNC server need to stay running?** — Not for automation. The VNC server is only a *mirror* of the console desktop: with it stopped, the desktop still exists and every gateway capability (queries/orders, session-disconnect self-healing, window self-healing, popup sweep, captcha solving) works unchanged — verified in practice (VNC client disconnects never affect the session). It is still recommended to keep the service running (it auto-starts and idles at zero cost):
+
+1. **Reboot recovery**: logging in via VNC keeps the session console-native from the very start — not even the ~10s self-healing window of the RDP path
+2. **Broker re-login** (session expiry) and **emergency visual inspection** (lock screens, dialogs, abnormal states) need a human access path
+3. With session-disconnect self-healing, RDP can serve as that access path too (log in → work → plain disconnect → auto-recovery in ~10s); VNC remains the zero-session-churn, preferred one
+
 ## Required Before Going Live (Security Checklist)
 
 The defaults below favor development convenience — **verify them before exposing the service**:
