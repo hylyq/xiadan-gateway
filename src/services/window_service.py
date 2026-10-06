@@ -290,10 +290,10 @@ class WindowService(Singleton):
         return max(0, inter_w) * max(0, inter_h) / (win_w * win_h)
 
     def find_process_dialogs(self, hwnd: int) -> list:
-        """枚举同进程内可见 #32770 对话框（验证码弹窗等），不关闭
+        """枚举同进程内可见 #32770 对话框（验证码/风控弹窗等），不关闭
 
-        供任务开始时清扫残留弹窗用：含验证码图片控件的应 OCR 求解，
-        不含的才走 close_process_dialogs 关闭。
+        供任务开始时清扫残留弹窗用（清扫只做安全关闭，不求解）；
+        close_process_dialogs 复用本枚举批量 WM_CLOSE。
 
         Returns: 对话框 hwnd 列表（EnumWindows 顺序）
         """

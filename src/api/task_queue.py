@@ -192,11 +192,11 @@ class TaskQueue(Singleton):
             watchdog.start()
 
             try:
-                # 残留验证码弹窗清扫：必须在窗口复位/激活之前——弹窗持有
-                # 前台时，激活逻辑的 click_input 真实点击会落在弹窗按钮上
-                # （实测：连按弹窗"确定"数次），既无效又危险；先求解/关闭
+                # 残留弹窗清扫：必须在窗口复位/激活之前——弹窗持有前台时，
+                # 激活逻辑的 click_input 真实点击会落在弹窗按钮上（实测：
+                # 连按弹窗"确定"数次），既无效又危险；先安全关闭（含存档）
                 # 恢复干净窗口，再做任何真实点击
-                self._sweep_blocking_captcha()
+                self._sweep_leftover_dialogs()
 
                 # 连续同向订单优化：买入→买入 或 卖出→卖出 跳过窗口准备
                 # 上次任务成功后窗口仍停留在对应界面，无需重置/激活/按键
@@ -346,11 +346,11 @@ class TaskQueue(Singleton):
         self._last_task_info = state
         self.logger.debug(f"任务状态更新（连续跳过依据）: {state}")
 
-    def _sweep_blocking_captcha(self) -> None:
+    def _sweep_leftover_dialogs(self) -> None:
         """任务开始前清扫残留弹窗（只关闭，绝不求解/点确认）
 
         复用 PositionService 的清扫能力（顶层 + 主窗口子弹窗两种形态，
-        安全关闭：取消按钮/WM_CLOSE）。无弹窗时开销 ~10ms。
+        关窗前存档证据，安全关闭：取消按钮/WM_CLOSE）。无弹窗时开销 ~10ms。
         """
         try:
             from src.services.position_service import PositionService

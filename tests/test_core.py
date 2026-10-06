@@ -2839,8 +2839,8 @@ class TestWindowMonitorSelfHeal:
         startfile.assert_not_called()
 
 
-class TestCaptchaSweep:
-    """任务开始的验证码弹窗清扫测试（风控弹窗持有前台场景）"""
+class TestDialogSweep:
+    """任务开始的残留弹窗清扫测试（只关闭模式：存档→安全关闭）"""
 
     MAIN = 0x64
 
@@ -3141,7 +3141,7 @@ class TestCaptchaSweep:
         mocker.patch("src.services.position_service.PositionService",
                      return_value=ps)
 
-        tq._sweep_blocking_captcha()
+        tq._sweep_leftover_dialogs()
 
         ps._sweep_leftover_dialogs.assert_called_once()
 
@@ -3154,6 +3154,6 @@ class TestCaptchaSweep:
         mocker.patch("src.services.position_service.PositionService",
                      side_effect=RuntimeError("init fail"))
 
-        tq._sweep_blocking_captcha()  # 不应抛出
+        tq._sweep_leftover_dialogs()  # 不应抛出
 
         tq.logger.debug.assert_called_once()
