@@ -27,7 +27,10 @@ _RETRY_COOLDOWN_SECONDS = 1800.0  # 整体拉取失败后的进程内冷却（30
 _CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "trading_calendar"
 
 _lock = threading.Lock()
-_last_fail_monotonic = 0.0  # 最近一次整体拉取失败时刻（monotonic 秒）
+# 最近一次整体拉取失败时刻（monotonic 秒）。初值取 -冷却时长而非 0：
+# monotonic 原点是开机时刻，刚开机的机器上 0.0 本身落在冷却窗内，
+# 会把首次兜底查询静默压制（最长开机后 30 分钟）。
+_last_fail_monotonic = -_RETRY_COOLDOWN_SECONDS
 
 
 def _cache_path(year: int) -> Path:

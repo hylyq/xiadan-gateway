@@ -133,7 +133,9 @@ class TestTradingHoursCheck:
                 raise OSError("深交所 API 不可用")
         monkeypatch.setattr(trading_calendar, "_fetch_month", fetch_impl)
         monkeypatch.setattr(trading_calendar, "_CACHE_DIR", tmp_path)
-        monkeypatch.setattr(trading_calendar, "_last_fail_monotonic", 0.0)
+        # -inf = 冷却已过期（0.0 在开机不足 30 分钟的机器上仍在冷却窗内，
+        # 会跳过兜底 API 调用使断言落空——2026-10-06 服务器实测踩中）
+        monkeypatch.setattr(trading_calendar, "_last_fail_monotonic", float("-inf"))
 
     @staticmethod
     def _year_fetch(year, jybz_overrides):
