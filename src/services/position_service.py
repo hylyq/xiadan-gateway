@@ -72,6 +72,16 @@ class PositionService:
 
         target_handle = window.handle
 
+        # 如果窗口隐藏到托盘（非 iconic、WS_VISIBLE=False），先 SW_SHOW。
+        # 不恢复的话 click_input 会落空、前台校验必失败
+        if not win32gui.IsWindowVisible(target_handle):
+            self.logger.info("交易窗口不可见（可能隐藏到托盘），SW_SHOW 恢复后再发送 Ctrl+C")
+            try:
+                win32gui.ShowWindow(target_handle, win32con.SW_SHOW)
+                time.sleep(0.2)
+            except Exception as e:
+                self.logger.warning(f"恢复隐藏窗口失败: {e}")
+
         # 如果窗口被最小化，先恢复
         if win32gui.IsIconic(target_handle):
             self.logger.info("检测到交易窗口已最小化，恢复后再发送 Ctrl+C")

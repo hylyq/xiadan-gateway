@@ -2711,3 +2711,129 @@ class TestEntrustNoRecovery:
         row["委托时间"] = "--"
         assert PositionService.recover_entrust_no(
             click, [row], "601991", "买入", "5.35", "100") is None
+
+
+class TestWindowMonitorSelfHeal:
+    """窗口监控自愈测试（隐藏托盘盲区修复 + 按路径重拉兜底）"""
+
+    def _monitor(self, mocker):
+        from src.services.window_monitor import WindowMonitor
+        m = WindowMonitor(check_interval=0)
+        m.logger = mocker.MagicMock()
+        return m
+
+    def test_hidden_window_triggers_restore(self, mocker):
+        """隐藏到托盘（非 iconic、不可见）→ 触发软恢复（2026-10-06 实测盲区）"""
+        m = self._monitor(mocker)
+        mocker.patch("src.services.window_monitor.win32gui.IsIconic",
+                     return_value=False)
+        mocker.patch("src.services.window_monitor.win32gui.IsWindowVisible",
+                     return_value=False)
+        restore = mocker.patch.object(m, "_restore_window", return_value=True)
+        m._process_window_state(0x30064)
+        restore.assert_called_once_with(0x30064)
+        assert m._bad_state_count == 1
+
+    def test_minimized_window_triggers_restore(self, mocker):
+        """最小化（iconic）→ 触发软恢复（原有行为保持）"""
+        m = self._monitor(mocker)
+        mocker.patch("src.services.window_monitor.win32gui.IsIconic",
+                     return_value=True)
+        mocker.patch("src.services.window_monitor.win32gui.IsWindowVisible",
+                     return_value=False)
+        restore = mocker.patch.object(m, "_restore_window", return_value=True)
+        m._process_window_state(0x30064)
+        restore.assert_called_once_with(0x30064)
+
+    def test_healthy_window_resets_counter(self, mocker):
+        """窗口正常 → 不恢复，坏状态计数清零"""
+        m = self._monitor(mocker)
+        m._bad_state_count = 2
+        mocker.patch("src.services.window_monitor.win32gui.IsIconic",
+                     return_value=False)
+        mocker.patch("src.services.window_monitor.win32gui.IsWindowVisible",
+                     return_value=True)
+        restore = mocker.patch.object(m, "_restore_window", return_value=True)
+        m._process_window_state(0x30064)
+        restore.assert_not_called()
+        assert m._bad_state_count == 0
+
+    def test_persistent_bad_state_triggers_relaunch(self, mocker):
+        """软恢复连续 BAD_STATE_RELAUNCH_THRESHOLD 轮无效 → 按路径重拉兜底"""
+        m = self._monitor(mocker)
+        mocker.patch("src.services.window_monitor.win32gui.IsIconic",
+                     return_value=True)
+        mocker.patch("src.services.window_monitor.win32gui.IsWindowVisible",
+                     return_value=False)
+        mocker.patch.object(m, "_restore_window", return_value=True)
+        relaunch = mocker.patch.object(m, "_relaunch_app", return_value=True)
+        for _ in range(m.BAD_STATE_RELAUNCH_THRESHOLD):
+            m._process_window_state(0x30064)
+        relaunch.assert_called_once()
+        assert m._bad_state_count == 0
+
+    def test_relaunch_uses_existing_path(self, mocker, tmp_path):
+        """重拉跳过不存在的路径，对第一个存在的路径调 os.startfile"""
+        m = self._monitor(mocker)
+        exe = tmp_path / "xiadan.exe"
+        exe.write_bytes(b"")
+        m._target_app_paths = [r"C:\不存在\xiadan.exe", str(exe)]
+        startfile = mocker.patch("os.startfile")
+        assert m._relaunch_app() is True
+        startfile.assert_called_once_with(str(exe))
+
+    def test_relaunch_prefers_running_process_exe(self, mocker, tmp_path):
+        """多套安装并存时优先重拉正在运行进程的 exe，而非配置顺序
+
+        配置里排在前面的路径存在但不是正在运行的那套时，
+        按配置顺序重拉会启动另一套客户端（弹自己的登录框），
+        必须以 hwnd→PID→psutil 取到的运行中路径为准。
+        """
+        m = self._monitor(mocker)
+        running = tmp_path / "running" / "xiadan.exe"
+        running.parent.mkdir()
+        running.write_bytes(b"")
+        other = tmp_path / "other" / "xiadan.exe"
+        other.parent.mkdir()
+        other.write_bytes(b"")
+        m._target_app_paths = [str(other)]  # 另一套存在的安装，排在前面
+        mocker.patch(
+            "src.services.window_monitor.win32process.GetWindowThreadProcessId",
+            return_value=(0, 4908))
+        mocker.patch(
+            "src.services.window_monitor.psutil.Process",
+            return_value=mocker.MagicMock(exe=lambda: str(running)))
+        startfile = mocker.patch("os.startfile")
+        assert m._relaunch_app(hwnd=0x30064) is True
+        startfile.assert_called_once_with(str(running))
+
+    def test_relaunch_falls_back_when_process_gone(self, mocker, tmp_path):
+        """进程已死（句柄查询失败）→ 退回配置路径"""
+        m = self._monitor(mocker)
+        exe = tmp_path / "xiadan.exe"
+        exe.write_bytes(b"")
+        m._target_app_paths = [str(exe)]
+        mocker.patch(
+            "src.services.window_monitor.win32process.GetWindowThreadProcessId",
+            side_effect=Exception("invalid handle"))
+        startfile = mocker.patch("os.startfile")
+        assert m._relaunch_app(hwnd=0x30064) is True
+        startfile.assert_called_once_with(str(exe))
+
+    def test_relaunch_cooldown(self, mocker, tmp_path):
+        """冷却期内不重复重拉"""
+        m = self._monitor(mocker)
+        exe = tmp_path / "xiadan.exe"
+        exe.write_bytes(b"")
+        m._target_app_paths = [str(exe)]
+        mocker.patch("os.startfile")
+        assert m._relaunch_app() is True
+        assert m._relaunch_app() is False
+
+    def test_relaunch_no_existing_path(self, mocker):
+        """所有路径均不存在 → 不重拉并返回 False"""
+        m = self._monitor(mocker)
+        m._target_app_paths = [r"C:\不存在\xiadan.exe"]
+        startfile = mocker.patch("os.startfile")
+        assert m._relaunch_app() is False
+        startfile.assert_not_called()

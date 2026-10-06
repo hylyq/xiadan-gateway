@@ -19,9 +19,20 @@ from src.constants import TRADING_WINDOW_TITLE
 class WindowMonitor:
     """窗口监控器
 
-    监控目标窗口是否最小化，如果最小化则自动恢复到前台。
-    防止交易窗口被最小化导致快捷键失效。
+    监控目标窗口是否最小化或隐藏（托盘），自动恢复到前台。
+    防止交易窗口不可见导致点击落空/快捷键失效。
+
+    恢复两级：
+    1. SW_SHOW/SW_RESTORE 软恢复（最小化到任务栏、隐藏到托盘的常规态）
+    2. 软恢复连续 BAD_STATE_RELAUNCH_THRESHOLD 轮无效时，按 trading_app_paths
+       重拉 exe 兜底——单实例客户端被再次启动会唤起既有窗口
+       （不依赖屏幕坐标，桌面图标位置变化无影响）
     """
+
+    # 软恢复连续无效多少轮后触发重拉（每轮间隔 check_interval）
+    BAD_STATE_RELAUNCH_THRESHOLD = 3
+    # 重拉冷却秒数，防止异常状态下高频拉起进程
+    RELAUNCH_COOLDOWN_SECONDS = 60.0
 
     def __init__(self, check_interval: float = 2.0):
         self.logger = Logger.get_instance()
@@ -31,6 +42,8 @@ class WindowMonitor:
         self._target_app_paths: List[str] = []
         self._target_hwnd: Optional[int] = None
         self._lock = threading.Lock()
+        self._bad_state_count = 0
+        self._last_relaunch = 0.0
 
     def start(self, app_paths: Union[str, List[str]]) -> bool:
         """启动监控
@@ -166,6 +179,75 @@ class WindowMonitor:
         except Exception as e:
             self.logger.error(f"强制前台失败: {str(e)}")
 
+    def _process_window_state(self, hwnd: int) -> None:
+        """按窗口可见性分派恢复动作（最小化/隐藏 → 软恢复 → 重拉兜底）"""
+        if win32gui.IsIconic(hwnd) or not win32gui.IsWindowVisible(hwnd):
+            state = "最小化" if win32gui.IsIconic(hwnd) else "隐藏（托盘）"
+            self.logger.info(f"检测到目标窗口已{state}，正在恢复...")
+            self._bad_state_count += 1
+            if not self._restore_window(hwnd):
+                self._target_hwnd = None
+            # 软恢复连续多轮无效 → 按路径重拉兜底
+            if self._bad_state_count >= self.BAD_STATE_RELAUNCH_THRESHOLD:
+                self._relaunch_app(hwnd)
+                self._bad_state_count = 0
+        else:
+            self._bad_state_count = 0
+
+    def _relaunch_app(self, hwnd: Optional[int] = None) -> bool:
+        """重拉交易程序（软恢复无效时的兜底）
+
+        单实例客户端被再次启动不会开第二个实例，而是唤起既有窗口，
+        对"隐藏到托盘且 SW_SHOW 不生效"等异常态是最可靠的恢复手段。
+
+        路径优先级：
+        1. 正在运行进程自己的 exe（hwnd→PID→psutil）——多套安装并存时，
+           按 trading_app_paths 顺序可能命中"存在但不是正在运行的那套"，
+           启动另一套客户端只会弹自己的登录框、抢前台，恢复不了目标窗口
+        2. trading_app_paths 中第一个存在的路径（进程已死/句柄无效时的兜底）
+
+        Returns:
+            True=已发起重拉，False=冷却中或所有候选路径均不存在
+        """
+        import os
+
+        now = time.time()
+        if now - self._last_relaunch < self.RELAUNCH_COOLDOWN_SECONDS:
+            self.logger.info(
+                f"重拉冷却中（{self.RELAUNCH_COOLDOWN_SECONDS:.0f}s），跳过"
+            )
+            return False
+
+        candidates: List[str] = []
+        if hwnd:
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                running_exe = psutil.Process(pid).exe()
+                if running_exe:
+                    candidates.append(running_exe)
+            except Exception as e:
+                self.logger.warning(f"获取运行中进程路径失败，退回配置路径: {e}")
+        # 去重，保持优先级顺序
+        for path in self._target_app_paths:
+            if path not in candidates:
+                candidates.append(path)
+
+        for path in candidates:
+            if not os.path.exists(path):
+                continue
+            self.logger.warning(f"窗口持续不可达，按路径重拉交易程序: {path}")
+            try:
+                os.startfile(path)
+                self._last_relaunch = now
+                return True
+            except Exception as e:
+                self.logger.error(f"重拉交易程序失败 ({path}): {e}")
+
+        self.logger.error(
+            f"候选路径均不存在: {candidates}，无法重拉"
+        )
+        return False
+
     def _monitor_loop(self) -> None:
         self.logger.info("窗口监控线程已启动")
         consecutive_failures = 0
@@ -176,6 +258,7 @@ class WindowMonitor:
                 hwnd = self._find_target_window()
                 if hwnd is None:
                     consecutive_failures += 1
+                    self._bad_state_count = 0
                     if consecutive_failures >= 5:
                         if not startup_skip:
                             self.logger.warning("连续5次未找到目标窗口，请检查 xiadan.exe 是否已启动")
@@ -185,10 +268,7 @@ class WindowMonitor:
                     consecutive_failures = 0
                     startup_skip = False
                     self._target_hwnd = hwnd
-                    if win32gui.IsIconic(hwnd):
-                        self.logger.info("检测到目标窗口已最小化，正在恢复...")
-                        if not self._restore_window(hwnd):
-                            self._target_hwnd = None
+                    self._process_window_state(hwnd)
             except Exception as e:
                 consecutive_failures += 1
                 if consecutive_failures >= 3:
