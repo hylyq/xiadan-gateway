@@ -2994,3 +2994,75 @@ class TestCaptchaSweep:
 
         sweep.assert_called_once()
         svc.window_service.send_key.assert_not_called()
+
+    def test_solve_captcha_recaptures_per_attempt(self, mocker, tmp_path):
+        """OCR 为空时每次重试重新截图（同图重试无意义，实测 3 次存档相同）"""
+        import pytest as _pytest
+        from src.exceptions import ApiError
+        svc = self._svc(mocker)
+        svc.ocr_service = mocker.MagicMock()
+        svc.ocr_service.recognize.return_value = ""  # 每次识别都空
+        svc.config = mocker.MagicMock()
+        svc.config.get_logging_config.return_value = {"screenshot_dir": str(tmp_path)}
+        svc.config.get_ocr_config.return_value = {"max_retry": 3}
+        window = mocker.MagicMock()
+        window.descendants.return_value = []
+        image_element = mocker.MagicMock()
+        img_obj = mocker.MagicMock()
+        image_element.capture_as_image.return_value = img_obj
+        svc.window_service.find_element_in_window.return_value = image_element
+        mocker.patch.object(svc, "_is_captcha_image_valid", return_value=True)
+
+        with _pytest.raises(ApiError):
+            svc._solve_captcha(window)
+
+        assert img_obj.save.call_count == 3  # 每次尝试都重拍
+
+    def test_verify_rejects_error_text(self, mocker):
+        """输入框消失但红字错误提示在场 → 不判成功（自信误读被拒场景）"""
+        from src.constants import CAPTCHA_VERIFY_ID
+        svc = self._svc(mocker)
+        dlg = mocker.MagicMock()
+        dlg.descendants.return_value = [{"text": "验证码错误"}]
+        svc._captcha_window = dlg
+        svc.window_service.find_element_in_window.return_value = None  # 输入框已消失
+        mocker.patch("src.services.position_service.safe_text",
+                     side_effect=lambda el: el["text"])
+
+        assert svc._verify_captcha_success(mocker.MagicMock()) is False
+
+    def test_verify_destroy_not_success(self, mocker):
+        """弹窗销毁（descendants 抛异常）→ 不判成功（重建间隙假阳性源头）"""
+        svc = self._svc(mocker)
+        dlg = mocker.MagicMock()
+        dlg.descendants.side_effect = RuntimeError("destroyed")
+        svc._captcha_window = dlg
+        svc.window_service.find_element_in_window.return_value = None
+
+        assert svc._verify_captcha_success(mocker.MagicMock()) is False
+
+    def test_solve_captcha_closes_dialog_on_exhaust(self, mocker, tmp_path):
+        """重试耗尽 → 关闭弹窗恢复干净状态（不留死锁弹窗）"""
+        import pytest as _pytest
+        from src.exceptions import ApiError
+        from src.constants import CAPTCHA_CANCEL_BUTTON_ID
+        svc = self._svc(mocker)
+        svc.ocr_service = mocker.MagicMock()
+        svc.ocr_service.recognize.return_value = ""
+        svc.config = mocker.MagicMock()
+        svc.config.get_logging_config.return_value = {"screenshot_dir": str(tmp_path)}
+        svc.config.get_ocr_config.return_value = {"max_retry": 3}
+        window = mocker.MagicMock()
+        window.descendants.return_value = []
+        image_element = mocker.MagicMock()
+        image_element.capture_as_image.return_value = mocker.MagicMock()
+        svc.window_service.find_element_in_window.return_value = image_element
+        mocker.patch.object(svc, "_is_captcha_image_valid", return_value=True)
+        dlg = mocker.MagicMock()
+        svc._captcha_window = dlg
+        click_btn = mocker.patch.object(svc, "_click_button", return_value=True)
+
+        with _pytest.raises(ApiError):
+            svc._solve_captcha(window)
+
+        click_btn.assert_called_once_with(dlg, CAPTCHA_CANCEL_BUTTON_ID)

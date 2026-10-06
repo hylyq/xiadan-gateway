@@ -1121,18 +1121,24 @@ class PositionService:
             raise ApiError(ErrorCode.OCR_FAILED, "验证码图片元素未找到",
                            suggestion="请确认交易窗口是否正常显示验证码弹窗")
 
-        # 保存验证码图片
-        with timed("验证码截图保存", self.logger):
-            cache_dir = self.config.get_logging_config().get("screenshot_dir", "logs/screenshots")
-            os.makedirs(cache_dir, exist_ok=True)
-            image_path = os.path.join(cache_dir, "captcha.png")
-            image_element.capture_as_image().save(image_path)
-            self.logger.info(f"验证码图片已保存: {image_path}")
+        # 保存验证码图片（路径准备；截图移入循环内每次重拍——
+        # 分段成败与数字组合相关，同一张图重试必然同样结果，
+        # 实测连续 3 次存档完全相同；弹窗重渲染后的新图才是新机会）
+        cache_dir = self.config.get_logging_config().get("screenshot_dir", "logs/screenshots")
+        os.makedirs(cache_dir, exist_ok=True)
+        image_path = os.path.join(cache_dir, "captcha.png")
 
         max_retry = self.config.get_ocr_config().get("max_retry", 3)
 
         for attempt in range(max_retry):
             try:
+                # 每次尝试重新截图（弹窗已关闭/元素失效则跳出走外层流程）
+                with timed("验证码截图保存", self.logger):
+                    try:
+                        image_element.capture_as_image().save(image_path)
+                    except Exception as cap_err:
+                        self.logger.warning(f"验证码截图失败（弹窗可能已关闭）: {cap_err}")
+                        break
                 with timed("OCR 识别", self.logger):
                     # 截图尺寸校验：真实验证码 ~1KB，主窗口截图 > 50KB
                     if not self._is_captcha_image_valid(image_path):
@@ -1170,7 +1176,20 @@ class PositionService:
                         return True
                     except PollTimeoutError:
                         # poll_until 已轮询 ~7次都失败，无需再查
-                        pass
+                        # 误读存档：识别非空但被客户端拒绝是唯一无证据的
+                        # 失败模式（存档只记"识别为空"），保留图+识别值供
+                        # 离线排查/训练（实测事故：4523/3247 两次自信误读无存档）
+                        try:
+                            import shutil
+                            wrong_path = os.path.join(
+                                "assets", "captcha_archive",
+                                f"wrong_{ocr_text}_{int(time.time() * 1000)}.png")
+                            os.makedirs(os.path.dirname(wrong_path), exist_ok=True)
+                            shutil.copyfile(image_path, wrong_path)
+                            self.logger.warning(
+                                f"验证码被客户端拒绝，已存档误读图: {wrong_path}")
+                        except Exception:
+                            pass
 
                 # 失败：点击取消，重新触发验证码
                 self.logger.warning(f"验证码错误（尝试 {attempt + 1}/{max_retry}）")
@@ -1202,6 +1221,19 @@ class PositionService:
                     pass
 
         self.logger.warning(f"验证码处理失败，已达到最大重试次数 {max_retry}")
+        # 关闭验证码弹窗恢复干净窗口状态：弹窗留着会持续阻塞后续任务的
+        # 激活/发键（实测 0102 弹窗残留占用前台）。下次复制触发时客户端
+        # 会弹出新验证码。仅对弹窗本体操作（_captcha_window），绝不在
+        # 主窗口上按 control_id 找按钮（可能误点主窗口同 id 控件）
+        try:
+            dlg = self._captcha_window
+            if dlg is not None:
+                if not self._click_button(dlg, CAPTCHA_CANCEL_BUTTON_ID):
+                    import win32gui
+                    win32gui.PostMessage(dlg.handle, 0x0010, 0, 0)  # WM_CLOSE
+                self.logger.info("已关闭验证码弹窗，恢复干净窗口状态")
+        except Exception:
+            pass
         raise ApiError(
             ErrorCode.OCR_FAILED,
             f"验证码识别失败，已重试 {max_retry} 次",
@@ -1269,10 +1301,14 @@ class PositionService:
         return False
 
     def _verify_captcha_success(self, window) -> bool:
-        """验证验证码是否成功（输入框消失=成功）
+        """验证验证码是否成功（输入框消失 且 无错误提示 = 成功）
 
-        优先扫描验证码弹窗子树（独立弹窗仅 ~20 个控件，~10ms），
-        弹窗已销毁（descendants 抛异常）视为成功——剪贴板校验仍会兜底。
+        优先扫描验证码弹窗子树（独立弹窗仅 ~20 个控件，~10ms）。
+        两个不能判成功的情形（实测事故源头，曾误报"验证码验证成功"）：
+        1. 红字"验证码错误"提示在场——OCR 自信误读被客户端拒绝
+        2. 弹窗销毁（descendants 抛异常）——误读被拒后客户端会
+           销毁重建弹窗，重建间隙的销毁不代表通过；真正的消失由
+           超时后的重检路径（"弹窗已消失，视为处理成功"）兜底
         弹窗未知时回退主窗口全树扫描（数百控件，~0.8s）。
         """
         captcha_win = self._captcha_window
@@ -1280,11 +1316,21 @@ class PositionService:
             try:
                 input_element = self.window_service.find_element_in_window(
                     captcha_win, CAPTCHA_VERIFY_ID)
-                return input_element is None
-            except Exception:
+                if input_element is not None:
+                    return False
+                # 输入框已消失，还需排除红字错误提示仍挂在弹窗上
+                for el in captcha_win.descendants():
+                    if "错误" in (safe_text(el) or ""):
+                        return False
                 return True
-        input_element = self.window_service.find_element_in_window(window, CAPTCHA_VERIFY_ID)
-        return input_element is None
+            except Exception:
+                return False
+        try:
+            input_element = self.window_service.find_element_in_window(
+                window, CAPTCHA_VERIFY_ID)
+            return input_element is None
+        except Exception:
+            return False
 
     # ------------------------------------------------------------
     # 数据格式化
