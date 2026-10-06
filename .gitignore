@@ -20,10 +20,8 @@ env/
 *.swp
 *.swo
 
-# 日志与诊断产物
-logs/*.log
-logs/banner_samples/
-logs/screenshots/
+# 日志与诊断产物（运行时生成，整体忽略——曾零散忽略致 orders.json 被误追踪）
+logs/
 
 # 本地项目约定（不入库）
 CLAUDE.md
