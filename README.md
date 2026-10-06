@@ -23,6 +23,7 @@ A trading gateway for TongHuaShun `xiadan.exe` — controls the THS order-entry 
 - [Configuration](#configuration)
 - [API](#api): [Response Format](#response-format) / [Error Codes](#error-codes) / [Endpoints](#endpoints) / [Place Order](#post-orders--place-order) / [Order Status & Fill Report](#get-ordersentrust_nostatus--order-status--fill-report) / [Cancel Orders](#post-orderscancel-all--cancel-orders) / [Auxiliary Endpoints](#auxiliary-endpoints) / [Client Timeout Configuration](#client-timeout-configuration)
 - [MCP Server (Agent Access)](#mcp-server-agent-access)
+- [Skill Access (Any LLM Tool)](#skill-access-any-llm-tool)
 - [How It Works](#how-it-works)
 - [Key Design](#key-design): [Task Queue and Watchdog](#task-queue-and-watchdog) / [Idempotency and Price Validation](#idempotency-and-price-validation) / [Classified Popup Handling](#classified-popup-handling) / [Limit/Market Mode Switching](#limitmarket-mode-switching) / [Query Panel Standardization](#query-panel-standardization) / [Captcha OCR](#captcha-ocr--lightweight-template-matching) / [Performance Measurements](#performance-measurements)
 - [Known Limitations](#known-limitations)
@@ -440,6 +441,51 @@ Configuration (environment variables, all optional):
 | `XIADAN_MCP_TRADING` | `0` | `1`/`true` registers `place_order`/`cancel_orders` |
 | `XIADAN_MCP_TIMEOUT_SECONDS` | `60` | HTTP timeout toward the gateway (recommended ≥40) |
 
+## Skill Access (Any LLM Tool)
+
+Besides MCP, the repo ships an [agent skill](.agents/skills/xiadan-gateway/SKILL.md) — no MCP protocol support required: any LLM tool that can execute shell commands (ZCode, Claude Code, Cursor, ...) can operate the gateway through it:
+
+```
+agent ──skill CLI──HTTP──→ gateway (Flask) ──→ xiadan.exe
+```
+
+The skill directory is distributed with the repo (`.agents/skills/xiadan-gateway/`):
+
+- `SKILL.md` — trigger conditions and mandatory operating rules (login gate, verbatim confirm-then-trade workflow, idempotency-key retry semantics, error-code reactions)
+- `scripts/xiadan.py` — a pure-stdlib thin CLI adapter (agents never hand-write `curl` — sidesteps the PowerShell `curl` alias trap and quoting issues)
+- `references/api.md` — the full API contract loaded on demand (params, response fields, complete error-code table)
+
+Installation (pick whichever matches your tool):
+
+| Tool | How |
+|------|-----|
+| ZCode (working inside this repo) | zero-install — `.agents/skills/` is a native ZCode discovery path |
+| ZCode / Claude Code (any project) | copy or link `.agents/skills/xiadan-gateway/` into `~/.zcode/skills/` / `~/.claude/skills/` |
+| Other agents | inject SKILL.md as instructions, or simply allow the agent to call the CLI |
+
+Usage (CLI subcommands map 1:1 to the MCP tools):
+
+```bash
+uv run python .agents/skills/xiadan-gateway/scripts/xiadan.py health
+uv run --no-project python <skill-dir>/scripts/xiadan.py positions
+
+# Trading commands are opt-in (same switch and env vars as the MCP adapter)
+XIADAN_MCP_TRADING=1 uv run python .agents/skills/xiadan-gateway/scripts/xiadan.py \
+    buy --code 601991 --amount 100 --price 10.50
+```
+
+Exposure is layered exactly like the MCP adapter: read-only commands (`health/queue/balance/positions/trades/orders/order-status`) are always available; `buy/sell/cancel` require `XIADAN_MCP_TRADING=1`; `/actions/*` and `/admin/*` are never exposed. Exit codes `0/1/2/3` = success / gateway error / usage error / gateway unreachable.
+
+Safety design:
+
+- The CLI is a thin adapter like the MCP server: pure stdlib, imports nothing from `src/`; queue serialization, idempotency, and alerting are all inherited via the HTTP layer. The env vars (`XIADAN_MCP_URL/TOKEN/CONFIG/TIMEOUT/TRADING`) are shared by both adapters
+- The idempotency key used for an order is printed to stderr — after a timeout, a retry must reuse the same key (same key gets intercepted by the gateway; a new key = a new order)
+- `tests/test_skill_cli.py` (28 hermetic cases) covers the registration surface, argument validation, semantic mapping, and HTTP contract, and guards the SKILL.md safety clauses against drift
+
+> ⚠️ Same red line as MCP: enable trading commands only in agents that support per-command human approval, and never skip the confirm-then-verify workflow in SKILL.md.
+
+MCP-capable clients should still prefer the [MCP server](#mcp-server-agent-access) (structured tool calls parse better than CLI text output); both adapters front the same gateway process.
+
 ## How It Works
 
 ```
@@ -767,7 +813,8 @@ xiadan-gateway/
 ├── tests/
 │   ├── test_core.py             # core-logic unit tests (no real broker client needed)
 │   ├── test_banner_ocr.py       # banner digit OCR unit tests (real banner-strip sample fixtures)
-│   └── test_mcp_server.py       # MCP adapter unit tests (HTTP stubbed, no live server needed)
+│   ├── test_mcp_server.py       # MCP adapter unit tests (HTTP stubbed, no live server needed)
+│   └── test_skill_cli.py        # skill CLI hermetic tests + SKILL.md doc guard
 ├── scripts/
 │   ├── mcp_server.py           # MCP stdio adapter (read-only by default; trading tools behind XIADAN_MCP_TRADING=1)
 │   ├── diagnose_settings.py     # broker UI structure diagnostic
@@ -775,6 +822,9 @@ xiadan-gateway/
 │   ├── train_ocr.py             # iterative OCR training (auto-triggers captchas, tracks accuracy)
 │   ├── test_*.py / explore_*.py # exploration & experiment debug scripts (dev leftovers, run manually)
 │   └── legacy/                  # one-off manual test scripts moved out of tests/ (not collected by pytest)
+├── .agents/
+│   └── skills/
+│       └── xiadan-gateway/      # agent skill (SKILL.md + CLI + API reference, see "Skill Access")
 ├── assets/
 │   ├── digit_templates/          # digit templates (git-tracked, produced by offline training)
 │   └── captcha_archive/          # failed-captcha archive (gitignored, for offline training)

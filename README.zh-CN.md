@@ -23,6 +23,7 @@
 - [配置](#配置)
 - [API 接口](#api-接口)：[响应格式](#响应格式) / [错误码](#错误码) / [接口总表](#接口总表) / [下单](#post-orders--下单) / [委托状态与成交回报](#get-ordersentrust_nostatus--委托状态与成交回报) / [撤单](#post-orderscancel-all--撤单) / [辅助接口](#辅助接口) / [调用方 timeout 配置](#调用方-timeout-配置)
 - [MCP 服务（agent 接入）](#mcp-服务agent-接入)
+- [Skill 接入（任意 agent）](#skill-接入任意-agent)
 - [原理](#原理)
 - [关键设计](#关键设计)：[任务队列与看门狗](#任务队列与看门狗) / [幂等与价格校验](#幂等与价格校验) / [弹窗分类处理](#弹窗分类处理) / [市价/限价切换](#市价限价切换) / [查询面板标准化](#查询面板标准化) / [验证码 OCR](#验证码-ocr--轻量模板匹配) / [性能实测汇总](#性能实测汇总)
 - [已知限制](#已知限制)
@@ -437,6 +438,51 @@ uv sync --extra mcp
 | `XIADAN_MCP_TRADING` | `0` | `1`/`true` 注册 `place_order`/`cancel_orders` |
 | `XIADAN_MCP_TIMEOUT_SECONDS` | `60` | 对网关的 HTTP 超时（建议 ≥40） |
 
+## Skill 接入（任意 agent）
+
+MCP 之外，仓库还自带一个 [agent skill](.agents/skills/xiadan-gateway/SKILL.md)——不要求客户端支持 MCP 协议，任何能执行 shell 命令的 LLM 工具（ZCode、Claude Code、Cursor 等）都能通过它使用网关：
+
+```
+agent ──skill CLI──HTTP──→ 网关(Flask) ──→ xiadan.exe
+```
+
+skill 目录随仓库分发（`.agents/skills/xiadan-gateway/`），包含：
+
+- `SKILL.md` — 触发条件与强制操作准则（登录门、交易前逐字复述确认、幂等键重试语义、错误码应对）
+- `scripts/xiadan.py` — 纯标准库 CLI 薄适配层（agent 不手拼 curl，绕开 PowerShell 的 `curl` 别名陷阱与引号转义问题）
+- `references/api.md` — 按需加载的完整 API 契约（参数 / 响应字段 / 全量错误码）
+
+安装（按所用工具选一种）：
+
+| 工具 | 方式 |
+|------|------|
+| ZCode（在本仓库内工作） | 零安装——`.agents/skills/` 是 ZCode 原生发现路径 |
+| ZCode / Claude Code（任意项目可用） | 把 `.agents/skills/xiadan-gateway/` 复制或链接到 `~/.zcode/skills/` / `~/.claude/skills/` |
+| 其它 agent | 将 SKILL.md 内容作为指令注入，或直接允许其调用 CLI |
+
+用法（CLI 子命令与 MCP 工具一一对应）：
+
+```bash
+uv run python .agents/skills/xiadan-gateway/scripts/xiadan.py health
+uv run --no-project python <skill目录>/scripts/xiadan.py positions
+
+# 交易命令需显式开启（与 MCP 适配器共用同一开关与同一组环境变量）
+XIADAN_MCP_TRADING=1 uv run python .agents/skills/xiadan-gateway/scripts/xiadan.py \
+    buy --code 601991 --amount 100 --price 10.50
+```
+
+暴露面与 MCP 适配器同一套分层：只读命令（`health/queue/balance/positions/trades/orders/order-status`）恒可用；`buy/sell/cancel` 需 `XIADAN_MCP_TRADING=1`；`/actions/*` 与 `/admin/*` 永不暴露。退出码 `0/1/2/3` = 成功 / 网关错误 / 用法错误 / 无法连接。
+
+安全设计：
+
+- CLI 与 MCP 适配器同为「薄适配层」：纯标准库、不 import `src/` 任何模块，队列串行化/幂等/告警全部经 HTTP 层继承；环境变量（`XIADAN_MCP_URL/TOKEN/CONFIG/TIMEOUT/TRADING`）两套适配层通用
+- 下单所用幂等键打印到 stderr——超时后重试必须复用同一键（同键被网关拦截，新键=新订单）
+- `tests/test_skill_cli.py` 密封桩测（28 例）覆盖注册面/参数校验/语义映射/HTTP 契约，并守卫 SKILL.md 安全条款不漂移
+
+> ⚠️ 与 MCP 同一条红线：仅在支持逐次命令人工确认的 agent 中开启交易命令，SKILL.md 的复述确认工作流不能省。
+
+支持 MCP 的客户端仍建议优先用 [MCP 服务](#mcp-服务agent-接入)（结构化工具调用比 CLI 文本输出更易解析）；两个适配层背后是同一个网关进程。
+
 ## 原理
 
 ```
@@ -764,7 +810,8 @@ xiadan-gateway/
 ├── tests/
 │   ├── test_core.py             # 核心逻辑单元测试（无需真实券商客户端）
 │   ├── test_banner_ocr.py       # 横幅数字 OCR 单元测试（真实横幅条带样本夹具）
-│   └── test_mcp_server.py       # MCP 适配层单元测试（桩掉 HTTP，不启动真实服务）
+│   ├── test_mcp_server.py       # MCP 适配层单元测试（桩掉 HTTP，不启动真实服务）
+│   └── test_skill_cli.py        # skill CLI 密封桩测 + SKILL.md 文档守卫
 ├── scripts/
 │   ├── mcp_server.py           # MCP stdio 适配器（缺省只读；交易工具需 XIADAN_MCP_TRADING=1）
 │   ├── diagnose_settings.py     # 券商 UI 结构诊断脚本
@@ -772,6 +819,9 @@ xiadan-gateway/
 │   ├── train_ocr.py             # OCR 迭代训练（自动触发验证码 + 追踪准确率）
 │   ├── test_*.py / explore_*.py # 探索与实验调试脚本（开发期遗留，手工运行）
 │   └── legacy/                  # 从 tests/ 移出的一次性手工测试脚本（pytest 不收集）
+├── .agents/
+│   └── skills/
+│       └── xiadan-gateway/      # agent skill（SKILL.md + CLI + API 参考，见「Skill 接入」）
 ├── assets/
 │   ├── digit_templates/          # 数字模板（Git 跟踪，离线训练生成）
 │   └── captcha_archive/          # 失败验证码存档（gitignore，供离线训练使用）
