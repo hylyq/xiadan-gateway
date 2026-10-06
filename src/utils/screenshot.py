@@ -58,6 +58,27 @@ class ScreenshotUtil:
             self.logger.error(f"全屏截图也失败: {str(e)}")
             return None
 
+    def capture_full_desktop(self, prefix: str = "desktop") -> Optional[str]:
+        """截取整个桌面（全域：任务栏、其他窗口、弹窗位置——完整现场）
+
+        用于清扫残留弹窗前的证据存档：桌面截图与交易窗口截图互补——
+        前者是可见现场的 ground truth（弹窗位置/前台状态），后者含被
+        遮挡区域。受 MAX_SCREENSHOTS/MAX_AGE_DAYS 清理策略约束。
+
+        Returns:
+            截图文件路径，失败返回 None
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{prefix}_{timestamp}.png"
+        filepath = os.path.join(self.screenshot_dir, filename)
+        try:
+            pyautogui.screenshot(filepath)
+            self.logger.info(f"桌面全域截图保存: {filepath}")
+            return filepath
+        except Exception as e:
+            self.logger.warning(f"桌面全域截图失败: {e}")
+            return None
+
     def cleanup_old_screenshots(self) -> int:
         """清理过期截图（保留最近 MAX_SCREENSHOTS 张且不超过 MAX_AGE_DAYS 天）
 

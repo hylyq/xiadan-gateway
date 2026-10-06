@@ -645,13 +645,16 @@ class PositionService:
     # ------------------------------------------------------------
 
     def _sweep_leftover_dialogs(self) -> None:
-        """任务开始前清扫残留弹窗（只关闭，绝不求解、绝不点确认）
+        """任务开始前清扫残留弹窗（先存档，再只关闭，绝不求解/点确认）
 
         残留验证码弹窗多为过期验证码——正确识别正确输入也会被客户端
         拒绝（实测 2492 图像识别无误仍被拒），求解徒增向券商提交错误
         验证码的风险；未知报错弹窗点「确认」更可能有副作用（如下单
         残留报错的确认）。统一用安全手段关闭：只点「取消」（IDCANCEL
         语义）或 WM_CLOSE（等同点 X，对话框默认走取消路径）。
+
+        关闭前存档证据（弹窗一关即失）：桌面全域截图 + 交易窗口截图 +
+        弹窗控件文本入日志，供事后手动排查。
 
         覆盖两种形态：顶层 #32770（风控/独立弹窗）与主窗口的子
         #32770（复制触发类，枚举顶层看不见）。新鲜验证码由复制流程
@@ -665,51 +668,78 @@ class PositionService:
         if window is None:
             return
 
-        closed_any = False
+        # ---- 收集两种形态的残留弹窗 ----
+        targets = []  # [(描述, 弹窗包装器), ...]
 
-        # 形态一：顶层 #32770 弹窗（风控类/独立弹窗，EnumWindows 可见）
         try:
-            dialogs = self.window_service.find_process_dialogs(window.handle)
+            top_hwnds = self.window_service.find_process_dialogs(window.handle)
         except Exception:
-            dialogs = []
-        for dlg_hwnd in dialogs:
+            top_hwnds = []
+        for dlg_hwnd in top_hwnds:
             try:
                 dlg = Application(backend="uia").connect(handle=dlg_hwnd)\
                     .window(handle=dlg_hwnd)
-                title = ""
-                try:
-                    import win32gui
-                    title = win32gui.GetWindowText(dlg_hwnd) or ""
-                except Exception:
-                    pass
-                self.logger.warning(
-                    f"检测到残留顶层弹窗 hwnd={dlg_hwnd:#x} title={title!r}，"
-                    f"安全关闭（取消/WM_CLOSE，不点确认）")
-                self._safe_close_dialog(dlg, window.handle)
-                closed_any = True
+                targets.append((f"顶层弹窗 hwnd={dlg_hwnd:#x}", dlg))
             except Exception as e:
                 self.logger.warning(
-                    f"关闭残留顶层弹窗失败 hwnd={dlg_hwnd:#x}: {e}")
+                    f"包装残留顶层弹窗失败 hwnd={dlg_hwnd:#x}: {e}")
 
-        # 形态二：主窗口的子 #32770 弹窗（复制验证码等，枚举顶层看不见）
         try:
-            children = list(window.children())
+            children_iter = window.children()
         except Exception:
-            children = []
-        for ch in children:
+            children_iter = []
+        for ch in children_iter:
             try:
-                if str(ch.class_name() or "") != "#32770":
-                    continue
-                self.logger.warning(
-                    f"检测到主窗口内残留子弹窗 handle={ch.handle:#x}，"
-                    f"安全关闭（取消/WM_CLOSE，不点确认）")
-                self._safe_close_dialog(ch, window.handle)
-                closed_any = True
-            except Exception as e:
-                self.logger.warning(f"关闭残留子弹窗失败: {e}")
+                if str(ch.class_name() or "") == "#32770":
+                    targets.append((f"主窗口子弹窗 handle={ch.handle:#x}", ch))
+            except Exception:
+                pass
 
-        if closed_any:
-            time.sleep(0.3)  # 等关闭生效
+        if not targets:
+            return
+
+        # ---- 关闭前存档 ----
+        self._archive_before_sweep_close(targets)
+
+        # ---- 安全关闭 ----
+        for desc, dlg in targets:
+            try:
+                self.logger.warning(
+                    f"关闭残留{desc}（取消/WM_CLOSE，不点确认）")
+                self._safe_close_dialog(dlg, window.handle)
+            except Exception as e:
+                self.logger.warning(f"关闭残留{desc}失败: {e}")
+        time.sleep(0.3)  # 等关闭生效
+
+    def _archive_before_sweep_close(self, targets) -> None:
+        """清扫关窗前的证据存档：桌面全域截图 + 交易窗口截图 + 弹窗文本
+
+        截图进入 ScreenshotUtil 目录，受其清理策略约束（保留 200 张/
+        7 天）。存档失败只告警、不影响关闭。
+        """
+        from src.utils.screenshot import ScreenshotUtil
+
+        try:
+            cache_dir = self.config.get_logging_config().get(
+                "screenshot_dir", "logs/screenshots")
+            util = ScreenshotUtil(cache_dir)
+            # 交易窗口截图（UIA 级，含覆盖其上的弹窗，被遮挡区域也能截到）
+            util.capture_trading_window("sweep_leftover_window")
+            # 桌面全域截图（任务栏/其他窗口/弹窗位置——可见现场全貌）
+            util.capture_full_desktop("sweep_leftover_desktop")
+        except Exception as e:
+            self.logger.warning(f"关窗前截图存档失败（不影响关闭）: {e}")
+
+        # 弹窗控件文本 → 日志（可 grep 的证据，截图的文本侧补充）
+        for desc, dlg in targets:
+            try:
+                texts = [safe_text(el) for el in dlg.descendants()]
+                texts = [t for t in texts if t]
+                if texts:
+                    self.logger.warning(
+                        f"残留{desc}控件文本: {' | '.join(texts[:15])}")
+            except Exception:
+                pass
 
     def _safe_close_dialog(self, dlg, main_hwnd: int) -> None:
         """安全关闭弹窗：只取消/WM_CLOSE，绝不点确认

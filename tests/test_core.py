@@ -2926,6 +2926,66 @@ class TestCaptchaSweep:
 
         safe_close.assert_not_called()
 
+    def test_sweep_archives_before_close(self, mocker):
+        """关窗前存档：交易窗口截图 + 桌面全域截图，且先于关闭执行"""
+        svc = self._svc(mocker)
+        mocker.patch.object(svc, "_refresh_window_ref")
+        main = mocker.MagicMock(handle=self.MAIN)
+        svc._cached_window = main
+        svc.window_service.find_process_dialogs.return_value = [0x100]
+        dlg = mocker.MagicMock()
+        dlg.descendants.return_value = []
+        app = mocker.MagicMock()
+        app.connect.return_value = app
+        app.window.return_value = dlg
+        mocker.patch("pywinauto.Application", return_value=app)
+        util = mocker.MagicMock()
+        mocker.patch("src.utils.screenshot.ScreenshotUtil", return_value=util)
+        safe_close = mocker.patch.object(svc, "_safe_close_dialog")
+
+        order = mocker.MagicMock()
+        order.attach_mock(util.capture_trading_window, "win_shot")
+        order.attach_mock(util.capture_full_desktop, "desk_shot")
+        order.attach_mock(safe_close, "close")
+
+        svc._sweep_leftover_dialogs()
+
+        util.capture_trading_window.assert_called_once_with("sweep_leftover_window")
+        util.capture_full_desktop.assert_called_once_with("sweep_leftover_desktop")
+        safe_close.assert_called_once()
+        names = [c[0] for c in order.mock_calls]
+        assert names.index("win_shot") < names.index("close")
+        assert names.index("desk_shot") < names.index("close")
+
+    def test_sweep_no_dialogs_no_archive(self, mocker):
+        """无残留弹窗 → 不截图不关闭（零开销）"""
+        svc = self._svc(mocker)
+        mocker.patch.object(svc, "_refresh_window_ref")
+        main = mocker.MagicMock(handle=self.MAIN)
+        svc._cached_window = main
+        svc.window_service.find_process_dialogs.return_value = []
+        main.children.return_value = []
+        util = mocker.MagicMock()
+        mocker.patch("src.utils.screenshot.ScreenshotUtil", return_value=util)
+        safe_close = mocker.patch.object(svc, "_safe_close_dialog")
+
+        svc._sweep_leftover_dialogs()
+
+        util.capture_trading_window.assert_not_called()
+        safe_close.assert_not_called()
+
+    def test_capture_full_desktop(self, mocker, tmp_path):
+        """capture_full_desktop 调 pyautogui 全屏截图并返回路径"""
+        from src.utils.screenshot import ScreenshotUtil
+        util = ScreenshotUtil(str(tmp_path))
+        shot = mocker.patch("src.utils.screenshot.pyautogui.screenshot")
+
+        result = util.capture_full_desktop("desk")
+
+        assert result is not None
+        assert "desk_" in result and result.endswith(".png")
+        shot.assert_called_once()
+
     def test_safe_close_uses_cancel_not_ok(self, mocker):
         """安全关闭：点「取消」，绝不点「确认」（未知报错弹窗点确认有风险）"""
         from src.constants import CAPTCHA_CANCEL_BUTTON_ID
