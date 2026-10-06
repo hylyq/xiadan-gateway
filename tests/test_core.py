@@ -1732,6 +1732,90 @@ class TestIdempotencyKeyRoute:
         assert "Idempotency-Key" in body["message"]
 
 
+class TestParamChannelsRoute:
+    """POST 传参通道集成测试（get_param 三级通道：JSON body / query string / form body）
+
+    背景：curl -d 缺省按 application/x-www-form-urlencoded 发送，旧实现只认
+    Content-Type=JSON 的 body + query string——`curl -d '{"type":"X"}'`
+    （README 早期示例原样，不带 Content-Type 头）整个 body 被静默丢弃，
+    撤单 type 落回默认 A，撤单范围被静默扩大。
+    """
+
+    @staticmethod
+    def _make_client(monkeypatch, tmp_path):
+        import json
+
+        from src.models import config as config_module
+
+        p = tmp_path / "app_config.json"
+        p.write_text(json.dumps({}, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(config_module, "CONFIG_PATH", str(p))
+        config_module.AppConfig._reset_instance()
+
+        from src.api.routes import create_app
+        app = create_app()
+        app.config["TESTING"] = True
+        return app.test_client()
+
+    def _cancel_with_invalid_type(self, client, **post_kwargs):
+        """非法撤单类型探针：路由层校验（不入队）报错回显 type 值——
+        证明该通道的参数确实被提取而非静默落回默认"""
+        r = client.post("/orders/cancel-all", **post_kwargs)
+        body = r.get_json()
+        assert body["error_code"] == "VALIDATION_ERROR"
+        return body["message"]
+
+    def test_json_body_with_content_type(self, monkeypatch, tmp_path):
+        """JSON body + 正确 Content-Type → 参数提取（既有通道回归）"""
+        client = self._make_client(monkeypatch, tmp_path)
+        assert "Q" in self._cancel_with_invalid_type(client, json={"type": "Q"})
+
+    def test_json_body_without_content_type(self, monkeypatch, tmp_path):
+        """curl -d '{"type":"X"}' 不带 Content-Type（README 早期示例原样）→ 参数仍被提取"""
+        client = self._make_client(monkeypatch, tmp_path)
+        assert "Q" in self._cancel_with_invalid_type(client, data='{"type": "Q"}')
+
+    def test_form_urlencoded_body(self, monkeypatch, tmp_path):
+        """curl -d type=Q（urlencoded form）→ 参数被提取"""
+        client = self._make_client(monkeypatch, tmp_path)
+        assert "Q" in self._cancel_with_invalid_type(client, data={"type": "Q"})
+
+    def test_query_string(self, monkeypatch, tmp_path):
+        """query string 通道（既有通道回归）"""
+        client = self._make_client(monkeypatch, tmp_path)
+        assert "Q" in self._cancel_with_invalid_type(
+            client, query_string={"type": "Q"})
+
+    def test_json_body_outranks_query_string(self, monkeypatch, tmp_path):
+        """通道优先级：JSON body > query string"""
+        client = self._make_client(monkeypatch, tmp_path)
+        msg = self._cancel_with_invalid_type(
+            client, json={"type": "Q"}, query_string={"type": "Z"})
+        assert "Q" in msg and "Z" not in msg
+
+    def test_query_string_outranks_form_body(self, monkeypatch, tmp_path):
+        """通道优先级：query string > form body"""
+        client = self._make_client(monkeypatch, tmp_path)
+        msg = self._cancel_with_invalid_type(
+            client, data={"type": "Q"}, query_string={"type": "Z"})
+        assert "Z" in msg and "Q" not in msg
+
+    def test_valid_form_type_reaches_queue(self, monkeypatch, tmp_path):
+        """form 通道合法 type=X 正向入队（撤买不再被吞成默认 A）"""
+        from src.api.task_queue import TaskQueue
+        client = self._make_client(monkeypatch, tmp_path)
+        captured = {}
+
+        def _submit(self, func, task_name, params, timeout=None):
+            captured.update(params)
+            return {"success": True}
+
+        monkeypatch.setattr(TaskQueue, "submit", _submit)
+        body = client.post("/orders/cancel-all", data={"type": "X"}).get_json()
+        assert body["status"] == "success"
+        assert captured["type"] == "X"
+
+
 class TestEntrustNoVerification:
     """entrust_no 自动对账测试（order.verify_entrust_no，链式入队查询）"""
 

@@ -259,7 +259,7 @@ All responses return HTTP 200; success/failure is distinguished by the JSON `sta
 | GET | `/diagnostic/snapshot` | Screenshot + UI text + OCR (yields to a busy worker for up to 2s, then runs anyway; response carries a `worker_busy` flag) | | 10s |
 | GET | `/diagnostic/history` | Diagnostic history of the last N tasks | | 5s |
 
-> POST endpoints accept both JSON body and query-string parameters.
+> POST endpoints accept parameters via three channels (highest priority first): JSON body (parsed regardless of `Content-Type` — plain `curl -d '{"type":"X"}'` without headers works), query string, and form body (`curl -d type=X`, urlencoded/multipart).
 
 ### POST /orders — Place Order
 

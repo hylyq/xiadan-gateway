@@ -259,7 +259,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | GET | `/diagnostic/snapshot` | 截图 + UI 文本 + OCR（worker 忙时让位等待 2s 后照常执行，响应带 `worker_busy` 标记） | | 10s |
 | GET | `/diagnostic/history` | 最近 N 步任务诊断历史 | | 5s |
 
-> POST 接口同时支持 JSON body 和 query string 传参。
+> POST 接口支持三级传参通道（优先级从高到低）：JSON body（**不依赖 Content-Type**——`curl -d '{"type":"X"}'` 不带头也能解析）→ query string → form body（`curl -d type=X`，urlencoded/multipart）。
 
 ### POST /orders — 下单
 

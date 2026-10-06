@@ -148,7 +148,7 @@ def _maybe_verify_entrust_no(config: AppConfig, task_queue: TaskQueue, result: d
 def xiadan():
     """下单
 
-    参数（JSON body 或 query string 均可）:
+    参数（JSON body / query string / form body 均可）:
         code: 股票代码（必填）
         status: '1'=买入, '2'=卖出（必填）
         amount: 委托数量（可选）
@@ -284,7 +284,7 @@ def xiadan():
 def cancel_all_orders():
     """撤单
 
-    参数（JSON body 或 query string 均可）:
+    参数（JSON body / query string / form body 均可）:
         type: 撤单类型
             - 'A' 或不传: 全部撤单
             - 'X': 撤买

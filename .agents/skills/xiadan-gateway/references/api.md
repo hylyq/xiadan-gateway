@@ -58,7 +58,9 @@ CLI 子命令与 HTTP 端点一一对应；本文供需要理解响应字段全�
 
 - `cancel_type`：操作名（全部撤单/撤买/撤卖/撤最后）
 - `success`：是否执行了撤单（按钮灰显=当前无可撤委托时为 `false`，不算错误）
-- `cancelled_count`：撤单数量（从确认弹窗解析；无弹窗/解析失败为 `null`）
+- `cancelled_count`：撤单数量（从确认弹窗解析；无弹窗/解析失败为 `null`，灰显路径为 0）
+- `confirm_dialog_shown`：是否出现撤单确认弹窗（快速交易模式无弹窗为 `false`）
+- `reason`：仅按钮灰显时返回，如"当前无可撤委托"
 
 ## 幂等键契约（POST /orders）
 

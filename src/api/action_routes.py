@@ -26,7 +26,7 @@ action_bp = Blueprint("action", __name__)
 def send_key():
     """手动发送按键
 
-    参数（JSON body 或 query string 均可）:
+    参数（JSON body / query string / form body 均可）:
         key: 按键，如 F1, F2, Y, {CTRL+C}
 
     示例:
@@ -63,7 +63,7 @@ def send_key():
 def click():
     """鼠标点击坐标
 
-    参数（JSON body 或 query string 均可）:
+    参数（JSON body / query string / form body 均可）:
         x: 横坐标
         y: 纵坐标
 
@@ -112,7 +112,7 @@ def close_dialog():
     使用 SendMessage WM_CLOSE 仅关闭嵌入的子对话框，
     绝不关闭整个券商程序。
 
-    参数（JSON body 或 query string 均可）:
+    参数（JSON body / query string / form body 均可）:
         title: 对话框标题，如 "买入"（可选，留空自动尝试关闭活动子窗口）
 
     示例:
