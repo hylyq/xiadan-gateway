@@ -347,16 +347,14 @@ class TaskQueue(Singleton):
         self.logger.debug(f"任务状态更新（连续跳过依据）: {state}")
 
     def _sweep_blocking_captcha(self) -> None:
-        """任务开始前清扫残留验证码弹窗（求解或关闭，恢复干净窗口）
+        """任务开始前清扫残留弹窗（只关闭，绝不求解/点确认）
 
-        复用 PositionService 的清扫能力（顶层 + 主窗口子弹窗两种形态、
-        OCR 求解优先、失败自动关闭）。无弹窗时开销 ~10ms。
+        复用 PositionService 的清扫能力（顶层 + 主窗口子弹窗两种形态，
+        安全关闭：取消按钮/WM_CLOSE）。无弹窗时开销 ~10ms。
         """
         try:
             from src.services.position_service import PositionService
-            from src.core.ocr import OcrService
-            PositionService(self.window_service, OcrService.get_instance())\
-                ._sweep_blocking_captcha()
+            PositionService(self.window_service)._sweep_leftover_dialogs()
         except Exception as e:
             # 清扫失败不阻断任务——任务自身的激活/发键校验会兜底报错
             self.logger.debug(f"任务前弹窗清扫跳过: {e}")

@@ -644,14 +644,19 @@ class PositionService:
     # 查询面板准备（所有查询的公共前置步骤）
     # ------------------------------------------------------------
 
-    def _sweep_blocking_captcha(self) -> None:
-        """清扫残留的验证码安全弹窗（复用查询流程的求解能力）
+    def _sweep_leftover_dialogs(self) -> None:
+        """任务开始前清扫残留弹窗（只关闭，绝不求解、绝不点确认）
 
-        会话异常期间的输入风暴可能触发客户端风控弹窗（"检测到异常
-        控制数据…为保障账户安全，请输入验证码"），弹窗持有前台，
-        激活/发键全部失败。任务开始时检查同进程 #32770 弹窗，
-        含验证码图片控件（CAPTCHA_IMAGE_ID）的自动 OCR 求解；
-        求解失败不阻断任务，由后续流程按原有路径报错。
+        残留验证码弹窗多为过期验证码——正确识别正确输入也会被客户端
+        拒绝（实测 2492 图像识别无误仍被拒），求解徒增向券商提交错误
+        验证码的风险；未知报错弹窗点「确认」更可能有副作用（如下单
+        残留报错的确认）。统一用安全手段关闭：只点「取消」（IDCANCEL
+        语义）或 WM_CLOSE（等同点 X，对话框默认走取消路径）。
+
+        覆盖两种形态：顶层 #32770（风控/独立弹窗）与主窗口的子
+        #32770（复制触发类，枚举顶层看不见）。新鲜验证码由复制流程
+        当场触发当场求解（实测可靠），清扫关掉的弹窗毫秒级即可重新
+        触发，无损失。
         """
         from pywinauto import Application
 
@@ -659,7 +664,10 @@ class PositionService:
         window = self._cached_window
         if window is None:
             return
-        # 形态一：顶层 #32770 弹窗（风控类，EnumWindows 可见）
+
+        closed_any = False
+
+        # 形态一：顶层 #32770 弹窗（风控类/独立弹窗，EnumWindows 可见）
         try:
             dialogs = self.window_service.find_process_dialogs(window.handle)
         except Exception:
@@ -668,47 +676,22 @@ class PositionService:
             try:
                 dlg = Application(backend="uia").connect(handle=dlg_hwnd)\
                     .window(handle=dlg_hwnd)
-                img = self.window_service.find_element_in_window(
-                    dlg, CAPTCHA_IMAGE_ID)
-                if img is None:
-                    continue  # 非验证码弹窗，交给 close_process_dialogs 兜底
-                self.logger.warning(
-                    f"检测到残留验证码弹窗 hwnd={dlg_hwnd:#x}，自动求解")
-                # 指向弹窗子树做验证（否则 _verify_captcha_success 退回
-                # 主窗口全树扫描，独立弹窗场景会误判成功）
-                self._captcha_window = dlg
-                solved = False
+                title = ""
                 try:
-                    solved = self._solve_captcha(dlg)
-                except Exception as e:
-                    self.logger.warning(f"验证码求解失败 hwnd={dlg_hwnd:#x}: {e}")
-                finally:
-                    self._captcha_window = None
-                if solved:
-                    self.logger.info("残留验证码弹窗求解成功，前台封锁解除")
-                else:
-                    # 求解失败 → 关闭弹窗恢复干净窗口状态（轻量 OCR 仅覆盖
-                    # 数字，含字母的风控验证码必然识别失败；弹窗留着会
-                    # 持续阻塞激活/发键）。查询类验证码后续复制会重新触发，
-                    # 由既有流程求解；风控弹窗若客户端再次弹出则下轮任务
-                    # 再清扫。取消按钮语义最温和，找不到时 WM_CLOSE 兜底。
-                    self.logger.warning(
-                        f"验证码求解未成功，关闭弹窗恢复干净窗口状态 "
-                        f"hwnd={dlg_hwnd:#x}")
-                    try:
-                        if not self._click_button(dlg, CAPTCHA_CANCEL_BUTTON_ID):
-                            self.window_service.close_process_dialogs(
-                                window.handle)
-                    except Exception:
-                        self.window_service.close_process_dialogs(window.handle)
-                    time.sleep(0.3)
+                    import win32gui
+                    title = win32gui.GetWindowText(dlg_hwnd) or ""
+                except Exception:
+                    pass
+                self.logger.warning(
+                    f"检测到残留顶层弹窗 hwnd={dlg_hwnd:#x} title={title!r}，"
+                    f"安全关闭（取消/WM_CLOSE，不点确认）")
+                self._safe_close_dialog(dlg, window.handle)
+                closed_any = True
             except Exception as e:
                 self.logger.warning(
-                    f"清扫验证码弹窗失败 hwnd={dlg_hwnd:#x}: {e}")
+                    f"关闭残留顶层弹窗失败 hwnd={dlg_hwnd:#x}: {e}")
 
-        # 形态二：主窗口的子 #32770 弹窗（复制触发的验证码挂主窗口内，
-        # EnumWindows 只列顶层看不见）。求解以主窗口为根——与正常复制
-        # 流程完全同路径（实测可用），不用弹窗包装器。
+        # 形态二：主窗口的子 #32770 弹窗（复制验证码等，枚举顶层看不见）
         try:
             children = list(window.children())
         except Exception:
@@ -717,42 +700,46 @@ class PositionService:
             try:
                 if str(ch.class_name() or "") != "#32770":
                     continue
-                if self.window_service.find_element_in_window(
-                        ch, CAPTCHA_IMAGE_ID) is None:
-                    continue  # 非验证码子弹窗
                 self.logger.warning(
-                    f"检测到主窗口内残留验证码弹窗 handle={ch.handle:#x}，自动求解")
-                self._captcha_window = ch
-                solved = False
-                try:
-                    solved = self._solve_captcha(window)
-                except Exception as e:
-                    self.logger.warning(f"子弹窗验证码求解失败: {e}")
-                finally:
-                    self._captcha_window = None
-                if solved:
-                    self.logger.info("子弹窗验证码求解成功")
-                else:
-                    self.logger.warning(
-                        "子弹窗验证码求解未成功，关闭弹窗恢复干净窗口状态")
-                    try:
-                        if not self._click_button(ch, CAPTCHA_CANCEL_BUTTON_ID):
-                            import win32gui
-                            import win32con
-                            win32gui.PostMessage(ch.handle, 0x0010, 0, 0)  # WM_CLOSE
-                    except Exception:
-                        pass
-                    time.sleep(0.3)
+                    f"检测到主窗口内残留子弹窗 handle={ch.handle:#x}，"
+                    f"安全关闭（取消/WM_CLOSE，不点确认）")
+                self._safe_close_dialog(ch, window.handle)
+                closed_any = True
             except Exception as e:
-                self.logger.warning(f"清扫子弹窗验证码失败: {e}")
+                self.logger.warning(f"关闭残留子弹窗失败: {e}")
+
+        if closed_any:
+            time.sleep(0.3)  # 等关闭生效
+
+    def _safe_close_dialog(self, dlg, main_hwnd: int) -> None:
+        """安全关闭弹窗：只取消/WM_CLOSE，绝不点确认
+
+        残留弹窗内容未知（可能是下单报错），点「确认」存在不必要
+        的风险；「取消」与 WM_CLOSE（等同点 X，对话框默认走取消
+        路径）语义安全。
+        """
+        try:
+            if self._click_button(dlg, CAPTCHA_CANCEL_BUTTON_ID):
+                return
+        except Exception:
+            pass
+        try:
+            import win32gui
+            win32gui.PostMessage(dlg.handle, 0x0010, 0, 0)  # WM_CLOSE
+        except Exception:
+            try:
+                self.window_service.close_process_dialogs(main_hwnd)
+            except Exception:
+                pass
 
     def _prepare_query_panel(self):
         """切换到 F4 查询面板
 
         连续查询跳过时窗口已在 F4，无需重发 F4。
         """
-        # 残留验证码弹窗持有前台时，激活/发键会全部失败——先清扫再走流程
-        self._sweep_blocking_captcha()
+        # 残留弹窗持有前台时，激活/发键会全部失败——先清扫（只关闭）
+        # 再走流程
+        self._sweep_leftover_dialogs()
         from src.api.task_queue import TaskQueue
         if TaskQueue.get_instance().consume_window_setup_skip():
             self.logger.info("连续查询跳过，窗口已在 F4 面板")
