@@ -14,6 +14,7 @@ import win32process
 
 from src.utils.logger import Logger
 from src.constants import TRADING_WINDOW_TITLE
+from src.models.config import AppConfig
 
 
 class WindowMonitor:
@@ -33,9 +34,8 @@ class WindowMonitor:
     BAD_STATE_RELAUNCH_THRESHOLD = 3
     # 重拉冷却秒数，防止异常状态下高频拉起进程
     RELAUNCH_COOLDOWN_SECONDS = 60.0
-    # 会话断开自愈：检查间隔与 tscon 冷却（秒）
+    # 会话断开自愈：检查间隔（秒）；防抖与冷却时长见 session_monitor 配置
     SESSION_CHECK_INTERVAL = 10.0
-    SESSION_RECOVERY_COOLDOWN = 60.0
     # WTS 连接状态枚举（win32ts）：0=Active 1=Connected 4=Disconnected
     WTS_STATE_DISCONNECTED = 4
 
@@ -50,6 +50,8 @@ class WindowMonitor:
         self._bad_state_count = 0
         self._last_relaunch = 0.0
         self._last_session_recovery = 0.0
+        # 会话首次被观察到断开的时刻（None=当前未处于断开态）——防抖起表点
+        self._disconnected_since: Optional[float] = None
 
     def start(self, app_paths: Union[str, List[str]]) -> bool:
         """启动监控
@@ -197,11 +199,26 @@ class WindowMonitor:
         （WTSActive/Connected）绝不干预——不会把正在使用的 RDP 会话
         劫持到 console 导致对方客户端掉线。
 
-        注意：锁定但挂接 console 的会话（如在 VNC 里按 Win+L）状态为
-        Active，本自愈不处理——请勿在交易会话内锁屏。
+        防重连竞态（2026-10-06 实弹事故）：会话在「客户端走了」与
+        「用户正在重新连接」两种场景下都处于断开态，仅凭状态无法区分
+        ——重连换轨过渡（console→RDP）与输凭据期间均为断开态，此刻
+        tscon 会与 RDP 附加撞车，可能把会话图形栈撞进不可自愈的僵死
+        状态（实测：蓝屏「请稍后」→ 黑屏，最终只能注销重建）。三级
+        防护均为概率消减而非根除，重连前最稳姿势仍是先关闭本自愈：
+        1. session_monitor.enabled=false 完全禁用（reload-config 热生效）
+        2. debounce_seconds：连续断开满此时长才动手——换轨过渡是秒级
+           窗口，快速重连（凭据保存）不会满足防抖
+        3. cooldown_seconds：两次自愈最小间隔——冷却期构成「保护窗」，
+           分钟级短离开的重连天然落在窗内
+        配置每次实时读取（含热重载），未配置时用内置默认值。
         """
-        if time.time() - self._last_session_recovery < self.SESSION_RECOVERY_COOLDOWN:
+        cfg = AppConfig().get_session_monitor_config()
+        if not cfg.get("enabled", True):
+            self._disconnected_since = None
             return
+        cooldown = float(cfg.get("cooldown_seconds", 300))
+        if time.time() - self._last_session_recovery < cooldown:
+            return  # 保护窗内绝不动作（断开计时不清：持续性断开在冷却到期后立即满足防抖）
         try:
             import os
             import subprocess
@@ -214,16 +231,27 @@ class WindowMonitor:
             if isinstance(state, tuple):
                 state = state[0]
             if state != self.WTS_STATE_DISCONNECTED:
+                self._disconnected_since = None  # 会话恢复活动，防抖重新起表
                 return
+
+            now = time.time()
+            debounce = float(cfg.get("debounce_seconds", 30))
+            if self._disconnected_since is None:
+                self._disconnected_since = now
+                self.logger.info(f"会话进入断开态，{debounce:.0f}s 防抖计时开始")
+                return
+            if now - self._disconnected_since < debounce:
+                return  # 断开不满防抖时长：可能是重连换轨的瞬时断开态
 
             sid = win32ts.ProcessIdToSessionId(os.getpid())
             self.logger.warning(
-                f"检测到会话已断开（state={state}），自愈执行: "
+                f"会话持续断开已满 {debounce:.0f}s（state={state}），自愈执行: "
                 f"tscon {sid} /dest:console")
             result = subprocess.run(
                 ["tscon", str(sid), "/dest:console"],
                 capture_output=True, text=True, timeout=15)
             self._last_session_recovery = time.time()
+            self._disconnected_since = None  # 本次断开事件已处理，下次断开重新防抖
             if result.returncode == 0:
                 self.logger.info("会话已重挂 console（含解除锁定），自动化恢复")
             else:

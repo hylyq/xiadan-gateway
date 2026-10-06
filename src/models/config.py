@@ -27,6 +27,11 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "check_interval": 2
     },
+    "session_monitor": {
+        "enabled": True,          # 会话断开自愈开关：手动重连 RDP 前可热关闭（防 tscon 接管竞态）
+        "debounce_seconds": 30,   # 连续断开满此时长才自愈（重连换轨的瞬时断开态不触发）
+        "cooldown_seconds": 300   # 两次自愈最小间隔（冷却期=重连保护窗）
+    },
     "task_queue": {
         "max_size": 50,
         "watchdog_timeout_seconds": 30,
@@ -154,6 +159,10 @@ class AppConfig(Singleton):
     def get_window_monitor_config(self) -> dict:
         return self._config.get("window_monitor", {"enabled": True, "check_interval": 5})
 
+    def get_session_monitor_config(self) -> dict:
+        return self._config.get("session_monitor", {
+            "enabled": True, "debounce_seconds": 30, "cooldown_seconds": 300})
+
     def get_task_queue_config(self) -> dict:
         return self._config.get("task_queue", {
             "max_size": 50,
@@ -249,6 +258,19 @@ class AppConfig(Singleton):
                     errors.append(f"task_queue.{field} 必须 > 0，当前: {v}")
             except (TypeError, ValueError):
                 errors.append(f"task_queue.{field} 必须是数字，当前: {v!r}")
+
+        scfg = self._config.get("session_monitor") or {}
+        if scfg.get("enabled") is not None and not isinstance(scfg.get("enabled"), bool):
+            errors.append(f"session_monitor.enabled 必须是布尔值，当前: {scfg.get('enabled')!r}")
+        for field in ("debounce_seconds", "cooldown_seconds"):
+            v = scfg.get(field)
+            if v is None:
+                continue
+            try:
+                if float(v) < 0:
+                    errors.append(f"session_monitor.{field} 必须 >= 0，当前: {v}")
+            except (TypeError, ValueError):
+                errors.append(f"session_monitor.{field} 必须是数字，当前: {v!r}")
 
         copy_method = (self._config.get("query") or {}).get("copy_method")
         if copy_method is not None and copy_method not in ("keyboard", "message"):

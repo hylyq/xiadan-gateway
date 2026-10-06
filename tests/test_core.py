@@ -609,6 +609,25 @@ class TestConfigValidation:
         errors = c.validate()
         assert any("port" in e for e in errors)
 
+    def test_session_monitor_valid(self, monkeypatch, tmp_path):
+        """session_monitor 合法配置通过校验"""
+        c = self._make_config(monkeypatch, tmp_path, {
+            "session_monitor": {"enabled": False, "debounce_seconds": 60,
+                                "cooldown_seconds": 600},
+        })
+        assert c.validate() == []
+
+    def test_session_monitor_invalid_values(self, monkeypatch, tmp_path):
+        """session_monitor 非布尔开关 / 负数时长 → 报错"""
+        c = self._make_config(monkeypatch, tmp_path, {
+            "session_monitor": {"enabled": "yes", "debounce_seconds": -5,
+                                "cooldown_seconds": "abc"},
+        })
+        errors = c.validate()
+        assert any("session_monitor.enabled" in e for e in errors)
+        assert any("session_monitor.debounce_seconds" in e for e in errors)
+        assert any("session_monitor.cooldown_seconds" in e for e in errors)
+
     def test_port_string_acceptable(self, monkeypatch, tmp_path):
         """port 数字字符串（如 '5000'）→ 通过（int() 转换）"""
         c = self._make_config(monkeypatch, tmp_path, {"port": "5000"})
@@ -2885,6 +2904,14 @@ class TestWindowMonitorSelfHeal:
         m.logger = mocker.MagicMock()
         return m
 
+    def _heal_cfg(self, mocker, **overrides):
+        """会话自愈配置桩（隔离 AppConfig 单例状态，可覆盖字段；返回可变 dict 供中途翻转）"""
+        cfg = {"enabled": True, "debounce_seconds": 30, "cooldown_seconds": 300}
+        cfg.update(overrides)
+        mock_cls = mocker.patch("src.services.window_monitor.AppConfig")
+        mock_cls.return_value.get_session_monitor_config.return_value = cfg
+        return cfg
+
     def test_hidden_window_triggers_restore(self, mocker):
         """隐藏到托盘（非 iconic、不可见）→ 触发软恢复（2026-10-06 实测盲区）"""
         m = self._monitor(mocker)
@@ -3004,6 +3031,7 @@ class TestWindowMonitorSelfHeal:
     def test_session_recovery_skips_when_active(self, mocker):
         """会话 Active（有人正在交互使用）→ 绝不干预，不劫持 RDP"""
         m = self._monitor(mocker)
+        self._heal_cfg(mocker)
         mocker.patch("win32ts.WTSQuerySessionInformation", return_value=0)
         run = mocker.patch("subprocess.run")
 
@@ -3012,9 +3040,12 @@ class TestWindowMonitorSelfHeal:
         run.assert_not_called()
 
     def test_session_recovery_tscon_on_disconnected(self, mocker):
-        """会话已断开 → 用 WTSConnectState 类查询并执行 tscon /dest:console"""
+        """会话持续断开已满防抖 → 用 WTSConnectState 类查询并执行 tscon /dest:console"""
+        import time as _time
         import win32ts
         m = self._monitor(mocker)
+        self._heal_cfg(mocker)
+        m._disconnected_since = _time.time() - 3600  # 断开已满防抖
         query = mocker.patch("win32ts.WTSQuerySessionInformation", return_value=4)
         mocker.patch("win32ts.ProcessIdToSessionId", return_value=2)
         mocker.patch("os.getpid", return_value=1234)
@@ -3033,7 +3064,10 @@ class TestWindowMonitorSelfHeal:
 
     def test_session_recovery_handles_tuple_state(self, mocker):
         """状态返回为元组时取首元素（pywin32 版本差异防御）"""
+        import time as _time
         m = self._monitor(mocker)
+        self._heal_cfg(mocker)
+        m._disconnected_since = _time.time() - 3600
         mocker.patch("win32ts.WTSQuerySessionInformation", return_value=(4,))
         mocker.patch("win32ts.ProcessIdToSessionId", return_value=2)
         mocker.patch("os.getpid", return_value=1234)
@@ -3046,16 +3080,117 @@ class TestWindowMonitorSelfHeal:
         run.assert_called_once()
 
     def test_session_recovery_cooldown(self, mocker):
-        """冷却期内不重复执行 tscon"""
+        """冷却期内不重复执行 tscon（即使断开已满防抖）"""
         import time as _time
         m = self._monitor(mocker)
+        self._heal_cfg(mocker)
         m._last_session_recovery = _time.time()
+        m._disconnected_since = _time.time() - 3600
         mocker.patch("win32ts.WTSQuerySessionInformation", return_value=4)
         run = mocker.patch("subprocess.run")
 
         m._recover_session_if_disconnected()
 
         run.assert_not_called()
+
+
+class TestSessionHealDebounce:
+    """会话自愈防抖/开关/热配置测试（2026-10-06 RDP 重连竞态事故的消减层）
+
+    竞态本质：会话在「客户端走了」与「用户正在重连（输凭据/console→RDP
+    换轨过渡）」两种场景下同为断开态，仅凭状态无法区分。本组测试锁定
+    三级概率消减：enabled 开关 / debounce 防抖 / cooldown 保护窗。
+    """
+
+    def _monitor(self, mocker):
+        from src.services.window_monitor import WindowMonitor
+        m = WindowMonitor(check_interval=0)
+        m.logger = mocker.MagicMock()
+        return m
+
+    def _heal_cfg(self, mocker, **overrides):
+        cfg = {"enabled": True, "debounce_seconds": 30, "cooldown_seconds": 300}
+        cfg.update(overrides)
+        mock_cls = mocker.patch("src.services.window_monitor.AppConfig")
+        mock_cls.return_value.get_session_monitor_config.return_value = cfg
+        return cfg
+
+    def test_disabled_never_heals(self, mocker):
+        """enabled=false → 即使断开已满防抖、冷却已过也绝不 tscon（手动重连的总开关）"""
+        import time as _time
+        m = self._monitor(mocker)
+        self._heal_cfg(mocker, enabled=False)
+        m._disconnected_since = _time.time() - 3600
+        mocker.patch("win32ts.WTSQuerySessionInformation", return_value=4)
+        run = mocker.patch("subprocess.run")
+
+        m._recover_session_if_disconnected()
+
+        run.assert_not_called()
+        assert m._disconnected_since is None
+
+    def test_first_sighting_starts_debounce_without_firing(self, mocker):
+        """首次观察到断开 → 只起表不动作（换轨过渡的瞬时断开态被防抖吸收）"""
+        m = self._monitor(mocker)
+        self._heal_cfg(mocker)
+        mocker.patch("win32ts.WTSQuerySessionInformation", return_value=4)
+        run = mocker.patch("subprocess.run")
+
+        m._recover_session_if_disconnected()
+
+        run.assert_not_called()
+        assert m._disconnected_since is not None
+
+    def test_debounce_not_elapsed_no_fire(self, mocker):
+        """断开时长不足防抖 → 不动作"""
+        import time as _time
+        m = self._monitor(mocker)
+        self._heal_cfg(mocker, debounce_seconds=30)
+        m._disconnected_since = _time.time() - 10
+        mocker.patch("win32ts.WTSQuerySessionInformation", return_value=4)
+        run = mocker.patch("subprocess.run")
+
+        m._recover_session_if_disconnected()
+
+        run.assert_not_called()
+
+    def test_active_resets_debounce_clock(self, mocker):
+        """会话恢复活动 → 防抖重新起表：再次断开需要重新满防抖才可能动作"""
+        import time as _time
+        m = self._monitor(mocker)
+        self._heal_cfg(mocker)
+        m._disconnected_since = _time.time() - 3600  # 之前已满防抖
+        states = iter([0, 4])
+        mocker.patch("win32ts.WTSQuerySessionInformation",
+                     side_effect=lambda *a, **k: next(states))
+        run = mocker.patch("subprocess.run")
+
+        m._recover_session_if_disconnected()  # Active：计时清零
+        assert m._disconnected_since is None
+
+        m._recover_session_if_disconnected()  # 再次断开：首见只起表
+        run.assert_not_called()
+        assert m._disconnected_since is not None
+
+    def test_config_flip_stops_heal_immediately(self, mocker):
+        """配置实时读取：运行中把 enabled 翻为 false 立即生效（热重载语义）"""
+        import time as _time
+        m = self._monitor(mocker)
+        cfg = self._heal_cfg(mocker)
+        m._disconnected_since = _time.time() - 3600
+        mocker.patch("win32ts.WTSQuerySessionInformation", return_value=4)
+        run = mocker.patch(
+            "subprocess.run",
+            return_value=mocker.MagicMock(returncode=0, stderr=""))
+
+        m._recover_session_if_disconnected()
+        assert run.call_count == 1
+
+        m._last_session_recovery = 0.0  # 模拟冷却早已过期
+        m._disconnected_since = _time.time() - 3600
+        cfg["enabled"] = False
+        m._recover_session_if_disconnected()
+        assert run.call_count == 1  # 翻转后不再动作
 
 
 class TestDialogSweep:

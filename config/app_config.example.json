@@ -7,6 +7,11 @@
     "enabled": true,
     "check_interval": 2
   },
+  "session_monitor": {
+    "enabled": true,
+    "debounce_seconds": 30,
+    "cooldown_seconds": 300
+  },
   "task_queue": {
     "max_size": 50,
     "watchdog_timeout_seconds": 30,
