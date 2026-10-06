@@ -2905,11 +2905,20 @@ class TestWindowMonitorSelfHeal:
         return m
 
     def _heal_cfg(self, mocker, **overrides):
-        """会话自愈配置桩（隔离 AppConfig 单例状态，可覆盖字段；返回可变 dict 供中途翻转）"""
+        """会话自愈配置桩（隔离 AppConfig 单例状态，可覆盖字段；返回可变 dict 供中途翻转）
+
+        同时把 RDP 连接检测桩为「无 ESTABLISHED」——消除对真机 3389 状态
+        的依赖（开发机可能正挂着 RDP 会话）。
+        """
+        from types import SimpleNamespace
         cfg = {"enabled": True, "debounce_seconds": 30, "cooldown_seconds": 300}
         cfg.update(overrides)
         mock_cls = mocker.patch("src.services.window_monitor.AppConfig")
         mock_cls.return_value.get_session_monitor_config.return_value = cfg
+        mocker.patch(
+            "src.services.window_monitor.psutil.net_connections",
+            return_value=[SimpleNamespace(laddr=SimpleNamespace(port=3389),
+                                          status="LISTEN")])
         return cfg
 
     def test_hidden_window_triggers_restore(self, mocker):
@@ -3113,7 +3122,21 @@ class TestSessionHealDebounce:
         cfg.update(overrides)
         mock_cls = mocker.patch("src.services.window_monitor.AppConfig")
         mock_cls.return_value.get_session_monitor_config.return_value = cfg
+        from types import SimpleNamespace
+        mocker.patch(
+            "src.services.window_monitor.psutil.net_connections",
+            return_value=[SimpleNamespace(laddr=SimpleNamespace(port=3389),
+                                          status="LISTEN")])
         return cfg
+
+    def _tcp(self, mocker, established: bool):
+        """RDP 端口 TCP 存根：established=True 模拟客户端已连上（密码界面/协商中）"""
+        from types import SimpleNamespace
+        status = "ESTABLISHED" if established else "CLOSE_WAIT"
+        return mocker.patch(
+            "src.services.window_monitor.psutil.net_connections",
+            return_value=[SimpleNamespace(laddr=SimpleNamespace(port=3389),
+                                          status=status)])
 
     def test_disabled_never_heals(self, mocker):
         """enabled=false → 即使断开已满防抖、冷却已过也绝不 tscon（手动重连的总开关）"""
@@ -3191,6 +3214,73 @@ class TestSessionHealDebounce:
         cfg["enabled"] = False
         m._recover_session_if_disconnected()
         assert run.call_count == 1  # 翻转后不再动作
+
+    def test_rdp_connection_holds_heal(self, mocker):
+        """断开事件初期 + RDP 端口有 ESTABLISHED（用户在密码界面/协商中）→ 让路不动手"""
+        import time as _time
+        m = self._monitor(mocker)
+        self._heal_cfg(mocker)
+        m._disconnected_since = _time.time() - 60  # 断开 60s（防抖已满，仍在让路上限内）
+        mocker.patch("win32ts.WTSQuerySessionInformation", return_value=4)
+        self._tcp(mocker, established=True)
+        run = mocker.patch("subprocess.run")
+
+        m._recover_session_if_disconnected()
+
+        run.assert_not_called()
+        assert m._disconnected_since is not None  # 让路不清计时（断开时长持续累计）
+
+    def test_no_rdp_connection_fires(self, mocker):
+        """断开事件初期 + 无 ESTABLISHED（客户端真走了）→ 正常自愈"""
+        import time as _time
+        m = self._monitor(mocker)
+        self._heal_cfg(mocker)
+        m._disconnected_since = _time.time() - 60
+        mocker.patch("win32ts.WTSQuerySessionInformation", return_value=4)
+        self._tcp(mocker, established=False)
+        run = mocker.patch(
+            "subprocess.run",
+            return_value=mocker.MagicMock(returncode=0, stderr=""))
+
+        m._recover_session_if_disconnected()
+
+        run.assert_called_once()
+
+    def test_hold_expires_after_bound(self, mocker):
+        """断开超过让路上限（默认 600s）→ 即使有 ESTABLISHED 也照常自愈
+
+        防 mstsc 挂在密码框无限期阻塞自愈（无人值守主场景不能死）。
+        """
+        import time as _time
+        m = self._monitor(mocker)
+        self._heal_cfg(mocker)
+        m._disconnected_since = _time.time() - 700  # 超过 600s 让路上限
+        mocker.patch("win32ts.WTSQuerySessionInformation", return_value=4)
+        self._tcp(mocker, established=True)
+        run = mocker.patch(
+            "subprocess.run",
+            return_value=mocker.MagicMock(returncode=0, stderr=""))
+
+        m._recover_session_if_disconnected()
+
+        run.assert_called_once()
+
+    def test_detection_failure_fails_open(self, mocker):
+        """连接检测抛异常 → 按「无连接」处理（判别器失效退回三级防护，不阻塞自愈）"""
+        import time as _time
+        m = self._monitor(mocker)
+        self._heal_cfg(mocker)
+        m._disconnected_since = _time.time() - 60
+        mocker.patch("win32ts.WTSQuerySessionInformation", return_value=4)
+        mocker.patch("src.services.window_monitor.psutil.net_connections",
+                     side_effect=RuntimeError("boom"))
+        run = mocker.patch(
+            "subprocess.run",
+            return_value=mocker.MagicMock(returncode=0, stderr=""))
+
+        m._recover_session_if_disconnected()
+
+        run.assert_called_once()
 
 
 class TestDialogSweep:

@@ -36,6 +36,12 @@ class WindowMonitor:
     RELAUNCH_COOLDOWN_SECONDS = 60.0
     # 会话断开自愈：检查间隔（秒）；防抖与冷却时长见 session_monitor 配置
     SESSION_CHECK_INTERVAL = 10.0
+    # 「疑似重连让路」只作用于断开事件的此时长内（秒）：mstsc 停在密码框
+    # 挂几小时时不能无限期阻塞自愈——超过上限照常动作，撞车概率回到
+    # ①+② 三级防护水平（防抖+冷却仍生效）
+    RECONNECT_HOLD_MAX_SECONDS = 600.0
+    # RDP 监听端口（判别「客户端正在连接」用；默认 3389）
+    RDP_LISTEN_PORT = 3389
     # WTS 连接状态枚举（win32ts）：0=Active 1=Connected 4=Disconnected
     WTS_STATE_DISCONNECTED = 4
 
@@ -243,6 +249,19 @@ class WindowMonitor:
             if now - self._disconnected_since < debounce:
                 return  # 断开不满防抖时长：可能是重连换轨的瞬时断开态
 
+            # 重连判别（实测 2026-10-06 两轮实验）：会话级信号（WTSClientName）
+            # 在附加完成前不可见——密码界面期间 client_name 恒为空，与「客户端
+            # 走了」无法区分；TCP 层是唯一先行信号：客户端连上即与 3389 建立
+            # ESTABLISHED，输凭据全程保持。断开态下检测到该连接 = 用户正在
+            # 重连，本次让路。仅作用于断开事件初期（上限内），防 mstsc 挂在
+            # 密码框无限期阻塞自愈。
+            if (now - self._disconnected_since <= self.RECONNECT_HOLD_MAX_SECONDS
+                    and self._rdp_client_connecting()):
+                self.logger.info(
+                    "断开态下 RDP 端口存在 ESTABLISHED 连接——疑似用户正在"
+                    "重连，本次自愈让路")
+                return
+
             sid = win32ts.ProcessIdToSessionId(os.getpid())
             self.logger.warning(
                 f"会话持续断开已满 {debounce:.0f}s（state={state}），自愈执行: "
@@ -260,6 +279,23 @@ class WindowMonitor:
                     f"{(result.stderr or '').strip()}")
         except Exception as e:
             self.logger.warning(f"会话断开自愈失败: {e}")
+
+    def _rdp_client_connecting(self) -> bool:
+        """RDP 监听端口上是否存在 ESTABLISHED 连接（客户端已连上服务器）
+
+        断开态 + 有 ESTABLISHED = 客户端在密码界面/协商中（用户正在重连）；
+        客户端真离开时 TCP 随之关闭（实测：关闭客户端后 ~1s 内归零）。
+        检测失败按「无连接」处理——判别器失效时退回 ①+② 三级防护，
+        不因旁路故障阻塞自愈。
+        """
+        try:
+            for conn in psutil.net_connections(kind="tcp"):
+                if (conn.laddr and conn.laddr.port == self.RDP_LISTEN_PORT
+                        and conn.status == psutil.CONN_ESTABLISHED):
+                    return True
+        except Exception as e:
+            self.logger.warning(f"RDP 连接检测失败（按无连接处理）: {e}")
+        return False
 
     def _process_window_state(self, hwnd: int) -> None:
         """按窗口可见性分派恢复动作（最小化/隐藏 → 软恢复 → 重拉兜底）"""
