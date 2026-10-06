@@ -2986,6 +2986,30 @@ class TestCaptchaSweep:
         assert "desk_" in result and result.endswith(".png")
         shot.assert_called_once()
 
+    def test_segment_keeps_narrow_tall_digit(self):
+        """窄而高的数字'1'不被噪声过滤误杀（0102 实测：3 列宽、12px 高）"""
+        import numpy as np
+        from src.core.ocr_lightweight import LightweightCaptchaOCR
+        ocr = LightweightCaptchaOCR()
+        arr = np.full((30, 74), 255, dtype=np.uint8)
+        arr[5:25, 3:10] = 0      # 宽数字（0）
+        arr[10:22, 21:24] = 0    # 窄但高（12px）—— 数字 '1'
+        arr[5:25, 35:43] = 0     # 宽数字（0）
+        arr[8:20, 52:57] = 0     # 数字（2）
+        regions = ocr._segment_digits(arr)
+        assert len(regions) == 4
+
+    def test_segment_drops_narrow_short_noise(self):
+        """窄且矮的噪声点仍被过滤"""
+        import numpy as np
+        from src.core.ocr_lightweight import LightweightCaptchaOCR
+        ocr = LightweightCaptchaOCR()
+        arr = np.full((30, 74), 255, dtype=np.uint8)
+        arr[5:25, 3:10] = 0      # 正常数字
+        arr[20:23, 50:53] = 0    # 3×3 噪声点（窄且矮）
+        regions = ocr._segment_digits(arr)
+        assert len(regions) == 1
+
     def test_safe_close_uses_cancel_not_ok(self, mocker):
         """安全关闭：点「取消」，绝不点「确认」（未知报错弹窗点确认有风险）"""
         from src.constants import CAPTCHA_CANCEL_BUTTON_ID

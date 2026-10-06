@@ -245,7 +245,9 @@ class LightweightCaptchaOCR:
         # 裁剪 + 归一化
         regions = []
         for left, right in groups:
-            if right - left < 4:  # 忽略太窄的（噪声）
+            # 窄且矮才是噪声；数字 '1' 天生窄（实测 0102 的 '1' 仅 3 列宽
+            # 但笔画高达 12px，曾被纯宽度过滤误杀 → 分段只剩 3 位）
+            if right - left < 4 and v_proj[left:right].max() < 4:
                 continue
             # 微扩展边界
             left = max(0, left - 1)
