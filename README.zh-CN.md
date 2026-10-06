@@ -106,7 +106,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 
 **规则**：
 
-- **RDP 存活规则**——RDP 重连会把会话从 console 拉回 RDP 通道，而普通方式断开 RDP 客户端会**断开并锁定**会话（Windows 安全设计；此时自动化失效——注入的点击落空、前台校验拒绝发键）。恢复只需一条命令：`tscon <id> /dest:console`（会话 id 用 `qwinsta` 查）——以会话属主的管理员身份执行，重挂 console **并同步解除锁定**（实测验证，无需 VNC 登录）。更省事的做法：离开 RDP 时在会话内终端执行 `tscon %sessionname% /dest:console` 代替直接关闭客户端——会话直接落回 console 且完全不锁屏
+- **RDP 存活规则**——RDP 重连会把会话从 console 拉回 RDP 通道，而普通方式断开 RDP 客户端会**断开并锁定**会话（Windows 安全设计；此时自动化失效——注入的点击落空、前台校验拒绝发键）。恢复只需一条命令：`tscon <id> /dest:console`（会话 id 用 `qwinsta` 查）——以会话属主的管理员身份执行，重挂 console **并同步解除锁定**（实测验证，无需 VNC 登录）。更省事的做法：离开 RDP 时在会话内终端执行 `tscon $env:SESSIONNAME /dest:console`（PowerShell）或 `tscon %sessionname% /dest:console`（cmd.exe）代替直接关闭客户端——会话直接落回 console 且完全不锁屏
 - **不要锁屏**（`Win+L` 或带锁定的屏保会切到安全桌面，自动化失效）
 - **注册为 Windows 服务 / 计划任务「不管用户是否登录都要运行」不可行**：它们落在 Session 0，看不到也无法操作交互会话的窗口（窗口枚举为空）。因此开机自启同样要求先有人登录——VNC 登录后手动启动 `xiadan.exe` 与网关
 - 服务器重启后：VNC 连入 → 登录 → 启动 `xiadan.exe` + 券商登录 → 启动网关
