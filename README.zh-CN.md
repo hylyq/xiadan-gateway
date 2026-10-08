@@ -143,7 +143,7 @@ uv run python main.py --dev       # 开发模式（热加载）
     "C:\\同花顺远航版\\transaction\\xiadan.exe",
     "C:\\同花顺软件\\同花顺\\xiadan.exe"
   ],
-  "window_monitor": { "enabled": true, "check_interval": 2 },
+  "window_monitor": { "enabled": true, "check_interval": 2, "login_grace_seconds": 90 },
   "task_queue": {
     "max_size": 50,
     "watchdog_timeout_seconds": 30,
@@ -180,6 +180,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `order.verify_code_input` | true | 输入代码后校验证券名称联动（非空=代码被接受），未联动重输一次仍失败则拒绝提交（`INPUT_VERIFY_FAILED`）。失败路径增加约 3-6s |
 | `ocr.ddddocr_enabled` | false | ddddocr 调试开关（开启后可启用双引擎质检+模板提取，需 `uv sync --extra ocr`） |
 | `window_monitor.enabled` | true | 窗口最小化监控开关 |
+| `window_monitor.login_grace_seconds` | 90 | 登录/启动期避让：券商客户端进程启动后此时长内，窗口隐藏/最小化不自动恢复——登录绘制期强制显示会与客户端自身绘制竞争，造成窗口元素图标错位（2026-10-08 实测：先启动网关、后登录客户端时触发）。年龄判据在客户端自行显示过窗口一次后即解除（首次自行显示=登录完成铁证，此后手动隐藏/最小化立即恢复，不等满宽限期）。另有两级与时长无关的独立判据同样避让：同进程存在可见登录框（#32770 或标题含「登录」）、前台窗口是该进程的其他窗口（用户正在登录框交互）。`0`=关闭年龄判据 |
 | `auth.enabled` | false | Token 认证开关 |
 | `logging.level` | INFO | 日志级别（排查 UIA 控件失效等问题时改 `DEBUG`，热生效无需重启） |
 
@@ -506,7 +507,7 @@ XIADAN_MCP_TRADING=1 uv run python .agents/skills/xiadan-gateway/scripts/xiadan.
 2. **任务队列**：单 worker 线程顺序执行，避免并发操作 `xiadan.exe` 导致 UI 冲突
 3. **UI 自动化**：pywinauto (UIA 后端) 操控控件——读取文本、填写输入框、点击按钮
 4. **OCR 验证码**：Ctrl+C 几乎必然触发验证码弹窗（偶发不触发时有剪贴板兜底，见[查询面板标准化](#查询面板标准化)），轻量模板匹配引擎自动识别（详见 [验证码 OCR](#验证码-ocr--轻量模板匹配)）
-5. **窗口监控**：后台线程定期检测交易窗口状态，最小化时自动恢复
+5. **窗口监控**：后台线程定期检测交易窗口状态，最小化时自动恢复；客户端登录/启动期自动避让（进程年龄/登录框/同进程前台三判据），防止恢复动作与登录绘制竞争造成元素错位
 6. **下单耗时优化**：通过复用 UIA 控件树遍历、流水线模式切换、连续干净跳过等手段大幅压缩单笔耗时（当前实测见[性能实测汇总](#性能实测汇总)）
 
 ## 关键设计

@@ -143,7 +143,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
     "C:\\同花顺远航版\\transaction\\xiadan.exe",
     "C:\\同花顺软件\\同花顺\\xiadan.exe"
   ],
-  "window_monitor": { "enabled": true, "check_interval": 2 },
+  "window_monitor": { "enabled": true, "check_interval": 2, "login_grace_seconds": 90 },
   "task_queue": {
     "max_size": 50,
     "watchdog_timeout_seconds": 30,
@@ -180,6 +180,7 @@ Copy `config/app_config.example.json` to `config/app_config.json` and edit `trad
 | `order.verify_code_input` | true | After typing the code, verify the stock-name linkage (non-empty = code accepted); on no linkage it retypes once, then rejects submission (`INPUT_VERIFY_FAILED`). Adds ~3-6s on the failure path |
 | `ocr.ddddocr_enabled` | false | ddddocr debug switch (dual-engine verification + template extraction; requires `uv sync --extra ocr`) |
 | `window_monitor.enabled` | true | Window-minimized monitoring switch |
+| `window_monitor.login_grace_seconds` | 90 | Login/startup stand-down: while the broker process is younger than this many seconds, a hidden/minimized window is left alone — forcing it visible during login drawing races the client's own drawing and misaligns window elements (observed 2026-10-08 when the gateway starts before the broker login). The age check lifts permanently once the client has shown the window itself (first self-show = login done; a later manual hide restores immediately, no 90s wait). Two duration-independent checks also hold: a visible login dialog (#32770 or title containing 登录) of the same process, or the foreground window being another window of the same process (user mid-login). `0` disables the age check |
 | `auth.enabled` | false | Token auth switch |
 | `logging.level` | INFO | Log level (set `DEBUG` for troubleshooting UIA control failures; hot-applies without restart) |
 
@@ -509,7 +510,7 @@ Browser/script ──HTTP──→ Flask + waitress ──→ TaskQueue ──�
 2. **Task queue**: a single worker thread executes tasks sequentially to prevent concurrent access to `xiadan.exe` from conflicting on the UI
 3. **UI automation**: pywinauto (UIA backend) manipulates controls — reading text, filling inputs, clicking buttons
 4. **OCR captcha**: Ctrl+C almost always triggers a captcha popup (occasionally a copy goes through without one — clipboard fallback, see [Query Panel Standardization](#query-panel-standardization)); a lightweight template-matching engine recognizes it automatically (see [Captcha OCR](#captcha-ocr--lightweight-template-matching))
-5. **Window monitoring**: a background thread periodically checks the trading window state and restores it if minimized
+5. **Window monitoring**: a background thread periodically checks the trading window state and restores it if minimized; it stands down during client login/startup (process age / login dialog / same-process foreground checks) so restoration never races the login drawing
 6. **Order latency optimization**: reusing UIA control-tree traversals, pipelined mode switching, and consecutive-clean-skip cut single-order latency dramatically (current measurements in [Performance Measurements](#performance-measurements))
 
 ## Key Design

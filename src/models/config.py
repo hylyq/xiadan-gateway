@@ -25,7 +25,13 @@ DEFAULT_CONFIG = {
     },
     "window_monitor": {
         "enabled": True,
-        "check_interval": 2
+        "check_interval": 2,
+        # 登录/启动期避让秒数：目标进程启动后此时长内窗口隐藏/最小化不干预
+        # （登录绘制期强制显示会与客户端竞争造成元素图标错位）；窗口被客户端
+        # 自行显示过一次后本判据即解除（登录完成铁证，手动隐藏立即恢复）。
+        # 另有登录框/同进程前台两级与时长无关的独立判据，
+        # 见 WindowMonitor._login_or_startup_hold
+        "login_grace_seconds": 90
     },
     "session_monitor": {
         "enabled": True,          # 会话断开自愈开关：手动重连 RDP 前可热关闭（防 tscon 接管竞态）
@@ -157,7 +163,8 @@ class AppConfig(Singleton):
         return self._config.get("auth", {"enabled": False, "token": ""})
 
     def get_window_monitor_config(self) -> dict:
-        return self._config.get("window_monitor", {"enabled": True, "check_interval": 5})
+        return self._config.get("window_monitor", {
+            "enabled": True, "check_interval": 5, "login_grace_seconds": 90})
 
     def get_session_monitor_config(self) -> dict:
         return self._config.get("session_monitor", {
@@ -271,6 +278,17 @@ class AppConfig(Singleton):
                     errors.append(f"session_monitor.{field} 必须 >= 0，当前: {v}")
             except (TypeError, ValueError):
                 errors.append(f"session_monitor.{field} 必须是数字，当前: {v!r}")
+
+        wcfg = self._config.get("window_monitor") or {}
+        v = wcfg.get("login_grace_seconds")
+        if v is not None:
+            try:
+                if float(v) < 0:
+                    errors.append(
+                        f"window_monitor.login_grace_seconds 必须 >= 0，当前: {v}")
+            except (TypeError, ValueError):
+                errors.append(
+                    f"window_monitor.login_grace_seconds 必须是数字，当前: {v!r}")
 
         copy_method = (self._config.get("query") or {}).get("copy_method")
         if copy_method is not None and copy_method not in ("keyboard", "message"):

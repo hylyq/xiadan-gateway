@@ -5,7 +5,8 @@
   ],
   "window_monitor": {
     "enabled": true,
-    "check_interval": 2
+    "check_interval": 2,
+    "login_grace_seconds": 90
   },
   "session_monitor": {
     "enabled": true,

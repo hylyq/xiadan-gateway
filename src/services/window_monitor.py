@@ -28,6 +28,15 @@ class WindowMonitor:
     2. 软恢复连续 BAD_STATE_RELAUNCH_THRESHOLD 轮无效时，按 trading_app_paths
        重拉 exe 兜底——单实例客户端被再次启动会唤起既有窗口
        （不依赖屏幕坐标，桌面图标位置变化无影响）
+
+    恢复前置的登录/启动期避让（_login_or_startup_hold）：先启动网关、
+    后启动并登录券商客户端时，主窗口在登录期以隐藏态预创建，被 exe
+    全量扫描兜底命中——此时 SW_SHOW/抢前台会与客户端登录绘制竞争，
+    造成窗口元素图标错位（2026-10-08 实测）。避让期不软恢复、不累计
+    坏状态轮数、不重拉，等客户端自行完成登录绘制。窗口被客户端自行
+    显示过一次即视为登录完成，年龄判据对该进程永久解除（用户此后手动
+    隐藏/最小化立即恢复，不等满宽限期——同日复测：重开客户端登录后
+    手动隐藏被误等 90s）。
     """
 
     # 软恢复连续无效多少轮后触发重拉（每轮间隔 check_interval）
@@ -44,6 +53,10 @@ class WindowMonitor:
     RDP_LISTEN_PORT = 3389
     # WTS 连接状态枚举（win32ts）：0=Active 1=Connected 4=Disconnected
     WTS_STATE_DISCONNECTED = 4
+    # 登录/启动期避让：目标进程年龄低于此时长时不干预窗口（秒）。
+    # 另有两级与时长无关的独立判据（登录框/同进程前台窗口），
+    # 见 _login_or_startup_hold；0=关闭年龄判据（另两级判据仍生效）
+    LOGIN_GRACE_SECONDS = 90.0
 
     def __init__(self, check_interval: float = 2.0):
         self.logger = Logger.get_instance()
@@ -58,6 +71,12 @@ class WindowMonitor:
         self._last_session_recovery = 0.0
         # 会话首次被观察到断开的时刻（None=当前未处于断开态）——防抖起表点
         self._disconnected_since: Optional[float] = None
+        # 登录/启动期避让中（进出避让各记一条日志，避免每 2s 刷屏）
+        self._login_hold_active = False
+        # 本进程生命周期内目标窗口是否被见过可见（客户端自行显示过一次
+        # = 登录完成铁证，年龄判据即解除）；按 PID 记账，见 _process_window_state
+        self._target_pid: Optional[int] = None
+        self._seen_visible = False
 
     def start(self, app_paths: Union[str, List[str]]) -> bool:
         """启动监控
@@ -97,6 +116,9 @@ class WindowMonitor:
                 return
             self._running = False
             self._target_hwnd = None
+            self._login_hold_active = False
+            self._target_pid = None
+            self._seen_visible = False
             self.logger.info("窗口监控已停止")
 
     def is_running(self) -> bool:
@@ -330,9 +352,106 @@ class WindowMonitor:
             self.logger.warning(f"RDP 连接检测失败（按无连接处理）: {e}")
         return False
 
+    def _login_or_startup_hold(self, hwnd: int) -> bool:
+        """登录/启动期避让判定：True=客户端正在登录/初始化，暂不干预窗口
+
+        【事故】2026-10-08：先启动网关、后启动并登录券商客户端。登录期
+        主窗口以隐藏态预创建（此时标题未必就绪，窗口查找由 exe 全量扫描
+        兜底命中），监控把它当「隐藏到托盘」执行 SW_SHOW+抢前台，与客户
+        端自身的登录绘制竞争，造成窗口元素图标错位。
+
+        【三判据】任一命中即避让（按开销从低到高探测）：
+        1. 本进程生命周期内目标窗口尚未被见过可见（客户端自行显示过
+           一次 = 登录完成铁证，本判据对该进程即永久解除——用户此后
+           手动隐藏/最小化立即恢复，不等满宽限期），且进程年龄 <
+           login_grace_seconds（配置项，默认 90s；登录全程通常 <60s，
+           留余量）——覆盖登录绘制的常规时窗
+        2. 前台窗口属于同进程且不是目标窗口——用户正在该程序的登录框/
+           验证码等其他窗口上交互，抢前台会打断输入（标题无关，兜住
+           登录框标题不含「登录」字样的情况）
+        3. 同进程存在可见的对话框（#32770）或标题含「登录」的顶层窗口
+           ——用户停在登录界面时（不论停留多久）都不应强制显示主窗口，
+           覆盖判据 1 超时后仍停在登录框的长尾场景
+
+        【失效域】三判据全空（进程已老 + 无登录框 + 前台在别处）而主窗口
+        仍隐藏时照常恢复——这正是网关先于客户端重启、窗口停在托盘的
+        生产自愈场景，不能误伤。残余：登录框标题不含「登录」且非 #32770
+        且用户晾在登录界面超过宽限期且前台在别的程序——理论窗口，后果
+        回到图标错位级别，接受。
+
+        判定异常按「不避让」处理，不因旁路故障阻塞既有恢复链路
+        （与 _rdp_client_connecting 同哲学）。配置每次实时读取（含热重载）。
+        """
+        try:
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            proc = psutil.Process(pid)
+
+            cfg = AppConfig().get_window_monitor_config()
+            grace = float(cfg.get("login_grace_seconds", self.LOGIN_GRACE_SECONDS))
+            # 年龄判据只作用于「本进程内窗口尚未被见过可见」——见过即
+            # 登录完成，此后手动隐藏/最小化立即恢复（记账见 _process_window_state）
+            if (not self._seen_visible and grace > 0
+                    and time.time() - proc.create_time() < grace):
+                return True
+
+            fg = win32gui.GetForegroundWindow()
+            if fg and fg != hwnd:
+                _, fg_pid = win32process.GetWindowThreadProcessId(fg)
+                if fg_pid == pid:
+                    return True
+
+            dialogs: List[int] = []
+
+            def dialog_callback(h, _):
+                if h == hwnd or not win32gui.IsWindowVisible(h):
+                    return True
+                _, p = win32process.GetWindowThreadProcessId(h)
+                if p == pid:
+                    title = win32gui.GetWindowText(h)
+                    if (win32gui.GetClassName(h) == "#32770"
+                            or (title and "登录" in title)):
+                        dialogs.append(h)
+                return True
+
+            win32gui.EnumWindows(dialog_callback, None)
+            return bool(dialogs)
+        except Exception as e:
+            self.logger.warning(f"登录/启动期判定失败（按不避让处理）: {e}")
+            return False
+
     def _process_window_state(self, hwnd: int) -> None:
-        """按窗口可见性分派恢复动作（最小化/隐藏 → 软恢复 → 重拉兜底）"""
-        if win32gui.IsIconic(hwnd) or not win32gui.IsWindowVisible(hwnd):
+        """按窗口可见性分派恢复动作（最小化/隐藏 → 软恢复 → 重拉兜底）
+
+        恢复前置登录/启动期避让（_login_or_startup_hold）：避让轮不算
+        「软恢复无效」轮（防登录慢时误触发重拉弹第二个登录框抢前台），
+        进出避让各记一条日志。
+
+        顺带维护「本进程生命周期内目标窗口是否被见过可见」：客户端自行
+        显示过一次 = 登录铁定完成，此后年龄判据永久解除（用户再手动
+        隐藏/最小化立即恢复，不等满宽限期）。按 PID 记账——窗口句柄
+        可能被客户端重建，进程身份才是稳定键；最小化（iconic）不算
+        「自行显示」。
+        """
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        if pid != self._target_pid:
+            self._target_pid = pid
+            self._seen_visible = False
+        visible = win32gui.IsWindowVisible(hwnd) and not win32gui.IsIconic(hwnd)
+        if visible:
+            self._seen_visible = True
+        if not visible:
+            if self._login_or_startup_hold(hwnd):
+                self._bad_state_count = 0
+                if not self._login_hold_active:
+                    self._login_hold_active = True
+                    state = "最小化" if win32gui.IsIconic(hwnd) else "隐藏（托盘）"
+                    self.logger.info(
+                        f"目标窗口{state}，但客户端处于登录/启动期，暂不恢复"
+                        f"（避免与登录绘制竞争造成元素错位）")
+                return
+            if self._login_hold_active:
+                self._login_hold_active = False
+                self.logger.info("登录/启动期结束，恢复窗口监控干预")
             state = "最小化" if win32gui.IsIconic(hwnd) else "隐藏（托盘）"
             self.logger.info(f"检测到目标窗口已{state}，正在恢复...")
             self._bad_state_count += 1
@@ -343,6 +462,9 @@ class WindowMonitor:
                 self._relaunch_app(hwnd)
                 self._bad_state_count = 0
         else:
+            if self._login_hold_active:
+                self._login_hold_active = False
+                self.logger.info("目标窗口已由客户端自行显示，登录/启动期避让结束")
             self._bad_state_count = 0
 
     def _relaunch_app(self, hwnd: Optional[int] = None) -> bool:
