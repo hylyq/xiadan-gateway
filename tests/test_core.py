@@ -386,6 +386,19 @@ class TestSubmitErrorClassification:
         assert code == ErrorCode.SHORT_SELLING_FORBIDDEN, f"期望 SHORT_SELLING_FORBIDDEN，实际 {code}"
         assert "不允许卖空" in msg
 
+    def test_short_selling_no_position_live_wording(self):
+        """卖空限制（无持仓，实盘措辞）→ SHORT_SELLING_FORBIDDEN
+
+        2026-10-08 实盘实测：该券商实盘弹窗只有「持仓」没有「持仓信息」，
+        且附「报告问题」按钮（文本提取混入）——旧规则差两字未命中，
+        降级为 ORDER_SUBMIT_FAILED。规则已放宽为「持仓」。
+        """
+        text = "提交失败：该客户无证券:000001持仓。\n报告问题"
+        code, msg, suggestion = self._classify(text)
+        from src.exceptions import ErrorCode
+        assert code == ErrorCode.SHORT_SELLING_FORBIDDEN, f"期望 SHORT_SELLING_FORBIDDEN，实际 {code}"
+        assert "不允许卖空" in msg
+
     def test_insufficient_shares(self):
         """可卖数量不足 → INSUFFICIENT_SHARES（回归）
         用"可用余额不足"避免 hit T1_RESTRICTION_KEYWORDS 中的"可卖数量" """
