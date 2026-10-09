@@ -107,7 +107,7 @@ def get_order_status(entrust_no: str):
     task_queue = TaskQueue.get_instance()
     try:
         if not (entrust_no.isdigit() and 6 <= len(entrust_no) <= 24):
-            from src.core.exceptions import ApiError, ErrorCode
+            from src.exceptions import ApiError, ErrorCode
             raise ApiError(
                 ErrorCode.VALIDATION_ERROR,
                 f"entrust_no 格式错误: {entrust_no}",
