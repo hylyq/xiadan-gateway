@@ -1171,6 +1171,21 @@ class PositionService:
 
                 self.logger.info(f"OCR 识别结果: {ocr_text}")
 
+                # 输入前先真实点击输入框聚焦（2026-10-09 定案修复）：
+                # 验证码弹窗未被客户端置前台时，input_text_to_element 的
+                # set_focus 静默失效、type_keys 落空——用户目击弹窗输入框
+                # 始终为空、OCR 识别值却与存档图完全一致（rejected_* 系列
+                # 四张）。真实点击（click_input）同时完成「弹窗置前 + 输入
+                # 框聚焦」，是主窗口输入框不需要而弹窗输入框必需的前置。
+                try:
+                    input_el = self.window_service.find_element_in_window(
+                        window, CAPTCHA_INPUT_ID, descendants=_descendants)
+                    if input_el is not None:
+                        input_el.click_input()
+                        time.sleep(0.1)
+                except Exception as click_err:
+                    self.logger.warning(f"验证码输入框点击聚焦失败: {click_err}")
+
                 # 输入验证码 + 点击确定（复用缓存的 descendants）
                 with timed("输入验证码", self.logger):
                     self.window_service.input_text_to_element(
