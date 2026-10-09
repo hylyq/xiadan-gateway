@@ -39,6 +39,7 @@ class ErrorCode:
     # 队列相关 (503)
     QUEUE_TIMEOUT = "QUEUE_TIMEOUT"                 # 任务排队超时
     QUEUE_FULL = "QUEUE_FULL"                       # 队列已满
+    SESSION_UNAVAILABLE = "SESSION_UNAVAILABLE"     # RDP 会话断开（任务未执行即快速拒绝）
 
     # 超时 (504)
     TASK_TIMEOUT = "TASK_TIMEOUT"                              # 任务超时，恢复成功
@@ -71,6 +72,7 @@ HTTP_STATUS = {
     ErrorCode.INTERNAL_ERROR: 500,
     ErrorCode.QUEUE_TIMEOUT: 503,
     ErrorCode.QUEUE_FULL: 503,
+    ErrorCode.SESSION_UNAVAILABLE: 503,
     ErrorCode.TASK_TIMEOUT: 504,
     ErrorCode.TASK_TIMEOUT_RECOVERY_FAILED: 504,
 }

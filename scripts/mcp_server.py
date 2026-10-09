@@ -67,6 +67,8 @@ INSTRUCTIONS = """同花顺 xiadan.exe 交易网关（本服务是 HTTP API 的 
 4. 错误以 [ERROR_CODE] message 形式返回，常见码:
    DUPLICATE_ORDER=60 秒内相同参数被幂等拦截（先查委托确认是否已提交）;
    TASK_TIMEOUT=结果未知（必须查 get_today_orders 核实，不可直接重试下单）;
+   SESSION_UNAVAILABLE=网关 RDP 会话断开，任务未执行（等 session 恢复后重试
+   安全，通常 ~40s，无需查单）;
    PRICE_OUT_OF_RANGE=价格超涨跌停; INSUFFICIENT_BALANCE/SHARES=资金或份额不足;
    T1_RESTRICTION=当日买入次日才可卖; ORDER_PRICE_REQUIRED=券商要求显式价格。
 5. 网关单 worker 串行执行，任何工具耗时 2~10 秒属正常，勿因慢而并发重试。"""

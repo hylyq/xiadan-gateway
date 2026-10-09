@@ -17,7 +17,8 @@
     "max_size": 50,
     "watchdog_timeout_seconds": 30,
     "query_timeout_seconds": 30,
-    "confirm_timeout_seconds": 10
+    "confirm_timeout_seconds": 10,
+    "session_gate_enabled": true
   },
   "idempotency": {
     "order_dedup_window_seconds": 60

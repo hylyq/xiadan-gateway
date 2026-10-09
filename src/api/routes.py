@@ -19,6 +19,7 @@ from src.api.response import (
 from src.api.task_queue import TaskQueue
 from src.models.config import AppConfig
 from src.utils.logger import Logger
+from src.utils.session_state import session_health
 
 
 def create_app() -> Flask:
@@ -138,6 +139,11 @@ def _register_system_routes(app: Flask) -> None:
             "version": "1.0.0",
             "xiadan_running": xiadan_running,
             "logged_in": logged_in,
+            # 会话连接状态（WTS）：logged_in=false 无法区分「券商登出」与
+            # 「RDP 会话断开」，session 字段消歧——断开态下任务会被会话
+            # 健康门快速拒绝（SESSION_UNAVAILABLE）。ui_available=null
+            # 表示查询失败（未知），非 false（确定不可用）
+            "session": session_health(),
             # 注意: 不返回 trading_app_paths（本机路径不对未认证访客暴露）
             "queue_status": task_queue.get_status(),
             "stats": task_queue.get_stats(),

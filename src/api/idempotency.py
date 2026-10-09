@@ -30,7 +30,9 @@ def should_keep_record_on_error(e: Exception) -> bool:
     - TaskTimeoutError（看门狗超时）：任务可能仍在执行 → 保留
     - QUEUE_TIMEOUT：submit 等待超时返回错误，但任务仍在队列中、
       稍后仍会被执行——此时清除记录并让客户端重试，两单都会成交 → 保留
-    - 其余失败（业务报错/参数校验/队列满）：任务确定未执行 → 清除以便重试
+    - 其余失败（业务报错/参数校验/队列满/会话健康门拒绝 SESSION_UNAVAILABLE）：
+      任务确定未执行 → 清除以便重试（SESSION_UNAVAILABLE 在任务开始前
+      毫秒级拒绝、未触碰客户端，恢复后同 key 重试即正常执行）
     """
     if isinstance(e, TaskTimeoutError):
         return True

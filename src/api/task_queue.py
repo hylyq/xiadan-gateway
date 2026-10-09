@@ -6,6 +6,8 @@
 - 状态重置: 每个任务开始前 激活 + ESC×3（重置到 F1 买入界面）
 - 僵尸检测: 超过阈值的任务被标记
 - 队列限制: 最大 50 个待处理任务
+- 会话健康门: 任务执行前检查 WTS 连接状态，RDP 断开态毫秒级快速拒绝
+  （SESSION_UNAVAILABLE，任务未执行；fail-open，见 _session_gate_reject）
 
 【关键设计】
 看门狗触发后，必须完成所有恢复步骤后才 task['event'].set()，
@@ -20,7 +22,11 @@ from typing import Callable, Any, Optional, List
 
 from src.exceptions import TaskTimeoutError, ApiError, ErrorCode
 from src.models.config import AppConfig
+from src.services.window_monitor import WindowMonitor
 from src.services.window_service import WindowService
+from src.utils.session_state import (
+    get_session_state, state_name, WTS_DISCONNECTED
+)
 from src.utils.alert import send_alert
 from src.utils.diagnostic import DiagnosticUtil
 from src.utils.logger import Logger
@@ -44,6 +50,10 @@ class Task:
         # 标记是否已被看门狗判定为超时
         # 用于 worker 在 finally 中丢弃迟到的 result，避免状态污染
         self.is_timeout: bool = False
+        # 会话健康门拒绝标记：任务因 RDP 断开未执行即被拒——
+        # 统计上计入 recent_tasks 但豁免连续失败计数（那是「xiadan.exe
+        # 异常」告警，文案会误导；会话断开是已知基础设施不可用）
+        self.precheck_rejected: bool = False
         # 业务代码通过 report_window_state 装饰器写入的窗口状态
         # {"had_dialog": bool, "clean": bool} —— 连续同组跳过的决策依据
         self.window_state: Optional[dict] = None
@@ -123,6 +133,12 @@ class TaskQueue(Singleton):
         self._last_task_info: Optional[dict] = None
         self._skip_window_setup = False
 
+        # 会话不可用事件日志去重（worker 线程私有，与 _login_hold_active
+        # 同模式）：进入断开拒首个任务记一条 warning、恢复后首个任务记
+        # 一条 info，不逐任务刷屏。仅在观察到「非 None 健康态」时复位——
+        # None（查询失败）不复位，防查询抖动反复刷「恢复」日志
+        self._session_unavailable_logged = False
+
         # 启动 worker 线程
         self._worker = threading.Thread(target=self._worker_loop, daemon=True, name="Task-Worker")
         self._worker.start()
@@ -175,6 +191,103 @@ class TaskQueue(Singleton):
             raise task.error
         return task.result
 
+    def _session_gate_reject(self, task: Task) -> bool:
+        """会话健康门：任务执行前检查 WTS 连接状态，断开态快速拒绝
+
+        背景：RDP 直接断开会话进入 WTSDisconnected 态（无活动桌面），
+        click_input/前台发键全部失败，到自愈完成之间存在不可用阶段
+        （典型 ~40s = 检查间隔 10s + 防抖 30s；冷却期内再次断开最长
+        ~340s）。此前任务照常执行，落空/挂起后等 30s 看门狗报
+        TASK_TIMEOUT——既慢又触发 task_timeout 告警噪音。
+
+        判定：只拦 WTSDisconnected(4)——与 WindowMonitor 自愈动作条件
+        精确镜像（单一事实源 src/utils/session_state.py）。直查而非读
+        监控线程维护的标志位：无检测盲窗（断开即查得 4）、不依赖监控
+        线程存活/开关（手动编排重连热关闭自愈时门照常工作）。
+
+        fail-open（双重）：查询返回 None（win32ts 异常）放行，门自身
+        任何异常放行——误放行由看门狗兜底（最坏 = 现状），误拒绝没有
+        兜底。Connected(1) 等附加过渡瞬态放行：秒级瞬态撞上概率与
+        无门时代相同，未变差。
+
+        拒绝路径不触碰任何 UI：不起看门狗、不弹窗清扫、不做窗口准备
+        （后两者本身是 UI 操作，正是要防的）；也不清 _last_task_info
+        （窗口未被触碰，上笔干净退出的连续跳过依据跨不可用窗口仍成立，
+        恢复后首个同组任务仍能享受跳过优化）。幂等语义：此错误不在
+        should_keep_record_on_error 的保留列表 → 路由层自动清除记录，
+        同 Idempotency-Key 立即可重试（与 TASK_TIMEOUT 相反：那是
+        「可能已执行」必须保留）。
+
+        开关 task_queue.session_gate_enabled 每次实时读取（支持
+        /admin/reload-config 热切换逃生）。
+
+        Returns:
+            True=任务已被拒绝并完成善后（event/task_done/统计），worker
+            应 continue；False=放行，正常执行
+        """
+        try:
+            enabled = self.config.get_task_queue_config().get(
+                "session_gate_enabled", True)
+            if not enabled:
+                return False
+            state = get_session_state()
+        except Exception as e:  # 双保险：门自身故障绝不阻塞 worker 主循环
+            self.logger.warning(f"会话门检查异常（放行任务）: {e}")
+            return False
+
+        if state != WTS_DISCONNECTED:
+            # None（查询失败）同样走到这里 → fail-open 放行
+            if state is not None and self._session_unavailable_logged:
+                self._session_unavailable_logged = False
+                self.logger.info(
+                    f"会话已恢复（{state_name(state)}），任务恢复正常执行")
+            return False
+
+        # 恢复时长按「区间+条件」表述（实时从配置算术得出），不承诺精确
+        # ETA——worker 无从知晓监控线程当前处于防抖第几秒、是否在冷却期
+        sm_cfg = self.config.get_session_monitor_config()
+        debounce = float(sm_cfg.get("debounce_seconds", 30))
+        cooldown = float(sm_cfg.get("cooldown_seconds", 300))
+        interval = WindowMonitor.SESSION_CHECK_INTERVAL
+        typical = debounce + interval
+        worst = cooldown + debounce + interval
+
+        task.precheck_rejected = True
+        task.error = ApiError(
+            error_code=ErrorCode.SESSION_UNAVAILABLE,
+            message=(f"RDP 会话处于断开态（WTSConnectState=4/Disconnected），"
+                     f"桌面不可用，任务 {task.name} 未执行"),
+            suggestion=(
+                f"任务确定未执行，未触碰券商客户端。会话自愈通常 ~{typical:.0f}s"
+                f"内完成（防抖 {debounce:.0f}s + 检查间隔 {interval:.0f}s）；"
+                f"若自愈冷却期（{cooldown:.0f}s）内再次断开，最长可延迟至 "
+                f"~{worst:.0f}s。可轮询 GET /health 的 session.ui_available"
+                f"=true 后重试；下单重试请复用同一 Idempotency-Key"
+                f"（本次记录已自动清除，安全）"
+            ),
+            details={
+                "task": task.name,
+                "params": task.params,
+                "connect_state": state,
+                "state_name": state_name(state),
+                "typical_recovery_seconds": round(typical),
+                "worst_case_recovery_seconds": round(worst),
+            },
+        )
+        if not self._session_unavailable_logged:
+            self._session_unavailable_logged = True
+            self.logger.warning(
+                f"会话处于断开态，任务将被快速拒绝（SESSION_UNAVAILABLE）"
+                f"直至自愈恢复（通常 ~{typical:.0f}s，冷却期场景最长 "
+                f"~{worst:.0f}s）")
+
+        # 善后全部完成后才释放调用方：submit 返回错误时统计已落账，
+        # 调用方观察到的状态是确定性的（event.set() 放最后）
+        self._queue.task_done()  # 每次 get() 必须配对，否则 queue.join() 永久挂起
+        self._record_task_outcome(task)  # 计入统计，豁免连续失败计数
+        task.event.set()
+        return True
+
     def _worker_loop(self) -> None:
         """工作线程主循环"""
         self.logger.info("任务 worker 线程已启动")
@@ -182,6 +295,12 @@ class TaskQueue(Singleton):
         while True:
             task = self._queue.get()
             task.start_time = time.time()
+
+            # 会话健康门：断开态快速拒绝（在 current_task 设置/看门狗启动/
+            # 任何窗口准备之前——continue 在下方 try/finally 之外，拒绝路径
+            # 天然跳过全部 UI 触碰与状态跟踪）
+            if self._session_gate_reject(task):
+                continue
 
             with self._lock:
                 self._current_task = task
@@ -484,7 +603,14 @@ class TaskQueue(Singleton):
             error_code = getattr(task.error, "error_code", ErrorCode.INTERNAL_ERROR)
         with self._stats_lock:
             self._recent_tasks.append((time.time(), task.error is None, error_code))
-            if task.error is not None:
+            # 会话门拒绝豁免连续失败计数：那是「xiadan.exe/券商持续异常」
+            # 告警（文案指向人工检查客户端），而会话断开是已知的基础设施
+            # 不可用（进入断开时已有一条事件级 warning），计数只会产生
+            # 误导噪音——计数器原值保留（不增也不清零：断开期不该稀释
+            # 此前真实异常的计数语义）
+            if task.error is None:
+                self._consecutive_failures = 0
+            elif not getattr(task, "precheck_rejected", False):
                 self._consecutive_failures += 1
                 if self._consecutive_failures == 3:
                     self.logger.warning(
@@ -512,8 +638,6 @@ class TaskQueue(Singleton):
                                  "last_error_code": error_code},
                         level="error",
                     )
-            else:
-                self._consecutive_failures = 0
 
         self._track_order_dialog_behavior(task)
 

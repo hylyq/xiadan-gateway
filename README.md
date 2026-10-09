@@ -95,7 +95,7 @@ The gateway drives `xiadan.exe` with **real mouse/keyboard input** (`SetForegrou
 
 | Access mode | After the client disconnects | Automation |
 |---|---|---|
-| **RDP plain disconnect (default path)** | Session disconnects + locks → **session self-healing runs `tscon` automatically (lock cleared too)** | ⚠️ Brief outage (~10-30s), then auto-recovery ✅ Verified with the VNC server stopped: balance/positions/trades queries all recovered |
+| **RDP plain disconnect (default path)** | Session disconnects + locks → **session self-healing runs `tscon` automatically (lock cleared too)** | ⚠️ Brief outage (~10-30s), then auto-recovery; during the outage window tasks are **rejected in milliseconds by the session health gate** (`SESSION_UNAVAILABLE`, task not executed) instead of waiting out the 30s watchdog ✅ Verified with the VNC server stopped: balance/positions/trades queries all recovered |
 | RDP + `tscon $env:SESSIONNAME /dest:console` (PowerShell) / `tscon %sessionname% /dest:console` (cmd.exe) on exit | Session lands on the console seamlessly, no lock | ✅ Keeps working (zero-downtime path, for outage-sensitive setups) |
 | VNC (optional convenience) — session lives on the console | VNC is only a mirror; the session stays attached to the console | ✅ Keeps working — connect/disconnect anytime |
 
@@ -114,6 +114,12 @@ The gateway drives `xiadan.exe` with **real mouse/keyboard input** (`SetForegrou
   - debounce (30s) + cooldown (300s): move "quick reconnects" and "~1-minute absences" out of the danger zone; the cooldown doubles as a protection window
   - **Master switch** (always available): before reconnecting, hot-disable the heal (`session_monitor.enabled: false` → `POST /admin/reload-config`), reconnect, confirm the desktop renders, re-enable — explicit choreography removes the race by construction
   - Drill without touching config: close the RDP client → wait for the heal to fire (log line `会话持续断开`, ~30-40s after disconnect) → reconnect inside the protection window (300s from the heal)
+- **Session health gate (fast rejection during a disconnect)** — every task queries `WTSConnectState` once before execution (the same signal self-healing uses; a sub-millisecond local query). While disconnected, tasks **return `SESSION_UNAVAILABLE` in milliseconds** (the message states "task not executed") instead of being released onto a dead desktop to hang until the 30s watchdog. Recovery time is reported as a range (typically ~40s = 30s debounce + 10s check interval; up to ~340s for a re-disconnect inside the cooldown). Key points:
+  - **Not executed = safe to retry**: an order's idempotency record is cleared on rejection, so after recovery reusing the same `Idempotency-Key` just executes the order (opposite of `TASK_TIMEOUT`, where it "may have executed" and must be checked first)
+  - **Monitoring signal**: `session.ui_available` from `GET /health` (`false` while disconnected, `true` once recovered; `null` = query failed, not definitely down) — retry once it reads `true`
+  - **Residual (accepted)**: a disconnect **mid-task** is still caught by the watchdog (30s timeout + recovery) — the gate only checks before a task starts and cannot safely preempt a half-finished click sequence; an RDP **reconnect** does not interrupt a running task (processes/windows/handles survive the console→RDP switch; only seconds-scale layout churn during the resolution change)
+  - **fail-open**: any state-query error releases the task (worst case = pre-gate behavior); only the *disconnected* state is blocked — reconnect transition states pass. Escape hatch `task_queue.session_gate_enabled: false` (hot-reloadable) — independent from `session_monitor.enabled` (different failure domains: queue rejection vs. tscon action)
+  - Edge case: post-order chained queries (entrust-no capture / verification) rejected during a disconnect only log a warning — the order response itself is unaffected; recover the entrust no later via `GET /orders/pending`
 - **Do not lock the desktop** (`Win+L` or a locking screensaver switches to the secure desktop — automation fails; a locked-but-console-attached session reports Active and is not self-healed)
 - **A Windows service / scheduled task "run whether user is logged on or not" does not work**: those run in Session 0 and cannot see or operate the windows of an interactive session (window enumeration comes up empty). Boot auto-start therefore also requires an interactive logon first — log in via RDP or VNC, then start `xiadan.exe` and the gateway
 - After a reboot: RDP (or VNC) in → log on → start `xiadan.exe` + broker login → start the gateway
@@ -240,6 +246,7 @@ All responses return HTTP 200; success/failure is distinguished by the JSON `sta
 | `INTERNAL_ERROR` | Unknown exception |
 | `QUEUE_TIMEOUT` | Task queuing timeout |
 | `QUEUE_FULL` | Queue is full |
+| `SESSION_UNAVAILABLE` | RDP session disconnected — task **not executed**, rejected in milliseconds (opposite of `TASK_TIMEOUT`: the client was definitely untouched, the idempotency record is auto-cleared, and retrying with the same `Idempotency-Key` after recovery is safe) |
 | `TASK_TIMEOUT` | Task timeout, recovery succeeded |
 | `TASK_TIMEOUT_RECOVERY_FAILED` | Task timeout, recovery also failed |
 
@@ -249,7 +256,7 @@ All responses return HTTP 200; success/failure is distinguished by the JSON `sta
 
 | Method | Path | Description | Queued | timeout |
 |--------|------|-------------|:---:|--------|
-| GET | `/health` | Health check + login state (`logged_in`) + recommended client timeout + runtime stats (success rates / error-code aggregates / consecutive failures / order-dialog stats) | | 5s |
+| GET | `/health` | Health check + login state (`logged_in`) + session state (`session.ui_available`, `false` while RDP-disconnected — the polling signal for recovery) + recommended client timeout + runtime stats (success rates / error-code aggregates / consecutive failures / order-dialog stats) | | 5s |
 | GET | `/queue/status` | Task queue status | | 5s |
 | POST | `/admin/reload-config` | Hot reload config | | 5s |
 | GET | `/account/balance` | Account balance | ✓ | 40s |

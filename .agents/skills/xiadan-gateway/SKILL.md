@@ -84,6 +84,7 @@ uv run --no-project python <skill目录>/scripts/xiadan.py <命令>
 | 错误码 | 应对 |
 |--------|------|
 | `TASK_TIMEOUT` / `TASK_TIMEOUT_RECOVERY_FAILED` | 结果未知——查单核实，禁止直接重试 |
+| `SESSION_UNAVAILABLE` | 网关 RDP 会话断开，任务**未执行**——轮询 health `session.ui_available=true` 后同幂等键直接重试（通常 ~40s，冷却期场景最长 ~340s），无需查单 |
 | `DUPLICATE_ORDER` | 同键重复提交被拦截——查单确认是否已提交 |
 | `PRICE_OUT_OF_RANGE` | 价格超涨跌停——向用户复核价格 |
 | `INSUFFICIENT_BALANCE` / `INSUFFICIENT_SHARES` | 资金/份额不足——报告用户 |

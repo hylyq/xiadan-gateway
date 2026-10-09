@@ -26,6 +26,11 @@ CLI 子命令与 HTTP 端点一一对应；本文供需要理解响应字段全�
 
 - `xiadan_running` / `logged_in`：交易客户端进程在跑 / 主窗口存在（≈已登录）。
   登录前或 RDP 会话断开时窗口不存在，`logged_in=false`
+- `session`：RDP 会话连接状态（`connect_state` 码 + `state_name` +
+  `ui_available`）。`ui_available=false` = 会话断开，任务会被健康门快速
+  拒绝（`SESSION_UNAVAILABLE`）；`true` = 正常；`null` = 查询失败（未知，
+  非确定不可用）。与 `logged_in=false` 配合消歧：`session=false` 是会话
+  问题（等自愈），`session=true 且 logged_in=false` 是券商登录问题
 - `queue_status`：队列忙闲
 - `stats`：近 1 小时各错误码成功率、连续失败计数、下单弹窗统计
 - `config.recommended_client_timeout_seconds`：官方推荐客户端超时
@@ -98,6 +103,9 @@ CLI 子命令与 HTTP 端点一一对应；本文供需要理解响应字段全�
 `ORDER_PRICE_REQUIRED` 券商要求显式价格（改限价）；`SERVER_UNAVAILABLE` 券商
 服务器不可用；`OCR_FAILED` 验证码识别失败；`INPUT_VERIFY_FAILED` 证券名称联动
 校验失败；`INTERNAL_ERROR` 未知异常；`QUEUE_TIMEOUT` 排队超时（任务稍后仍可能
-被执行——同幂等键重试安全）；`QUEUE_FULL` 队列已满；`TASK_TIMEOUT` 任务超时
+被执行——同幂等键重试安全）；`QUEUE_FULL` 队列已满；`SESSION_UNAVAILABLE`
+RDP 会话断开，任务**确定未执行**即被毫秒级拒绝（与 `TASK_TIMEOUT` 相反：
+幂等记录已自动清除，轮询 health `session.ui_available=true` 后同幂等键重试
+即安全，无需查单）；`TASK_TIMEOUT` 任务超时
 恢复成功（结果未知，查单核实）；`TASK_TIMEOUT_RECOVERY_FAILED` 超时且恢复失败
 （结果未知，查单核实）。

@@ -42,7 +42,11 @@ DEFAULT_CONFIG = {
         "max_size": 50,
         "watchdog_timeout_seconds": 30,
         "query_timeout_seconds": 30,
-        "confirm_timeout_seconds": 10
+        "confirm_timeout_seconds": 10,
+        # 会话健康门：任务执行前检查 WTS 连接状态，RDP 断开态快速拒绝
+        # （SESSION_UNAVAILABLE，任务未执行）。fail-open——检查异常一律放行，
+        # 最坏 = 无门时代（看门狗兜底）。逃生口：热重载可关
+        "session_gate_enabled": True
     },
     "idempotency": {
         "order_dedup_window_seconds": 60
@@ -175,7 +179,8 @@ class AppConfig(Singleton):
             "max_size": 50,
             "watchdog_timeout_seconds": 30,
             "query_timeout_seconds": 30,
-            "confirm_timeout_seconds": 10
+            "confirm_timeout_seconds": 10,
+            "session_gate_enabled": True
         })
 
     def get_idempotency_config(self) -> dict:
@@ -265,6 +270,12 @@ class AppConfig(Singleton):
                     errors.append(f"task_queue.{field} 必须 > 0，当前: {v}")
             except (TypeError, ValueError):
                 errors.append(f"task_queue.{field} 必须是数字，当前: {v!r}")
+
+        if qcfg.get("session_gate_enabled") is not None and not isinstance(
+                qcfg.get("session_gate_enabled"), bool):
+            errors.append(
+                f"task_queue.session_gate_enabled 必须是布尔值，"
+                f"当前: {qcfg.get('session_gate_enabled')!r}")
 
         scfg = self._config.get("session_monitor") or {}
         if scfg.get("enabled") is not None and not isinstance(scfg.get("enabled"), bool):

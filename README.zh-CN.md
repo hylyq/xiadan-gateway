@@ -95,7 +95,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 
 | 接入方式 | 客户端断开后 | 自动化 |
 |---|---|---|
-| **RDP 直接断开（默认路径）** | 会话「断开+锁定」→ **会话自愈自动 tscon 恢复（含解锁）** | ⚠️ 短暂失效（~10-30s）后自动恢复 ✅ 实测：VNC 服务端关闭 + 直接断开，资金/持仓/成交查询全部恢复 |
+| **RDP 直接断开（默认路径）** | 会话「断开+锁定」→ **会话自愈自动 tscon 恢复（含解锁）** | ⚠️ 短暂失效（~10-30s）后自动恢复；失效窗口内任务被**会话健康门毫秒级快速拒绝**（`SESSION_UNAVAILABLE`，任务未执行），不再等 30s 看门狗超时 ✅ 实测：VNC 服务端关闭 + 直接断开，资金/持仓/成交查询全部恢复 |
 | RDP + 离开时执行 `tscon $env:SESSIONNAME /dest:console`（PowerShell）/ `tscon %sessionname% /dest:console`（cmd.exe） | 会话无缝落回 console，不锁屏 | ✅ 持续可用（零停机路径，对停顿敏感时用） |
 | VNC（可选便利项）——会话常驻 console | VNC 只是桌面的镜像，会话保持挂接在 console 上 | ✅ 持续可用，随时连/断 |
 
@@ -114,6 +114,12 @@ uv run python main.py --dev       # 开发模式（热加载）
   - 防抖（30s）+ 冷却（300s）：把「快速重连」与「分钟级短离开」移出危险区，冷却期=保护窗
   - **总开关**（最稳姿势，任选）：重连前热关闭自愈（`session_monitor.enabled: false` → `POST /admin/reload-config`），连上确认桌面正常后再开回——显式编排，竞态在构造上消失
   - 无配置时的等价舞步：关闭 RDP 客户端 → 等自愈执行（日志出现 `会话持续断开`，断开后 ~30-40s）→ 在保护窗内（自愈执行后 300s）重连
+- **会话健康门（断开期快速拒绝）**——每个任务执行前直查一次 `WTSConnectState`（与自愈同一信号、亚毫秒本地查询），断开态任务**毫秒级返回 `SESSION_UNAVAILABLE`**（message 注明「任务未执行」），而非放行后在死桌面上挂 30s 看门狗超时。恢复时长按区间告知（通常 ~40s = 防抖 30s + 检查间隔 10s；冷却期内再次断开最长 ~340s）。要点：
+  - **任务未执行 = 可安全重试**：下单的幂等记录在拒绝时自动清除，恢复后复用同一 `Idempotency-Key` 重试即正常执行（与 `TASK_TIMEOUT` 的「可能已执行、必须先查单」相反）
+  - **监控信号**：`GET /health` 的 `session.ui_available`（断开期间 `false`，恢复即 `true`；`null` = 查询失败非确定不可用），轮询到 `true` 即可重试
+  - **残余**（接受）：任务**执行中途**断开仍由看门狗兜底（30s 超时+恢复）——健康门只在任务开始前判定，无法安全抢占进行到一半的点击序列；RDP **重连**不打断进行中的任务（进程/窗口/句柄在 console→RDP 换轨中保留，仅有秒级分辨率切换的布局抖动风险）
+  - **fail-open**：状态查询异常一律放行（最坏 = 无门时代）；只拦「已断开」态，重连过渡瞬态放行。逃生口 `task_queue.session_gate_enabled: false`（热重载生效）——与自愈开关 `session_monitor.enabled` 独立（失效域不同：一个管队列拒绝，一个管 tscon 动作）
+  - 边角：下单成功后的委托号截获/对账等链式查询若恰在断开期被拒，各自降级记 warning，下单响应本身不受影响——恢复后用 `GET /orders/pending` 反查委托号
 - **不要锁屏**（`Win+L` 或带锁定的屏保会切到安全桌面，自动化失效；锁定但挂接 console 的会话状态为 Active，自愈不处理）
 - **注册为 Windows 服务 / 计划任务「不管用户是否登录都要运行」不可行**：它们落在 Session 0，看不到也无法操作交互会话的窗口（窗口枚举为空）。因此开机自启同样要求先有人登录——RDP 或 VNC 连入后手动启动 `xiadan.exe` 与网关
 - 服务器重启后：RDP（或 VNC）连入 → 登录 → 启动 `xiadan.exe` + 券商登录 → 启动网关
@@ -240,6 +246,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `INTERNAL_ERROR` | 未知异常 |
 | `QUEUE_TIMEOUT` | 任务排队超时 |
 | `QUEUE_FULL` | 队列已满 |
+| `SESSION_UNAVAILABLE` | RDP 会话断开，任务**未执行**即毫秒级快速拒绝（与 `TASK_TIMEOUT` 相反：确定未触碰客户端，幂等记录自动清除，同 `Idempotency-Key` 恢复后重试即安全） |
 | `TASK_TIMEOUT` | 任务超时，恢复成功 |
 | `TASK_TIMEOUT_RECOVERY_FAILED` | 任务超时，恢复也失败 |
 
@@ -249,7 +256,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 
 | 方法 | 路径 | 说明 | 入队 | timeout |
 |------|------|------|:---:|--------|
-| GET | `/health` | 健康检查 + 登录态（`logged_in`）+ 推荐客户端 timeout + 运行统计（成功率/错误码聚合/连续失败/下单弹窗统计） | | 5s |
+| GET | `/health` | 健康检查 + 登录态（`logged_in`）+ 会话状态（`session.ui_available`，RDP 断开期间为 `false`——监控轮询恢复信号用）+ 推荐客户端 timeout + 运行统计（成功率/错误码聚合/连续失败/下单弹窗统计） | | 5s |
 | GET | `/queue/status` | 任务队列状态 | | 5s |
 | POST | `/admin/reload-config` | 热重载配置 | | 5s |
 | GET | `/account/balance` | 资金余额 | ✓ | 40s |
