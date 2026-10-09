@@ -256,3 +256,81 @@ class TestProcessWindowStateDispatch:
         for _ in range(3):
             monitor._process_window_state(HWND_TARGET)
         assert restores == [] and monitor._login_hold_active is True
+
+
+class TestSessionRecoveryStateQuery:
+    """自愈状态查询共用 session_state.get_session_state 后的最小回归
+
+    状态查询与任务队列会话健康门同源（src/utils/session_state.py）。
+    """
+
+    @staticmethod
+    def _patch_cfg(monkeypatch):
+        class FakeAppConfig:
+            def get_session_monitor_config(self):
+                return {"enabled": True, "debounce_seconds": 30,
+                        "cooldown_seconds": 300}
+
+        monkeypatch.setattr(wm, "AppConfig", FakeAppConfig)
+
+    def _patch_tscon(self, monkeypatch):
+        """记录 tscon 执行与 sid 查询（隔离真实 win32/subprocess 副作用）"""
+        import subprocess
+        import win32ts
+
+        tscon_calls = []
+        monkeypatch.setattr(
+            win32ts, "ProcessIdToSessionId", lambda pid: 999,
+            raising=False)
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda cmd, **k: tscon_calls.append(cmd)
+            or type("R", (), {"returncode": 0, "stderr": ""})())
+        return tscon_calls
+
+    def test_query_failure_skips_cycle_fail_closed(self, monkeypatch, monitor):
+        """查询失败(None)：跳过本周期——防抖状态不动、绝不 tscon（fail-closed）"""
+        self._patch_cfg(monkeypatch)
+        monkeypatch.setattr(wm, "get_session_state", lambda: None)
+        tscon_calls = self._patch_tscon(monkeypatch)
+        monitor._last_session_recovery = 0.0
+        monitor._disconnected_since = time.time() - 100  # 早过防抖
+        monitor._recover_session_if_disconnected()
+        assert tscon_calls == []
+        assert monitor._disconnected_since is not None  # 原值保留（防抖不起表）
+
+    def test_active_resets_debounce(self, monkeypatch, monitor):
+        """会话恢复活动 → 防抖重新起表"""
+        self._patch_cfg(monkeypatch)
+        monkeypatch.setattr(wm, "get_session_state", lambda: 0)
+        tscon_calls = self._patch_tscon(monkeypatch)
+        monitor._last_session_recovery = 0.0
+        monitor._disconnected_since = time.time() - 100
+        monitor._recover_session_if_disconnected()
+        assert tscon_calls == []
+        assert monitor._disconnected_since is None
+
+    def test_disconnected_beyond_debounce_recovers(self, monkeypatch, monitor):
+        """断开满防抖且无重连迹象 → 执行 tscon，本次断开事件闭合"""
+        self._patch_cfg(monkeypatch)
+        monkeypatch.setattr(wm, "get_session_state", lambda: 4)
+        monkeypatch.setattr(monitor, "_rdp_client_connecting", lambda: False)
+        tscon_calls = self._patch_tscon(monkeypatch)
+        monitor._last_session_recovery = 0.0
+        monitor._disconnected_since = time.time() - 100
+        monitor._recover_session_if_disconnected()
+        assert len(tscon_calls) == 1
+        assert "tscon" in tscon_calls[0][0].lower()
+        assert monitor._disconnected_since is None
+        assert monitor._last_session_recovery > 0
+
+    def test_disconnected_within_debounce_waits(self, monkeypatch, monitor):
+        """断开未满防抖 → 只起表不动作"""
+        self._patch_cfg(monkeypatch)
+        monkeypatch.setattr(wm, "get_session_state", lambda: 4)
+        tscon_calls = self._patch_tscon(monkeypatch)
+        monitor._last_session_recovery = 0.0
+        monitor._disconnected_since = None
+        monitor._recover_session_if_disconnected()
+        assert tscon_calls == []
+        assert monitor._disconnected_since is not None

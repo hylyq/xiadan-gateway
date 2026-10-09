@@ -15,6 +15,7 @@ import win32process
 from src.utils.logger import Logger
 from src.constants import TRADING_WINDOW_TITLE
 from src.models.config import AppConfig
+from src.utils.session_state import WTS_DISCONNECTED, get_session_state
 
 
 class WindowMonitor:
@@ -51,8 +52,8 @@ class WindowMonitor:
     RECONNECT_HOLD_MAX_SECONDS = 600.0
     # RDP 监听端口（判别「客户端正在连接」用；默认 3389）
     RDP_LISTEN_PORT = 3389
-    # WTS 连接状态枚举（win32ts）：0=Active 1=Connected 4=Disconnected
-    WTS_STATE_DISCONNECTED = 4
+    # WTS 断开态常量（与任务队列会话健康门同源；见 src/utils/session_state.py）
+    WTS_STATE_DISCONNECTED = WTS_DISCONNECTED
     # 登录/启动期避让：目标进程年龄低于此时长时不干预窗口（秒）。
     # 另有两级与时长无关的独立判据（登录框/同进程前台窗口），
     # 见 _login_or_startup_hold；0=关闭年龄判据（另两级判据仍生效）
@@ -281,13 +282,16 @@ class WindowMonitor:
             import os
             import subprocess
 
-            import win32ts
+            import win32ts  # ProcessIdToSessionId 仍需
 
-            state = win32ts.WTSQuerySessionInformation(
-                win32ts.WTS_CURRENT_SERVER_HANDLE,
-                win32ts.WTS_CURRENT_SESSION, win32ts.WTSConnectState)
-            if isinstance(state, tuple):
-                state = state[0]
+            state = get_session_state()
+            if state is None:
+                # 查询失败跳过本周期（防抖计时状态不动）。与任务队列会话门
+                # 的 fail-open 不对称是刻意的：门的误放行由看门狗兜底，
+                # tscon 的误动作撞重连是图形栈僵死级事故（见本方法 docstring
+                # 存档）——对不确定状态宁可不动
+                self.logger.debug("会话状态查询失败，跳过本周期自愈检查")
+                return
             if state != self.WTS_STATE_DISCONNECTED:
                 self._disconnected_since = None  # 会话恢复活动，防抖重新起表
                 return
