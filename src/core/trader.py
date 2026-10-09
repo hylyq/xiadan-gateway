@@ -309,6 +309,30 @@ class Trader:
                 time.sleep(0.05)
 
         # 8. 点击下单按钮并处理弹窗
+        # 提交按钮灰显前置检查（2026-10-09 假阳性成功事故）：
+        # 代码输入有名称联动校验兜底，但价格/数量（1033/1034）是回读恒空
+        # 的自绘壳控件、无任何校验——无头退化态下其击键可能丢失，表单
+        # 空缺时客户端灰显下单按钮，对灰按钮的 click_input 是静默无效
+        # 操作，快速交易模式下「无弹窗」被误判为已提交（实测：confirmed=true
+        # 但交易所无此单、资金无冻结、撤单按钮灰显）。灰显 = 确定未提交，
+        # 在点击前拦截，杜绝假阳性（撤单按钮早有同款检查，此处补齐）。
+        submit_el = self.window_service.find_element_in_window(
+            window, CONTROL_ID_SUBMIT, descendants=_descendants)
+        if submit_el is not None:
+            try:
+                if not submit_el.is_enabled():
+                    raise ApiError(
+                        ErrorCode.INPUT_VERIFY_FAILED,
+                        "下单按钮灰显：表单未就绪（价格/数量输入可能未生效），"
+                        "本次确定未提交",
+                        suggestion="直接重试通常可恢复；若反复出现，请人工检查"
+                                   "客户端输入框状态（可能处于击键丢失的退化态，"
+                                   "重连 RDP 或重启客户端可复位）")
+            except ApiError:
+                raise
+            except Exception:
+                pass  # is_enabled() 不可用时放行点击（维持原行为，弹窗检测兜底）
+
         # 横幅截获线程在点击前启动：横幅出现于提交后 ~0.3-0.5s、存活 1-2s，
         # 必须与弹窗检测并行，否则 place_order 返回时横幅已消失
         submit_click_epoch = None  # 全精度点击完成时刻（截获失败时回补窗口锚点）
