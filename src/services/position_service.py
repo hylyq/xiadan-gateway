@@ -1193,18 +1193,24 @@ class PositionService:
                         return True
                     except PollTimeoutError:
                         # poll_until 已轮询 ~7次都失败，无需再查
-                        # 误读存档：识别非空但被客户端拒绝是唯一无证据的
+                        # 拒绝存档：识别非空但被客户端拒绝，是唯一无证据的
                         # 失败模式（存档只记"识别为空"），保留图+识别值供
-                        # 离线排查/训练（实测事故：4523/3247 两次自信误读无存档）
+                        # 离线排查/训练（历史事故：4523/3247 两次自信误读
+                        # 无存档）。注意「拒绝 ≠ 误读」：2026-10-09 实测
+                        # （wrong_4143/5402 等 4 张）图片数字与识别值完全
+                        # 一致仍被拒——输入投递/确认点击环节失败同样表现
+                        # 为拒绝，需结合图与识别值人工判别
                         try:
                             import shutil
                             wrong_path = os.path.join(
                                 "assets", "captcha_archive",
-                                f"wrong_{ocr_text}_{int(time.time() * 1000)}.png")
+                                f"rejected_{ocr_text}_{int(time.time() * 1000)}.png")
                             os.makedirs(os.path.dirname(wrong_path), exist_ok=True)
                             shutil.copyfile(image_path, wrong_path)
                             self.logger.warning(
-                                f"验证码被客户端拒绝，已存档误读图: {wrong_path}")
+                                f"验证码被客户端拒绝（识别值 {ocr_text}，"
+                                f"拒绝≠误读，输入环节失败同样到此路径），"
+                                f"已存档: {wrong_path}")
                         except Exception:
                             pass
 
