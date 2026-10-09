@@ -44,6 +44,9 @@ class ErrorCode:
     # 超时 (504)
     TASK_TIMEOUT = "TASK_TIMEOUT"                              # 任务超时，恢复成功
     TASK_TIMEOUT_RECOVERY_FAILED = "TASK_TIMEOUT_RECOVERY_FAILED"  # 任务超时，恢复也失败
+    # 下单点击提交后的非业务异常（如会话断开杀桌面）：订单可能已提交，
+    # 状态未知——与 TASK_TIMEOUT 同级，幂等记录保留，重试前必须查单
+    ORDER_STATE_UNKNOWN = "ORDER_STATE_UNKNOWN"
 
 
 # HTTP 状态码映射（仅供参考，不实际用于响应）。
@@ -75,6 +78,7 @@ HTTP_STATUS = {
     ErrorCode.SESSION_UNAVAILABLE: 503,
     ErrorCode.TASK_TIMEOUT: 504,
     ErrorCode.TASK_TIMEOUT_RECOVERY_FAILED: 504,
+    ErrorCode.ORDER_STATE_UNKNOWN: 504,
 }
 
 

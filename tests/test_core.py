@@ -1617,6 +1617,20 @@ class TestIdempotencyRecordRetention:
         e = ApiError(ErrorCode.QUEUE_TIMEOUT, "任务排队或执行超时")
         assert should_keep_record_on_error(e) is True
 
+    def test_keep_on_order_state_unknown(self):
+        """下单点击后异常：订单可能已提交 → 保留（同 key 重试被拦截，逼查单）"""
+        from src.api.idempotency import should_keep_record_on_error
+        from src.exceptions import ApiError, ErrorCode
+        e = ApiError(ErrorCode.ORDER_STATE_UNKNOWN, "下单点击后发生异常")
+        assert should_keep_record_on_error(e) is True
+
+    def test_clear_on_session_unavailable(self):
+        """会话健康门拒绝：任务开始前毫秒级拦截、确定未执行 → 清除可重试"""
+        from src.api.idempotency import should_keep_record_on_error
+        from src.exceptions import ApiError, ErrorCode
+        e = ApiError(ErrorCode.SESSION_UNAVAILABLE, "RDP 会话断开")
+        assert should_keep_record_on_error(e) is False
+
     def test_clear_on_business_error(self):
         """业务失败（任务确定未执行）→ 清除以便重试"""
         from src.api.idempotency import should_keep_record_on_error
@@ -1684,6 +1698,92 @@ class TestIdempotencyRecordRetention:
             with pytest.raises(ApiError) as exc_info:
                 chk.check_and_record(bad)
             assert exc_info.value.error_code == ErrorCode.VALIDATION_ERROR
+
+
+class TestOrderStateUnknownEscalation:
+    """下单点击后异常 → ORDER_STATE_UNKNOWN（2026-10-09 演练发现的缺口）
+
+    背景：RDP 断开瞬间恰有下单任务在途，桌面消亡使 UIA 调用快速抛错。
+    点击提交后的异常 = 订单可能已提交（状态未知），必须保留幂等记录并
+    引导查单；点击前的异常维持原语义（确定未提交，可安全重试）。
+    """
+
+    @staticmethod
+    def _trader(mocker):
+        from src.core.trader import Trader
+        t = object.__new__(Trader)
+        t.logger = mocker.MagicMock()
+        t._had_any_dialog = False
+        t._clean_dismiss = False
+        return t
+
+    def test_post_submit_infra_error_escalates(self, mocker):
+        """点击后基础设施异常（UIA 失败/桌面消亡）→ ORDER_STATE_UNKNOWN"""
+        from src.core.trader import escalate_unknown_order_state
+        from src.exceptions import ApiError, ErrorCode
+
+        trader = self._trader(mocker)
+
+        @escalate_unknown_order_state
+        def place(self):
+            self._submit_click_epoch = 123.5  # 模拟点击已完成
+            raise RuntimeError("comtypes: RPC 服务器不可用")
+
+        with pytest.raises(ApiError) as ei:
+            place(trader)
+        assert ei.value.error_code == ErrorCode.ORDER_STATE_UNKNOWN
+        assert "状态未知" in ei.value.message
+        assert ei.value.details["submit_click_epoch"] == 123.5
+        assert "orders/pending" in (ei.value.suggestion or "")
+        assert "新 Idempotency-Key" in (ei.value.suggestion or "")
+
+    def test_post_submit_api_error_passes_through(self, mocker):
+        """点击后的 ApiError 是业务结局已知（券商拒绝/干净退出）→ 原样透传"""
+        from src.core.trader import escalate_unknown_order_state
+        from src.exceptions import ApiError, ErrorCode
+
+        trader = self._trader(mocker)
+
+        @escalate_unknown_order_state
+        def place(self):
+            self._submit_click_epoch = 123.5
+            raise ApiError(ErrorCode.PRICE_OUT_OF_RANGE, "价格超涨跌停")
+
+        with pytest.raises(ApiError) as ei:
+            place(trader)
+        assert ei.value.error_code == ErrorCode.PRICE_OUT_OF_RANGE
+
+    def test_pre_submit_error_keeps_original_semantics(self, mocker):
+        """点击前异常（窗口找不到/输入失败）→ 原样抛出，确定未提交"""
+        from src.core.trader import escalate_unknown_order_state
+
+        trader = self._trader(mocker)
+
+        @escalate_unknown_order_state
+        def place(self):
+            self._submit_click_epoch = None  # 未点击
+            raise RuntimeError("window enumeration failed")
+
+        with pytest.raises(RuntimeError):
+            place(trader)  # 不转 ORDER_STATE_UNKNOWN
+
+    def test_epoch_reset_between_calls(self, mocker):
+        """每次调用开始复位锚点——上次下单的点击时刻不泄漏到本次"""
+        from src.core.trader import escalate_unknown_order_state
+        from src.exceptions import ApiError, ErrorCode
+
+        trader = self._trader(mocker)
+
+        @escalate_unknown_order_state
+        def place(self, click):
+            if click:
+                self._submit_click_epoch = 99.0
+            # 不抛异常 = 成功返回
+
+        place(trader, click=True)
+        assert trader._submit_click_epoch == 99.0
+        place(trader, click=False)  # 本次未点击
+        assert trader._submit_click_epoch is None
 
 
 class TestDiagnosticSnapshotConcurrency:

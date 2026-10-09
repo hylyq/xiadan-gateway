@@ -108,4 +108,6 @@ RDP 会话断开，任务**确定未执行**即被毫秒级拒绝（与 `TASK_TI
 幂等记录已自动清除，轮询 health `session.ui_available=true` 后同幂等键重试
 即安全，无需查单）；`TASK_TIMEOUT` 任务超时
 恢复成功（结果未知，查单核实）；`TASK_TIMEOUT_RECOVERY_FAILED` 超时且恢复失败
-（结果未知，查单核实）。
+（结果未知，查单核实）；`ORDER_STATE_UNKNOWN` 下单点击提交后发生非业务异常
+（如 RDP 断开瞬间），订单**可能已提交**（结果未知，查单核实；幂等记录保留，
+同 key 重试被拦截，确认未提交后用新 key）。

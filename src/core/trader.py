@@ -8,6 +8,7 @@
 5. 点击下单按钮(1006)
 6. 发送 Y 键确认委托（confirm=true 时）
 """
+import functools
 import time
 from typing import Optional
 
@@ -32,6 +33,55 @@ from src.utils.poll import poll_until, timed, PollTimeoutError
 from src.utils.uia import safe_text
 
 
+def escalate_unknown_order_state(fn):
+    """下单方法装饰器：点击提交按钮后的非业务异常 → ORDER_STATE_UNKNOWN
+
+    【背景】2026-10-09 会话健康门实弹演练实测：RDP 断开瞬间恰有在途任务
+    时，桌面消亡使 UIA 调用快速抛错（~1.2s INTERNAL_ERROR 而非挂 30s）。
+    对查询无害；对下单，若异常落在「点击下单按钮之后、结果判定之前」
+    （弹窗检测/确认点击/横幅截获，~0.5 至数秒窗口），订单可能已提交到
+    券商——状态未知。原路径按 INTERNAL_ERROR 处理：幂等记录被清除、无
+    查单指引，调用方（尤其自动化脚本）直接同 key 重试 = 潜在重复下单。
+
+    【机制】被装饰方法在点击下单按钮成功后设置 self._submit_click_epoch
+    （None=未点击）；装饰器据此分流：
+    - ApiError：业务结局已知（券商拒绝/干净退出/弹窗分类），原样透传
+    - 非 ApiError 且已点击：转 ORDER_STATE_UNKNOWN（suggestion 带查单
+      指引；幂等记录保留见 should_keep_record_on_error——同 key 重试被
+      DUPLICATE_ORDER 拦截，逼调用方先查单核实）
+    - 非 ApiError 且未点击：原样抛出（确定未提交，清除记录可安全重试）
+    """
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        self._submit_click_epoch = None
+        try:
+            return fn(self, *args, **kwargs)
+        except ApiError:
+            raise
+        except Exception as e:
+            if getattr(self, "_submit_click_epoch", None) is None:
+                raise  # 点击前：确定未提交，维持原语义
+            self.logger.error(
+                f"下单点击后发生异常（订单状态未知）: "
+                f"{type(e).__name__}: {e}")
+            raise ApiError(
+                ErrorCode.ORDER_STATE_UNKNOWN,
+                f"下单点击后发生异常，订单可能已提交（状态未知）: {e}",
+                suggestion=(
+                    "请立即核实（幂等记录已保留，同 key 重试会被拦截）："
+                    "1) GET /orders/pending 按代码+价格+数量匹配当日委托；"
+                    "2) GET /trades/today 查成交；"
+                    "3) 已提交且不想要 → POST /orders/cancel-all 撤单；"
+                    "确认未提交 → 生成新 Idempotency-Key 重试"
+                ),
+                details={
+                    "cause": f"{type(e).__name__}: {e}",
+                    "submit_click_epoch": self._submit_click_epoch,
+                },
+            ) from e
+    return wrapper
+
+
 class Trader:
     """下单编排器"""
 
@@ -45,12 +95,16 @@ class Trader:
         #                 True 时窗口状态仍可信，TaskQueue 不清除连续跳过状态
         self._had_any_dialog = False
         self._clean_dismiss = False
+        # 点击下单按钮时刻锚点（@escalate_unknown_order_state 据此判定
+        # 「点击后异常=订单状态未知」；每次 place_order 调用开始时复位）
+        self._submit_click_epoch: Optional[float] = None
         # 安静态 UI 文本快照（自学习黑名单）：place_order 开始时拍下主窗口
         # 全部可见文本，兜底弹窗提取时用作动态过滤——券商升级新增的界面
         # 标签自动被收录，无需人工补 _ui_labels 硬编码清单
         self._ui_text_baseline: Optional[set] = None
 
     @report_window_state
+    @escalate_unknown_order_state
     def place_order(
         self,
         code: str,
@@ -264,6 +318,9 @@ class Trader:
             self.window_service.click_element(
                 window, CONTROL_ID_SUBMIT, descendants=_descendants)
             submit_click_epoch = time.time()
+            # 装饰器锚点：此后任何非业务异常 = 订单可能已提交（状态未知），
+            # 见 escalate_unknown_order_state
+            self._submit_click_epoch = submit_click_epoch
             self.logger.info("已点击下单按钮，等待弹窗")
 
         # 统一弹窗检测与处理：sleep(0.2) 等待渲染 + 一次 UIA 遍历完成检测+处理

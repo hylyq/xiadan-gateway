@@ -249,6 +249,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `SESSION_UNAVAILABLE` | RDP 会话断开，任务**未执行**即毫秒级快速拒绝（与 `TASK_TIMEOUT` 相反：确定未触碰客户端，幂等记录自动清除，同 `Idempotency-Key` 恢复后重试即安全） |
 | `TASK_TIMEOUT` | 任务超时，恢复成功 |
 | `TASK_TIMEOUT_RECOVERY_FAILED` | 任务超时，恢复也失败 |
+| `ORDER_STATE_UNKNOWN` | 下单**点击提交后**发生非业务异常（如 RDP 断开瞬间桌面消亡）——订单可能已提交，状态未知；幂等记录**保留**，同 key 重试会被拦截，先查单核实（确认未提交后用新 key 重试） |
 
 > 弹窗类型与「干净退出」语义详见[弹窗分类处理](#弹窗分类处理)。
 

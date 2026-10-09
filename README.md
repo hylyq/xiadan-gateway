@@ -249,6 +249,7 @@ All responses return HTTP 200; success/failure is distinguished by the JSON `sta
 | `SESSION_UNAVAILABLE` | RDP session disconnected — task **not executed**, rejected in milliseconds (opposite of `TASK_TIMEOUT`: the client was definitely untouched, the idempotency record is auto-cleared, and retrying with the same `Idempotency-Key` after recovery is safe) |
 | `TASK_TIMEOUT` | Task timeout, recovery succeeded |
 | `TASK_TIMEOUT_RECOVERY_FAILED` | Task timeout, recovery also failed |
+| `ORDER_STATE_UNKNOWN` | A non-business exception **after the submit click** (e.g. the desktop dying the instant RDP drops) — the order may already be submitted, state unknown; the idempotency record is **kept** (same-key retry is blocked), verify via order query first (use a new key once confirmed unsubmitted) |
 
 > For popup types and "clean exit" semantics, see [Classified Popup Handling](#classified-popup-handling).
 
