@@ -18,13 +18,17 @@
 分辨率鲁棒性（2026-10-09 RDP→console 重挂黏连修复）: 桌面会话在 RDP
 断开/自愈 tscon 重挂 console 后，横幅字号变小（号码字形 ~5px 宽、
 文案汉字 ~10px 宽，与 RDP 态 ~8px/~15px 不同）。小字号下汉字落入
-单数字字宽过滤带（3-11px）且 IoU 0.42-0.56，旧阈值 0.40 拦不住，
-「编号：」尾字形被拆成假数字与真号码黏成连续串（如 8119+6293087338，
-见 tests/fixtures/banner/glued_console_8119.png）。实测标定（真实样本
-逐位 IoU，两种渲染态）: 真数字 ≥0.67、真黏连拆分子字形 ≥0.68；假数字
-（汉字单字/拆分）≤0.62——单字阈值提至 0.63、拆分子字形阈值 0.65，
-两路假数字全部被拒。有意偏拒: 误拒 → entrust_no=None → 触发 recover
-回补（安全兜底）；误收 → 黏连号直接回传绕过 recover（对账才发现）。
+单数字字宽过滤带（3-11px），IoU 0.42-0.56 与真号码黏成连续串（如
+8119+6293087338，见 tests/fixtures/banner/glued_console_8119.png）。
+
+判别器用**高度类**而非 IoU 阈值——数字字形永远矮于文案汉字满高
+（console 9/10、RDP 12/15，汉字恒 = 行高 1.0），故字形高度须落在
+[tallest×0.55, tallest×0.95] 才视为数字候选，单字与拆分两条路径同样
+门控。IoU 阈值路线已实测证伪：抬高到 0.63 拦得住汉字假数字，但实拍
+帧里真数字也会落在 0.40-0.62（当夜连接态真号 6293xxxxxxxx 被截头成
+8 位 62930856，对账 verified=false 兜住）——纯置信度无法同时容纳两态
+的真假分布。有意偏拒: 误拒 → entrust_no=None → 触发 recover 回补
+（安全兜底）；误收 → 假号直接回传绕过 recover（对账才发现）。
 
 原型实测（2026-09-09 模拟盘真值样本）: 10 位数字逐位全对。
 相比 ddddocr: 零外部依赖、~1-5ms、内存可忽略（模板为 10×6 张 12×16 位图）。
@@ -41,13 +45,11 @@ FONT_CANDIDATES = [
 SIZES = (11, 12, 13, 14, 15, 16)
 NORM_W, NORM_H = 12, 16
 DIGIT_W_MIN, DIGIT_W_MAX = 3, 11    # 数字字形宽度（实测:多数 7-9px，"1"仅 ~3-4px）
-DIGIT_H_RATIO = 0.55               # 数字字形高度占行高比例下限（过滤句号/冒号）
 MIN_RUN_LEN = 8                    # 下限校验：显示长度随券商而异，仅拦明显非号码串
-# 单字 IoU 低于此值记为无法识别。实测标定: 真数字 ≥0.67（console/RDP 两种
-# 渲染态逐位统计），小字号汉字假数字 ≤0.56——旧值 0.40 在 console 态放进
-# 「8119」假前缀（见模块 docstring 与 glued_console_8119 夹具）
-GLYPH_CONF_MIN = 0.63
-SPLIT_CONF_MIN = 0.65              # 拆分子字形阈值（假拆分 ≤0.62、真黏连拆分 ≥0.68）
+GLYPH_CONF_MIN = 0.40              # 单字 IoU 下限（真假数字靠高度类门控区分，见 docstring）
+DIGIT_H_RATIO = 0.55               # 数字字形高度下限（占行高比例，过滤句号/冒号）
+DIGIT_H_MAX_RATIO = 0.95           # 数字字形高度上限：汉字恒为满高 1.0（console 10/10、
+                                   # RDP 15/15），数字 9/10、12/15——超过即汉字/其拆分
 SPLIT_ESTIMATES = (9.5, 9.0, 8.0, 7.5, 6.5)  # 粘连拆分字宽估计档（实测"4"≈9px）
 
 
@@ -106,16 +108,18 @@ class BannerDigitOCR:
         glyphs = self._segment(dark)
         if not glyphs:
             return "", 0.0
-        # 行高 = 最高字形（汉字/数字同高）；句号、冒号仅约半高，据此排除
+        # 行高 = 最高字形（汉字恒满高）；数字更矮（console 9/10、RDP 12/15），
+        # 句号、冒号仅约半高——上下双阈值圈出数字高度类
         tallest = max(g.shape[0] for _, _, g in glyphs)
         min_h = tallest * DIGIT_H_RATIO
+        max_h = tallest * DIGIT_H_MAX_RATIO
 
         # 先分类再找串：拆分子字形进入候选序列，非数字字形打断连续性
         seq = []          # (digit, conf) 或 None（打断）
         tail_anchor = False  # 末字形是否为半高终止符（句号）
         for x0, x1, g in glyphs:
             tail_anchor = False
-            subs = self._digit_subglyphs(g, x1 - x0, min_h)
+            subs = self._digit_subglyphs(g, x1 - x0, min_h, max_h)
             if not subs:
                 if g.shape[0] < min_h:
                     tail_anchor = True  # 半高非数字字形（句号候选）
@@ -154,17 +158,21 @@ class BannerDigitOCR:
         conf = min(c for _, c in best)
         return digits, conf
 
-    def _digit_subglyphs(self, g: np.ndarray, w: int, min_h: float):
+    def _digit_subglyphs(self, g: np.ndarray, w: int, min_h: float,
+                         max_h: float):
         """单字形 → 数字子字形列表（粘连数字拆分）；非数字返回空列表
 
-        粘连拆分按多档字宽估计各拆一版，要求整版全部子字形达到
-        SPLIT_CONF_MIN（真黏连拆分 ≥0.68、汉字假拆分 ≤0.62，实测标定
-        见模块 docstring），按子字形 IoU 总分取最优——"44"黏 17px、
-        "444"黏 27px（"4"字宽约 9px）等不同宽度组合均能对准边界；
-        全档失败视为非数字。
+        高度类门控: 字形高度须落在 [min_h, max_h]（数字比汉字矮一档，
+        汉字恒满高）——console 小字号下汉字单字（h=满高）与「编号：」
+        尾段假拆分借此被整体判非数字，不再混入号码串。粘连拆分按多档
+        字宽估计各拆一版，要求整版全部子字形可识别为数字，按子字形
+        IoU 总分取最优——"44"黏 17px、"444"黏 27px（"4"字宽约 9px）等
+        不同宽度组合均能对准边界；全档失败视为非数字。
         """
+        if not (min_h <= g.shape[0] <= max_h):
+            return []
         if DIGIT_W_MIN <= w <= DIGIT_W_MAX:
-            return [g] if g.shape[0] >= min_h else []
+            return [g]
         if not (DIGIT_W_MAX < w <= 30):
             return []
         best = None  # (IoU 总分, [子字形])
@@ -182,7 +190,7 @@ class BannerDigitOCR:
                     break
                 sub = sub[ys.min():ys.max() + 1]
                 d, c = self._classify(sub)
-                if d is None or c < SPLIT_CONF_MIN:
+                if d is None:
                     ok = False
                     break
                 arrs.append(sub)

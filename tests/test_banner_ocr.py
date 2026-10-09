@@ -75,23 +75,44 @@ class TestRealBannerSamples:
 
 
 class TestSplitterRobustness:
-    """粘连拆分：多档字宽估计"""
+    """粘连拆分：多档字宽估计 + 高度类门控"""
 
     def test_various_widths_classified(self, ocr):
-        """不同宽度的黏连字形（2-4 字）均可拆分分类，不打断序列"""
+        """数字高度类的黏连字形（2-4 字）均可拆分分类，不打断序列"""
         band = _load("unreadable_110122.png")
         dark = band[:, :, 1] < 150
         glyphs = ocr._segment(dark)
         tallest = max(g.shape[0] for _, _, g in glyphs)
         min_h = tallest * 0.55
+        max_h = tallest * 0.95
         wide = [(x0, x1, g) for x0, x1, g in glyphs
                 if (x1 - x0) > 11 and g.shape[0] >= min_h]
         assert wide, "样本中应存在黏连字形"
         for x0, x1, g in wide:
-            subs = ocr._digit_subglyphs(g, x1 - x0, min_h)
+            subs = ocr._digit_subglyphs(g, x1 - x0, min_h, max_h)
             # 每个宽字形要么拆出完整子字形序列，要么整体判非数字，
             # 不允许拆出一半（None 打断号码串即失败）
             if subs:
                 for sub in subs:
                     d, c = ocr._classify(sub)
                     assert d is not None, f"x{x0}-{x1} 拆出不可识别子字形"
+
+    def test_full_height_wide_glyph_not_split(self, ocr):
+        """满高宽字形（汉字）不做拆分——高度类门控防「编号：」假拆分黏号
+
+        console 小字号下汉字落入数字字宽带，其尾段若被拆分即产生
+        假前缀（8119+6293087338 事故）；汉字恒满高，超数字高度上限
+        者须整体判非数字。
+        """
+        band = _load("unreadable_110122.png")
+        dark = band[:, :, 1] < 150
+        glyphs = ocr._segment(dark)
+        tallest = max(g.shape[0] for _, _, g in glyphs)
+        min_h = tallest * 0.55
+        max_h = tallest * 0.95
+        full_height_wide = [(x0, x1, g) for x0, x1, g in glyphs
+                            if (x1 - x0) > 11 and g.shape[0] > max_h]
+        assert full_height_wide, "样本中应存在满高宽字形（文案汉字）"
+        for x0, x1, g in full_height_wide:
+            assert ocr._digit_subglyphs(g, x1 - x0, min_h, max_h) == [], \
+                f"x{x0}-{x1} 满高字形被拆分（应整体判非数字）"
