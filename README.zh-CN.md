@@ -54,7 +54,7 @@
 | 运行统计 | 按错误码聚合成功率（最近 1 小时窗口，`/health` 返回），连续 3 次失败日志告警；跟踪下单弹窗行为，客户端「快速交易」设置被重置（弹窗行为翻转）时告警 |
 | 告警外推 | 连续任务失败≥3、下单弹窗行为漂移、任务超时 → POST webhook（generic JSON 或企业微信/钉钉/飞书 `text` 格式），后台线程发送不阻塞交易路径 |
 | 证券名称联动校验 | 输入代码后轮询名称联动控件（cid=1036 Static）非空=代码被客户端完整解析；未联动自动清空重输一次，仍失败报 `INPUT_VERIFY_FAILED` 阻止提交；名称控件缺失时降级放行。可用 `order.verify_code_input` 关闭 |
-| 委托号横幅截获 | 提交点击后后台线程抓取右下角黄色横幅（~12fps 抓屏；自绘覆盖层，`PrintWindow` 不可见）+黄色掩码定位+模板 OCR 读出合同编号，解析以尾部全角句号为锚、与字长无关（券商编号长度不一）。成功返回 `entrust_no`，失败返回 `null` 不影响下单，可配 `order.recover_entrust_no` 自动回补（见[下单响应](#post-orders--下单)） |
+| 委托号横幅截获 | 提交点击后后台线程抓取右下角黄色横幅（~12fps 抓屏；自绘覆盖层，`PrintWindow` 不可见）+黄色掩码定位+模板 OCR 读出合同编号，解析以尾部全角句号为锚、与字长无关（券商编号长度不一）。成功返回 `entrust_no`，失败返回 `null` 不影响下单，可配 `order.recover_entrust_no` 自动回补（见[下单响应](#post-orders--下单)）。真假数字按**字形高度类**判别（数字恒矮于文案满高——console 9/10、RDP 12/15），横幅字号随桌面重渲染变化也能稳定读取——已验证 RDP↔console 重挂循环（2026-10-09 事故：`tscon` 重挂 console 后字号变小，汉字混入数字字宽带，纯 IoU 阈值方案把 `8119` 假前缀黏上真号；实弹证伪后被高度门控取代）。现场诊断工具：`scripts/probe_banner_pixels.py`（随单会话内采帧）+ `scripts/replay_banner_frames.py`（对存帧离线重放截获管线） |
 | 委托状态与成交回报 | `GET /orders/{entrust_no}/status` 按合同编号 join 当日委托 × 当日成交：委托状态由数量推导（不依赖券商备注文本），成交聚合含加权均价与逐笔明细——下单响应的轮询侧对应物 |
 | 窗口位置自愈 | 任务开始前检查窗口与工作区交集（阈值 60%），窗口被误拖出屏幕时自动移回（`click_input`/截图按屏幕坐标工作，出屏会失效） |
 | 窗口可见性自愈 | 后台监控（每 2s）同时恢复最小化与**托盘隐藏**窗口（`IsIconic` **或** `IsWindowVisible`——托盘隐藏态非 iconic，曾是盲区）；软恢复连续 3 轮无效时，按**运行中进程**的 exe 重拉兜底（hwnd→PID→psutil 取路径，配置 `trading_app_paths` 兜底，60s 冷却）——单实例客户端会唤起既有窗口，多套安装并存也不会拉错程序。查询路径激活前同样对隐藏窗口 `SW_SHOW` |
@@ -120,12 +120,13 @@ uv run python main.py --dev       # 开发模式（热加载）
   - **残余**（接受）：任务**执行中途**断开仍由看门狗兜底（30s 超时+恢复）——健康门只在任务开始前判定，无法安全抢占进行到一半的点击序列；RDP **重连**不打断进行中的任务（进程/窗口/句柄在 console→RDP 换轨中保留，仅有秒级分辨率切换的布局抖动风险）
   - **fail-open**：状态查询异常一律放行（最坏 = 无门时代）；只拦「已断开」态，重连过渡瞬态放行。逃生口 `task_queue.session_gate_enabled: false`（热重载生效）——与自愈开关 `session_monitor.enabled` 独立（失效域不同：一个管队列拒绝，一个管 tscon 动作）
   - 边角：下单成功后的委托号截获/对账等链式查询若恰在断开期被拒，各自降级记 warning，下单响应本身不受影响——恢复后用 `GET /orders/pending` 反查委托号
-- **桌面僵死检测与升级自愈（挂接但僵死态）**——比直接断开更隐蔽的故障：会话保持**挂接**（WTS 报 Active，`session.ui_available` 恒 `true`）但服务端输入/图形路径全死——鼠标移动失败（`SetCursorPos` error 0，pywinauto 呈现为 "There is no active desktop"）、截屏失败、前台句柄恒 `0x0`。2026-10-09 实测：`tscon` 自愈 2 分钟后撞上 RDP 重连，僵死约 20 分钟直至真实点击复位（与 2026-10-06 图形栈僵死事故同族）。现由三层覆盖：
+- **桌面僵死检测与升级自愈（挂接但僵死态）**——比直接断开更隐蔽的故障：会话保持**挂接**（WTS 报 Active，`session.ui_available` 恒 `true`）但服务端输入/图形路径全死——鼠标移动失败（`SetCursorPos` error 0，pywinauto 呈现为 "There is no active desktop"）、截屏失败、前台句柄恒 `0x0`。2026-10-09 实测：`tscon` 自愈 2 分钟后撞上 RDP 重连，僵死约 20 分钟直至真实点击复位（与 2026-10-06 图形栈僵死事故同族）。严重度有分层——同晚 23:44 RDP 重连后出现的轻量形态（前台 `0x0`、注入被拒、streak=2）**约 80 秒后未经干预自行清零**——先探针（`/actions/send-key` 发 ESC 是最廉价的活性探针）观察 ~2 分钟再升级处置。现由三层覆盖：
   - **错误码细分**：命中僵死指纹（前台 `0x0` 或 "no active desktop" 文本）的激活失败返回 `SESSION_DESKTOP_UNAVAILABLE`，不再误报 `WINDOW_NOT_FOUND`「当前前台窗口不是交易窗口」（窗口句柄找得到，死的是桌面）
   - **`/health` 消歧**：`session.desktop_wedged`（15 分钟内连续 ≥2 次指纹失败即 `true`；`desktop_wedge_streak` 为原始计数）——`ui_available: true` 且 `desktop_wedged: true` = 假绿灯
   - **升级自愈**：标记僵死且会话挂接时（`session_monitor.wedge_heal_enabled: true`；独立冷却 `wedge_cooldown_seconds` 默认 600s）执行 `tsdiscon <id>` 强制走一次 RDP 断开-重连周期（实测有效的复位手段）。有客户端时 mstsc 秒级自动重连；无人值守时由既有 tscon 链路按防抖+TCP 判别器接管 console（正是上文竞态毒源的两层防护）。任一任务成功即清除标记——成功本身就是最便宜的探针
 - **不要锁屏**（`Win+L` 或带锁定的屏保会切到安全桌面，自动化失效；锁定但挂接 console 的会话状态为 Active，自愈不处理）
 - **注册为 Windows 服务 / 计划任务「不管用户是否登录都要运行」不可行**：它们落在 Session 0，看不到也无法操作交互会话的窗口（窗口枚举为空）。因此开机自启同样要求先有人登录——RDP 或 VNC 连入后手动启动 `xiadan.exe` 与网关
+- **例外——`scripts/run_in_session.py`**：从一个*已在运行*的 Session 0 管理上下文（如 SSH 会话）把进程启动**进**交互会话，无人值守可用。原理：复制交易进程的 token，持 `SeDebugPrivilege` 模拟同会话 winlogon（SYSTEM）以满足 `CreateProcessAsUser` 对**调用方**的 `SeAssignPrimaryTokenPrivilege` 校验（管理员默认不持有；注意复制出的 token 特权是「持有但未启用」，须在模拟 token 上先启用），再在该会话的 `WinSta0\Default` 上创建子进程——无需密码、不建计划任务、零持久化。无人值守重启网关：先杀旧进程（单实例互斥），再 `.venv/Scripts/python.exe scripts/run_in_session.py --cwd <仓库> --stdout <日志> -- .venv/Scripts/python.exe main.py`。坑：`CreateProcessWithTokenW` 在此是死路——子进程落在**调用方**会话
 - 服务器重启后：RDP（或 VNC）连入 → 登录 → 启动 `xiadan.exe` + 券商登录 → 启动网关
 
 **VNC（可选便利项）**：安装 [TightVNC Server](https://www.tightvnc.com/)（以 Windows 服务运行，镜像 console 会话），设置强 VNC 密码，并在防火墙限制 VNC 端口——**切勿暴露公网**（建议走 SSH 隧道访问）。自动化不依赖它（服务端关停实测无影响），其价值仅剩：重启后 console 原生登录（无自愈窗口）、零会话搬运的极致连续性、镜像式应急目检。装不装皆可。
