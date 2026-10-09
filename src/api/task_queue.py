@@ -25,7 +25,8 @@ from src.models.config import AppConfig
 from src.services.window_monitor import WindowMonitor
 from src.services.window_service import WindowService
 from src.utils.session_state import (
-    get_session_state, state_name, WTS_DISCONNECTED
+    get_session_state, state_name, WTS_DISCONNECTED,
+    record_desktop_failure, record_desktop_success
 )
 from src.utils.alert import send_alert
 from src.utils.diagnostic import DiagnosticUtil
@@ -638,6 +639,17 @@ class TaskQueue(Singleton):
                                  "last_error_code": error_code},
                         level="error",
                     )
+
+        # 桌面僵死追踪喂入（session_state 单一事实源；消费方=升级自愈+/health）。
+        # 会话门拒绝豁免——门拒时未触碰任何 UI，不构成桌面可操作性证据
+        # （与上方连续失败计数的豁免同源语义）。指纹双通道：分类码直接命中；
+        # 裸 RuntimeError（reset_window_state 等未包裹路径）按文本兜底。
+        if task.error is None:
+            record_desktop_success()
+        elif not getattr(task, "precheck_rejected", False):
+            if (error_code == ErrorCode.SESSION_DESKTOP_UNAVAILABLE
+                    or "no active desktop" in str(task.error).lower()):
+                record_desktop_failure()
 
         self._track_order_dialog_behavior(task)
 

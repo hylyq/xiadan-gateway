@@ -120,6 +120,10 @@ uv run python main.py --dev       # 开发模式（热加载）
   - **残余**（接受）：任务**执行中途**断开仍由看门狗兜底（30s 超时+恢复）——健康门只在任务开始前判定，无法安全抢占进行到一半的点击序列；RDP **重连**不打断进行中的任务（进程/窗口/句柄在 console→RDP 换轨中保留，仅有秒级分辨率切换的布局抖动风险）
   - **fail-open**：状态查询异常一律放行（最坏 = 无门时代）；只拦「已断开」态，重连过渡瞬态放行。逃生口 `task_queue.session_gate_enabled: false`（热重载生效）——与自愈开关 `session_monitor.enabled` 独立（失效域不同：一个管队列拒绝，一个管 tscon 动作）
   - 边角：下单成功后的委托号截获/对账等链式查询若恰在断开期被拒，各自降级记 warning，下单响应本身不受影响——恢复后用 `GET /orders/pending` 反查委托号
+- **桌面僵死检测与升级自愈（挂接但僵死态）**——比直接断开更隐蔽的故障：会话保持**挂接**（WTS 报 Active，`session.ui_available` 恒 `true`）但服务端输入/图形路径全死——鼠标移动失败（`SetCursorPos` error 0，pywinauto 呈现为 "There is no active desktop"）、截屏失败、前台句柄恒 `0x0`。2026-10-09 实测：`tscon` 自愈 2 分钟后撞上 RDP 重连，僵死约 20 分钟直至真实点击复位（与 2026-10-06 图形栈僵死事故同族）。现由三层覆盖：
+  - **错误码细分**：命中僵死指纹（前台 `0x0` 或 "no active desktop" 文本）的激活失败返回 `SESSION_DESKTOP_UNAVAILABLE`，不再误报 `WINDOW_NOT_FOUND`「当前前台窗口不是交易窗口」（窗口句柄找得到，死的是桌面）
+  - **`/health` 消歧**：`session.desktop_wedged`（15 分钟内连续 ≥2 次指纹失败即 `true`；`desktop_wedge_streak` 为原始计数）——`ui_available: true` 且 `desktop_wedged: true` = 假绿灯
+  - **升级自愈**：标记僵死且会话挂接时（`session_monitor.wedge_heal_enabled: true`；独立冷却 `wedge_cooldown_seconds` 默认 600s）执行 `tsdiscon <id>` 强制走一次 RDP 断开-重连周期（实测有效的复位手段）。有客户端时 mstsc 秒级自动重连；无人值守时由既有 tscon 链路按防抖+TCP 判别器接管 console（正是上文竞态毒源的两层防护）。任一任务成功即清除标记——成功本身就是最便宜的探针
 - **不要锁屏**（`Win+L` 或带锁定的屏保会切到安全桌面，自动化失效；锁定但挂接 console 的会话状态为 Active，自愈不处理）
 - **注册为 Windows 服务 / 计划任务「不管用户是否登录都要运行」不可行**：它们落在 Session 0，看不到也无法操作交互会话的窗口（窗口枚举为空）。因此开机自启同样要求先有人登录——RDP 或 VNC 连入后手动启动 `xiadan.exe` 与网关
 - 服务器重启后：RDP（或 VNC）连入 → 登录 → 启动 `xiadan.exe` + 券商登录 → 启动网关
@@ -247,6 +251,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `QUEUE_TIMEOUT` | 任务排队超时 |
 | `QUEUE_FULL` | 队列已满 |
 | `SESSION_UNAVAILABLE` | RDP 会话断开，任务**未执行**即毫秒级快速拒绝（与 `TASK_TIMEOUT` 相反：确定未触碰客户端，幂等记录自动清除，同 `Idempotency-Key` 恢复后重试即安全） |
+| `SESSION_DESKTOP_UNAVAILABLE` | 会话已挂接但桌面不可操作（输入注入被拒/无活动输入桌面，激活失败命中僵死指纹）。任务**未执行**（交易窗口找得到，是桌面拒收输入）——幂等记录自动清除，恢复后重试即安全。通常 RDP 重连一次即复位；无人值守时由升级自愈（tsdiscon）自动处理 |
 | `TASK_TIMEOUT` | 任务超时，恢复成功 |
 | `TASK_TIMEOUT_RECOVERY_FAILED` | 任务超时，恢复也失败 |
 | `ORDER_STATE_UNKNOWN` | 下单**点击提交后**发生非业务异常（如 RDP 断开瞬间桌面消亡）——订单可能已提交，状态未知；幂等记录**保留**，同 key 重试会被拦截，先查单核实（确认未提交后用新 key 重试） |
@@ -257,7 +262,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 
 | 方法 | 路径 | 说明 | 入队 | timeout |
 |------|------|------|:---:|--------|
-| GET | `/health` | 健康检查 + 登录态（`logged_in`）+ 会话状态（`session.ui_available`，RDP 断开期间为 `false`——监控轮询恢复信号用）+ 推荐客户端 timeout + 运行统计（成功率/错误码聚合/连续失败/下单弹窗统计） | | 5s |
+| GET | `/health` | 健康检查 + 登录态（`logged_in`）+ 会话状态（`session.ui_available`，RDP 断开期间为 `false`——监控轮询恢复信号用；`session.desktop_wedged`，`true` = 挂接但僵死，见桌面僵死章节）+ 推荐客户端 timeout + 运行统计（成功率/错误码聚合/连续失败/下单弹窗统计） | | 5s |
 | GET | `/queue/status` | 任务队列状态 | | 5s |
 | POST | `/admin/reload-config` | 热重载配置 | | 5s |
 | GET | `/account/balance` | 资金余额 | ✓ | 40s |

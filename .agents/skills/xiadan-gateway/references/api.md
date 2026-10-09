@@ -27,10 +27,14 @@ CLI 子命令与 HTTP 端点一一对应；本文供需要理解响应字段全�
 - `xiadan_running` / `logged_in`：交易客户端进程在跑 / 主窗口存在（≈已登录）。
   登录前或 RDP 会话断开时窗口不存在，`logged_in=false`
 - `session`：RDP 会话连接状态（`connect_state` 码 + `state_name` +
-  `ui_available`）。`ui_available=false` = 会话断开，任务会被健康门快速
-  拒绝（`SESSION_UNAVAILABLE`）；`true` = 正常；`null` = 查询失败（未知，
-  非确定不可用）。与 `logged_in=false` 配合消歧：`session=false` 是会话
-  问题（等自愈），`session=true 且 logged_in=false` 是券商登录问题
+  `ui_available` + `desktop_wedged`）。`ui_available=false` = 会话断开，
+  任务会被健康门快速拒绝（`SESSION_UNAVAILABLE`）；`true` = 正常；`null` =
+  查询失败（未知，非确定不可用）。与 `logged_in=false` 配合消歧：
+  `session=false` 是会话问题（等自愈），`session=true 且 logged_in=false`
+  是券商登录问题。`desktop_wedged=true`（`desktop_wedge_streak`=连续指纹
+  失败计数）= **挂接但僵死**：`ui_available` 假绿（会话在，桌面输入/图形
+  路径死），任务会以 `SESSION_DESKTOP_UNAVAILABLE` 失败——网关自动
+  tsdiscon 升级自愈（独立冷却 600s），稍后重试即可
 - `queue_status`：队列忙闲
 - `stats`：近 1 小时各错误码成功率、连续失败计数、下单弹窗统计
 - `config.recommended_client_timeout_seconds`：官方推荐客户端超时
@@ -106,7 +110,9 @@ CLI 子命令与 HTTP 端点一一对应；本文供需要理解响应字段全�
 被执行——同幂等键重试安全）；`QUEUE_FULL` 队列已满；`SESSION_UNAVAILABLE`
 RDP 会话断开，任务**确定未执行**即被毫秒级拒绝（与 `TASK_TIMEOUT` 相反：
 幂等记录已自动清除，轮询 health `session.ui_available=true` 后同幂等键重试
-即安全，无需查单）；`TASK_TIMEOUT` 任务超时
+即安全，无需查单）；`SESSION_DESKTOP_UNAVAILABLE` 会话挂接但桌面不可操作
+（激活失败命中僵死指纹，任务确定未执行，幂等记录已清除——通常 RDP 重连
+一次即复位，无人值守时网关 tsdiscon 升级自愈自动处理）；`TASK_TIMEOUT` 任务超时
 恢复成功（结果未知，查单核实）；`TASK_TIMEOUT_RECOVERY_FAILED` 超时且恢复失败
 （结果未知，查单核实）；`ORDER_STATE_UNKNOWN` 下单点击提交后发生非业务异常
 （如 RDP 断开瞬间），订单**可能已提交**（结果未知，查单核实；幂等记录保留，

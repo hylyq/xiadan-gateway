@@ -15,7 +15,10 @@ import win32process
 from src.utils.logger import Logger
 from src.constants import TRADING_WINDOW_TITLE
 from src.models.config import AppConfig
-from src.utils.session_state import WTS_DISCONNECTED, get_session_state
+from src.utils.alert import send_alert
+from src.utils.session_state import (
+    WTS_DISCONNECTED, get_session_state, state_name, desktop_wedge_status
+)
 
 
 class WindowMonitor:
@@ -70,6 +73,9 @@ class WindowMonitor:
         self._bad_state_count = 0
         self._last_relaunch = 0.0
         self._last_session_recovery = 0.0
+        # 桌面僵死升级自愈（tsdiscon）上次执行时刻——独立于 tscon 冷却，
+        # 两套冷却互不挤占（tsdiscon 后的 state=4 阶段交给既有链路接管）
+        self._last_wedge_recovery = 0.0
         # 会话首次被观察到断开的时刻（None=当前未处于断开态）——防抖起表点
         self._disconnected_since: Optional[float] = None
         # 登录/启动期避让中（进出避让各记一条日志，避免每 2s 刷屏）
@@ -339,6 +345,81 @@ class WindowMonitor:
         except Exception as e:
             self.logger.warning(f"会话断开自愈失败: {e}")
 
+    def _recover_desktop_if_wedged(self) -> None:
+        """桌面僵死升级自愈（形态二：WTS 已挂接但输入/图形路径无响应）
+
+        2026-10-09 事故：tscon 自愈（20:05:31）后用户 RDP 重连（20:07:42）
+        撞车，会话呈 Active 但 SetCursorPos error 0 / screen grab 失败 /
+        前台恒 0，全部 UI 任务失败约 20 分钟（用户真实点击才复位）。既有
+        自愈只认 state==4，本态永不触发；且 tscon 在已挂 console 时是
+        no-op，治不了本态。本态与 2026-10-06 图形栈僵死事故（见
+        _recover_session_if_disconnected docstring 存档）同族——都是
+        tscon/附加竞态的产物，只是程度更轻（真实输入可复位 vs logoff 重建）。
+
+        动作：tsdiscon <sid> 强制走一次 RDP 断开-重连周期（「重连RDP复位」
+        实测有效）。有客户端时 mstsc 自动重连（秒级）；无客户端时进入的
+        state=4 阶段完全交给 _recover_session_if_disconnected——30s 防抖 +
+        TCP 判别器让路（ESTABLISHED ≤600s 不 tscon）天然防止 tscon 撞
+        客户端重连（本次事故毒源）。本方法不碰 _last_session_recovery，
+        只用自己的独立冷却（wedge_cooldown_seconds，默认 600s）。
+
+        触发条件（session_state 桌面僵死追踪器）：连续 ≥2 次桌面级激活
+        失败（SESSION_DESKTOP_UNAVAILABLE / "no active desktop" 指纹）
+        且 15min 内有复现。成功任务即清零——成功本身就是「已复位」
+        最清晰的探针，无需额外 UI 探测。
+
+        fail-closed：state 未知（None）不动作。门的误放行由任务失败兜底，
+        tsdiscon 的误动作断的是用户正在使用的 RDP——代价不对称，对
+        不确定状态宁可不动（与 tscon 侧同一哲学）。
+        """
+        cfg = AppConfig().get_session_monitor_config()
+        if not cfg.get("wedge_heal_enabled", True):
+            return
+        cooldown = float(cfg.get("wedge_cooldown_seconds", 600))
+        if time.time() - self._last_wedge_recovery < cooldown:
+            return
+        wedge = desktop_wedge_status()
+        if not wedge.get("wedged"):
+            return
+        state = get_session_state()
+        if state is None or state == self.WTS_STATE_DISCONNECTED:
+            return  # 断开态归既有链路管（避免双动作竞态）；未知态 fail-closed
+        try:
+            import os
+            import subprocess
+
+            import win32ts  # ProcessIdToSessionId 仍需
+
+            sid = win32ts.ProcessIdToSessionId(os.getpid())
+            self.logger.warning(
+                f"检测到桌面僵死（会话挂接正常 state={state_name(state)}，"
+                f"连续 {wedge['streak']} 次桌面级激活失败），自愈升级: "
+                f"tsdiscon {sid}（RDP 断开-重连周期复位输入栈）")
+            result = subprocess.run(
+                ["tsdiscon", str(sid)],
+                capture_output=True, text=True, timeout=15)
+            if result.returncode == 0:
+                self.logger.info(
+                    "tsdiscon 执行成功——有客户端时等待其自动重连（秒级），"
+                    "无客户端时由 tscon 链路按防抖+冷却重挂 console")
+            else:
+                self.logger.warning(
+                    f"tsdiscon 执行失败 rc={result.returncode}: "
+                    f"{(result.stderr or '').strip()}")
+            send_alert(
+                "desktop_wedge_recovery",
+                "桌面僵死升级自愈已触发（tsdiscon）",
+                f"会话挂接正常但连续 {wedge['streak']} 次桌面级激活失败，"
+                f"已执行 tsdiscon 强制 RDP 断开-重连周期",
+                details={"wedge_streak": wedge["streak"],
+                         "connect_state": state},
+                level="error",
+            )
+        except Exception as e:
+            self.logger.warning(f"桌面僵死升级自愈失败: {e}")
+        finally:
+            self._last_wedge_recovery = time.time()  # 含失败路径，防热循环
+
     def _rdp_client_connecting(self) -> bool:
         """RDP 监听端口上是否存在 ESTABLISHED 连接（客户端已连上服务器）
 
@@ -532,10 +613,11 @@ class WindowMonitor:
         next_session_check = 0.0
 
         while self._running:
-            # 会话断开自愈（时间触发，独立于窗口检查节奏）
+            # 会话断开自愈 + 桌面僵死升级自愈（时间触发，独立于窗口检查节奏）
             try:
                 if time.time() >= next_session_check:
                     self._recover_session_if_disconnected()
+                    self._recover_desktop_if_wedged()
                     next_session_check = time.time() + self.SESSION_CHECK_INTERVAL
             except Exception as e:
                 self.logger.warning(f"会话自愈检查异常: {e}")

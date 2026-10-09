@@ -11,7 +11,9 @@
   "session_monitor": {
     "enabled": true,
     "debounce_seconds": 30,
-    "cooldown_seconds": 300
+    "cooldown_seconds": 300,
+    "wedge_heal_enabled": true,
+    "wedge_cooldown_seconds": 600
   },
   "task_queue": {
     "max_size": 50,

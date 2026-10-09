@@ -187,6 +187,16 @@ class WindowService(Singleton):
                 app = Application(backend="uia").connect(handle=hwnd)
                 app.window(handle=hwnd).set_focus()
             except Exception as e2:
+                # 桌面僵死指纹（同 _raise_activation_failure）：细分错误码
+                if "no active desktop" in (str(e) + str(e2)).lower():
+                    raise ApiError(
+                        ErrorCode.SESSION_DESKTOP_UNAVAILABLE,
+                        f"桌面不可操作（会话已挂接但无活动输入桌面），"
+                        f"设置前台窗口失败，句柄: {hwnd}。原始错误: {str(e)} / {str(e2)}",
+                        suggestion=(
+                            "通常 RDP 断开后重连一次即复位；无人值守时网关将自动升级自愈"
+                        ),
+                    )
                 raise ApiError(
                     ErrorCode.WINDOW_NOT_FOUND,
                     f"设置前台窗口失败，句柄: {hwnd}，错误1: {str(e)}，错误2: {str(e2)}"
@@ -970,11 +980,13 @@ class WindowService(Singleton):
                 # 继续尝试 click_input，这可能通过点击任务栏按钮恢复
 
         # click_input 带到前台 + 句柄级校验
+        last_exc: Optional[Exception] = None
         for attempt in range(2):
             try:
                 window.click_input()
                 time.sleep(0.3)
             except Exception as e:
+                last_exc = e
                 self.logger.warning(f"click_input 失败 (attempt {attempt + 1}): {e}")
                 continue
 
@@ -988,16 +1000,47 @@ class WindowService(Singleton):
 
         # 最终校验：确保前台确实是目标窗口
         if win32gui.GetForegroundWindow() != hwnd:
+            fg = win32gui.GetForegroundWindow()
             self.logger.error(
-                f"无法将交易窗口带到前台，前台={win32gui.GetForegroundWindow():#x} "
+                f"无法将交易窗口带到前台，前台={fg:#x} "
                 f"目标={hwnd:#x}，禁止发送按键 '{keys}'"
             )
+            self._raise_activation_failure(keys, fg, last_exc)
+
+        self._send_key_foreground(keys)
+
+    @staticmethod
+    def _raise_activation_failure(keys: str, fg: int,
+                                  last_exc: Optional[Exception]) -> None:
+        """激活失败的分类上报（2026-10-09 事故细分）
+
+        桌面僵死指纹：WTS 已挂接（Active）但输入/图形路径无响应——
+        pywinauto 把 SetCursorPos 的 error 0 改写为 "There is no active
+        desktop required for moving mouse cursor!"，GetForegroundWindow()
+        恒 0。此时报 WINDOW_NOT_FOUND「前台窗口不是交易窗口」是误导
+        （窗口句柄找得到，死的是桌面），细分 SESSION_DESKTOP_UNAVAILABLE
+        供统计/健康标记（session_state 桌面僵死追踪）/升级自愈识别。
+        前台确有其他窗口（fg≠0 且无指纹）时维持 WINDOW_NOT_FOUND 原语义，
+        文案是准确的。
+        """
+        dead = (fg == 0
+                or (last_exc is not None
+                    and "no active desktop" in str(last_exc).lower()))
+        if not dead:
             raise ApiError(
                 ErrorCode.WINDOW_NOT_FOUND,
                 f"无法激活交易窗口到前台，无法发送按键 '{keys}'。当前前台窗口不是交易窗口。"
             )
-
-        self._send_key_foreground(keys)
+        raise ApiError(
+            ErrorCode.SESSION_DESKTOP_UNAVAILABLE,
+            f"桌面不可操作（会话已挂接但无活动输入桌面/输入注入被拒），"
+            f"无法发送按键 '{keys}'。原始错误: {last_exc}",
+            suggestion=(
+                "通常 RDP 断开后重连一次即复位；无人值守时网关会话监控将自动"
+                "执行 tsdiscon 升级自愈（冷却默认 600s），可稍后重试"
+            ),
+            details={"foreground_hwnd": fg},
+        )
 
     def close_child_dialog(self, dialog_title: str = "") -> bool:
         """安全关闭子面板/对话框（如买入/卖出窗口），绝不关闭整个程序
@@ -1072,9 +1115,27 @@ class WindowService(Singleton):
         except Exception:
             pass
 
-        with timed("click_input 激活", self.logger):
-            window.click_input()
-            time.sleep(0.3)
+        # 桌面僵死指纹细分：裸 click_input 异常原样冒泡会被统计归为
+        # INTERNAL_ERROR，客户端看到的是含糊的「未知异常」——指纹命中时
+        # 转分类 ApiError（消息保留原始文本，保住 "no active desktop"
+        # 的 grep 诊断指纹）
+        try:
+            with timed("click_input 激活", self.logger):
+                window.click_input()
+                time.sleep(0.3)
+        except ApiError:
+            raise
+        except Exception as e:
+            if "no active desktop" in str(e).lower():
+                raise ApiError(
+                    ErrorCode.SESSION_DESKTOP_UNAVAILABLE,
+                    f"桌面不可操作（会话已挂接但无活动输入桌面），激活失败。"
+                    f"原始错误: {e}",
+                    suggestion=(
+                        "通常 RDP 断开后重连一次即复位；无人值守时网关将自动升级自愈"
+                    ),
+                ) from e
+            raise
 
         # ESC×5 确保从任意子面板/弹窗回退到 F1 买入界面
         # 使用 background=True 跳过冗余激活（click_input 已激活）

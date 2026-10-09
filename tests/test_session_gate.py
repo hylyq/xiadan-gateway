@@ -56,7 +56,8 @@ class TestGetSessionState:
         monkeypatch.setattr(session_state, "get_session_state", lambda: 4)
         assert session_state.session_health() == {
             "connect_state": 4, "state_name": "Disconnected",
-            "ui_available": False}
+            "ui_available": False,
+            "desktop_wedged": False, "desktop_wedge_streak": 0}
         monkeypatch.setattr(session_state, "get_session_state", lambda: 0)
         assert session_state.session_health()["ui_available"] is True
         monkeypatch.setattr(session_state, "get_session_state", lambda: None)

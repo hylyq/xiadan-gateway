@@ -36,7 +36,13 @@ DEFAULT_CONFIG = {
     "session_monitor": {
         "enabled": True,          # 会话断开自愈开关：手动重连 RDP 前可热关闭（防 tscon 接管竞态）
         "debounce_seconds": 30,   # 连续断开满此时长才自愈；30s≈mstsc 自动重连+常见短断网总时长，勿设 0/低于 10——断网期间 TCP 判别器是盲区，本层唯一兜底（依据见 window_monitor._recover_session_if_disconnected docstring 存档）
-        "cooldown_seconds": 300   # 两次自愈最小间隔（冷却期=重连保护窗；console 挂接后会话不会自发再断，实际代价≈0）
+        "cooldown_seconds": 300,  # 两次自愈最小间隔（冷却期=重连保护窗；console 挂接后会话不会自发再断，实际代价≈0）
+        # 挂接但僵死升级自愈开关（形态二：WTS=Active 但输入/图形路径无响应，
+        # ui_available 假绿；2026-10-09 事故）。触发=连续 2 次桌面级激活失败
+        # 且会话非断开态，动作=tsdiscon 强制 RDP 断开-重连周期（重连复位
+        # 输入栈）。误触发代价=断开正在使用的 RDP 数秒，逃生口即本开关
+        "wedge_heal_enabled": True,
+        "wedge_cooldown_seconds": 600  # 两次升级自愈最小间隔（独立于 tscon 冷却，互不挤占）
     },
     "task_queue": {
         "max_size": 50,
@@ -172,7 +178,8 @@ class AppConfig(Singleton):
 
     def get_session_monitor_config(self) -> dict:
         return self._config.get("session_monitor", {
-            "enabled": True, "debounce_seconds": 30, "cooldown_seconds": 300})
+            "enabled": True, "debounce_seconds": 30, "cooldown_seconds": 300,
+            "wedge_heal_enabled": True, "wedge_cooldown_seconds": 600})
 
     def get_task_queue_config(self) -> dict:
         return self._config.get("task_queue", {
@@ -280,7 +287,12 @@ class AppConfig(Singleton):
         scfg = self._config.get("session_monitor") or {}
         if scfg.get("enabled") is not None and not isinstance(scfg.get("enabled"), bool):
             errors.append(f"session_monitor.enabled 必须是布尔值，当前: {scfg.get('enabled')!r}")
-        for field in ("debounce_seconds", "cooldown_seconds"):
+        if scfg.get("wedge_heal_enabled") is not None and not isinstance(
+                scfg.get("wedge_heal_enabled"), bool):
+            errors.append(
+                f"session_monitor.wedge_heal_enabled 必须是布尔值，"
+                f"当前: {scfg.get('wedge_heal_enabled')!r}")
+        for field in ("debounce_seconds", "cooldown_seconds", "wedge_cooldown_seconds"):
             v = scfg.get(field)
             if v is None:
                 continue
