@@ -39,6 +39,14 @@ ENTRUST_LEN_MIN = 8
 _YELLOW_R, _YELLOW_G, _YELLOW_B = 200, 180, 120
 
 
+# 屏幕分辨率/虚拟屏签名（截获期变化 = 桌面几何在漂移，如 RDP↔console
+# 重挂——2026-10-09 黏连事故即发生于 tscon 重挂 console 后 6 秒）
+def _display_signature():
+    import win32api
+    sm = win32api.GetSystemMetrics
+    return (sm(0), sm(1), sm(78), sm(79))
+
+
 class EntrustNoCapture:
     """下单横幅后台截获器（单次下单生命周期，用完即弃）"""
 
@@ -80,6 +88,14 @@ class EntrustNoCapture:
                         .get("entrust_no_timeout_seconds", 3.0))
         t0 = time.perf_counter()
         warned = False
+        try:
+            disp = _display_signature()
+            l, t, r, b = win32gui.GetWindowRect(hwnd)
+            self.logger.info(f"横幅截获开始: 屏幕 {disp[0]}x{disp[1]}，"
+                             f"虚拟屏 {disp[2]}x{disp[3]}，窗口矩形 "
+                             f"({l},{t},{r},{b})")
+        except Exception:
+            disp = None
         while time.perf_counter() - t0 < timeout:
             try:
                 if win32gui.IsIconic(hwnd) or not win32gui.IsWindowVisible(hwnd):
@@ -89,6 +105,12 @@ class EntrustNoCapture:
                                          "本次委托号截获将跳过")
                     time.sleep(0.1)
                     continue
+                if disp is not None and _display_signature() != disp:
+                    self.logger.warning(
+                        f"截获期间屏幕分辨率/虚拟屏变化: {disp} -> "
+                        f"{_display_signature()}（桌面几何漂移，如 RDP↔console "
+                        f"重挂；裁剪几何按窗口矩形逐帧重算，无需干预）")
+                    disp = _display_signature()
                 digits = self._grab_banner_digits(hwnd)
                 if digits:
                     self._result = digits

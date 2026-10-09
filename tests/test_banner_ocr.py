@@ -4,6 +4,9 @@
 - unreadable_110122: 委托号 6284449826 含三连同号"444"，黏连字形曾被
   固定 7.5px/字拆分估计错拆导致识别失败（2026-09-29 盘中实失败例）
 - unreadable_104946 / unreadable_104952: 动画帧偶发失败例，离线可读
+- glued_console_8119: RDP→console 重挂后横幅字号变小，「编号：」尾段
+  被旧阈值当作假数字黏在真号 6293087338 前成 81196293087338
+  （2026-10-09 断开 RDP 实测事故例，scripts/probe_banner_pixels.py 采帧）
 """
 from pathlib import Path
 
@@ -47,6 +50,18 @@ class TestRealBannerSamples:
         for name in ("unreadable_104946.png", "unreadable_104952.png"):
             digits, _ = ocr.read_digits(_load(name))
             assert digits == EXPECTED[name], name
+
+    def test_console_glued_prefix_rejected(self, ocr):
+        """console 重挂态黏连样本：汉字假数字前缀不得混入号码
+
+        RDP 断开后 tscon 重挂 console，横幅渲染字号变小（号码 ~5px、
+        汉字 ~10px 宽），汉字落入数字字宽带且 IoU 0.42-0.56——旧阈值
+        0.40 时「编号：」段被拆成假前缀 8119 黏上真号。阈值按实测标定
+        （真数字 ≥0.67、假数字 ≤0.62）提至 0.63 后应读出纯号码。
+        """
+        digits, conf = ocr.read_digits(_load("glued_console_8119.png"))
+        assert digits == "6293087338"
+        assert conf >= 0.60
 
     def test_period_terminator_anchors_run(self, ocr):
         """数字串应以句号前紧邻的字形收尾——句号右侧不存在数字串"""
