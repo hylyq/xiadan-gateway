@@ -18,7 +18,7 @@
 ## 目录
 
 - [核心特性](#核心特性)
-- [快速开始](#快速开始)（含[前置准备：券商软件设置](#前置准备券商软件设置) / [服务器无人值守运行（RDP 即可，VNC 可选）](#服务器无人值守运行rdp-即可vnc-可选)）
+- [快速开始](#快速开始)（含[前置准备：券商软件设置](#前置准备券商软件设置) / [服务器无人值守运行（推荐 VNC，RDP 亦可）](#服务器无人值守运行推荐-vncrdp-亦可)）
 - [上线前必改（安全检查）](#上线前必改安全检查)
 - [配置](#配置)
 - [API 接口](#api-接口)：[响应格式](#响应格式) / [错误码](#错误码) / [接口总表](#接口总表) / [下单](#post-orders--下单) / [委托状态与成交回报](#get-ordersentrust_nostatus--委托状态与成交回报) / [撤单](#post-orderscancel-all--撤单) / [辅助接口](#辅助接口) / [调用方 timeout 配置](#调用方-timeout-配置)
@@ -54,7 +54,7 @@
 | 运行统计 | 按错误码聚合成功率（最近 1 小时窗口，`/health` 返回），连续 3 次失败日志告警；跟踪下单弹窗行为，客户端「快速交易」设置被重置（弹窗行为翻转）时告警 |
 | 告警外推 | 连续任务失败≥3、下单弹窗行为漂移、任务超时 → POST webhook（generic JSON 或企业微信/钉钉/飞书 `text` 格式），后台线程发送不阻塞交易路径 |
 | 证券名称联动校验 | 输入代码后轮询名称联动控件（cid=1036 Static）非空=代码被客户端完整解析；未联动自动清空重输一次，仍失败报 `INPUT_VERIFY_FAILED` 阻止提交；名称控件缺失时降级放行。可用 `order.verify_code_input` 关闭 |
-| 委托号横幅截获 | 提交点击后后台线程抓取右下角黄色横幅（~12fps 抓屏；自绘覆盖层，`PrintWindow` 不可见）+黄色掩码定位+模板 OCR 读出合同编号，解析以尾部全角句号为锚、与字长无关（券商编号长度不一）。成功返回 `entrust_no`，失败返回 `null` 不影响下单，可配 `order.recover_entrust_no` 自动回补（见[下单响应](#post-orders--下单)）。真假数字按**字形高度类**判别（数字恒矮于文案满高——console 9/10、RDP 12/15），横幅字号随桌面重渲染变化也能稳定读取——已验证 RDP↔console 重挂循环（2026-10-09 事故：`tscon` 重挂 console 后字号变小，汉字混入数字字宽带，纯 IoU 阈值方案把 `8119` 假前缀黏上真号；实弹证伪后被高度门控取代）。现场诊断工具：`scripts/probe_banner_pixels.py`（随单会话内采帧）+ `scripts/replay_banner_frames.py`（对存帧离线重放截获管线） |
+| 委托号横幅截获 | 提交点击后后台线程抓取右下角黄色横幅（~12fps 抓屏；自绘覆盖层，`PrintWindow` 不可见）+黄色掩码定位+模板 OCR 读出合同编号，解析以尾部全角句号为锚、与字长无关（券商编号长度不一）。成功返回 `entrust_no`，失败返回 `null` 不影响下单，可配 `order.recover_entrust_no` 自动回补（见[下单响应](#post-orders--下单)）。真假数字按**字形高度类**判别（数字恒矮于文案满高——console 9/10、RDP 12/15），横幅字号随桌面重渲染变化也能稳定读取——已验证 RDP↔console 重挂循环（2026-10-09 事故：`tscon` 重挂 console 后字号变小，汉字混入数字字宽带，纯 IoU 阈值方案把 `8119` 假前缀黏上真号；实弹证伪后被高度门控取代）。现场诊断工具：`scripts/probe_banner_pixels.py`（随单会话内采帧）+ `scripts/replay_banner_frames.py`（对存帧离线重放截获管线）。修复后实弹验收（2026-10-10）：console 挂接会话（VNC）截获一次命中且 `entrust_no_verified: true`；RDP 断开态下高度门控拒绝读取——下单自动走 `order.recover_entrust_no` 回补，仍返回经对账的编号（`entrust_no_recovered: true`） |
 | 委托状态与成交回报 | `GET /orders/{entrust_no}/status` 按合同编号 join 当日委托 × 当日成交：委托状态由数量推导（不依赖券商备注文本），成交聚合含加权均价与逐笔明细——下单响应的轮询侧对应物 |
 | 窗口位置自愈 | 任务开始前检查窗口与工作区交集（阈值 60%），窗口被误拖出屏幕时自动移回（`click_input`/截图按屏幕坐标工作，出屏会失效） |
 | 窗口可见性自愈 | 后台监控（每 2s）同时恢复最小化与**托盘隐藏**窗口（`IsIconic` **或** `IsWindowVisible`——托盘隐藏态非 iconic，曾是盲区）；软恢复连续 3 轮无效时，按**运行中进程**的 exe 重拉兜底（hwnd→PID→psutil 取路径，配置 `trading_app_paths` 兜底，60s 冷却）——单实例客户端会唤起既有窗口，多套安装并存也不会拉错程序。查询路径激活前同样对隐藏窗口 `SW_SHOW` |
@@ -89,21 +89,21 @@ uv run python main.py --dev       # 开发模式（热加载）
 
 > 只需配置一次。关闭确认后（快速交易模式），委托直接提交不再弹窗，下单耗时减少 ~1.4s。
 
-### 服务器无人值守运行（RDP 即可，VNC 可选）
+### 服务器无人值守运行（推荐 VNC，RDP 亦可）
 
-本网关通过**真实鼠标/键盘输入**驱动 `xiadan.exe`（`SetForegroundWindow` + `click_input` + `keybd_event`），要求所在会话拥有**活动桌面**（console 挂接的交互会话）。**默认用 RDP 即可**——断开后网关自动恢复（实测）；VNC 是可选的便利项，不是依赖：
+本网关通过**真实鼠标/键盘输入**驱动 `xiadan.exe`（`SetForegroundWindow` + `click_input` + `keybd_event`），要求所在会话拥有**活动桌面**（console 挂接的交互会话）。**推荐使用 VNC 访问**——会话常驻 console，没有「断开+锁定」循环、没有自愈等待窗，横幅委托号截获直接可用（2026-10-10 服务器重启后纯 VNC 实测：查询/带截获下单/撤单全绿，横幅一次命中）。RDP 也可用——断开后会话自愈自动恢复——但 RDP 会话处于断开态期间横幅截获无法可靠读取，下单自动走回补路径（编号仍经对账，响应慢 ~8s）：
 
 | 接入方式 | 客户端断开后 | 自动化 |
 |---|---|---|
-| **RDP 直接断开（默认路径）** | 会话「断开+锁定」→ **会话自愈自动 tscon 恢复（含解锁）** | ⚠️ 短暂失效（~10-30s）后自动恢复；失效窗口内任务被**会话健康门毫秒级快速拒绝**（`SESSION_UNAVAILABLE`，任务未执行），不再等 30s 看门狗超时 ✅ 实测：VNC 服务端关闭 + 直接断开，资金/持仓/成交查询全部恢复 |
-| RDP + 离开时执行 `tscon $env:SESSIONNAME /dest:console`（PowerShell）/ `tscon %sessionname% /dest:console`（cmd.exe） | 会话无缝落回 console，不锁屏 | ✅ 持续可用（零停机路径，对停顿敏感时用） |
-| VNC（可选便利项）——会话常驻 console | VNC 只是桌面的镜像，会话保持挂接在 console 上 | ✅ 持续可用，随时连/断 |
+| **VNC（推荐）**——会话常驻 console | VNC 只是桌面的镜像，会话保持挂接在 console 上 | ✅ 持续可用，随时连/断；**横幅截获直接命中**（2026-10-10 实测：一次截获成功，`entrust_no_verified: true`，下单响应 ~13s） |
+| RDP + 离开时执行 `tscon $env:SESSIONNAME /dest:console`（PowerShell）/ `tscon %sessionname% /dest:console`（cmd.exe） | 会话无缝落回 console，不锁屏 | ✅ 持续可用（零停机路径，对停顿敏感时用）；会话在 console 上→截获直接命中 |
+| RDP 直接断开 | 会话「断开+锁定」→ **会话自愈自动 tscon 恢复（含解锁）** | ⚠️ 短暂失效（~10-30s）后自动恢复；失效窗口内任务被**会话健康门毫秒级快速拒绝**（`SESSION_UNAVAILABLE`，任务未执行），不再等 30s 看门狗超时；**断开态期间横幅截获拒绝读取→下单自动走回补路径**（`entrust_no_recovered: true`，响应 ~19s，编号仍经对账——2026-10-10 实测）✅ 实测：VNC 服务端关闭 + 直接断开，资金/持仓/成交查询全部恢复 |
 
-**日常流程（默认，RDP）**：
+**日常流程（推荐，VNC）**：
 
-1. RDP 连入 →（首次/重启后）启动 `xiadan.exe` 并登录券商 → 在终端启动网关：`uv run python main.py`
-2. 用完**直接关闭 RDP 客户端**——~10-30s 后网关自动恢复，无需执行任何命令（实测验证：全程 VNC 服务端关闭）
-3. 再次连入直接 RDP 即可，处理完（如券商重新登录）再直接断开，自愈接管
+1. VNC 连入 →（首次/重启后）启动 `xiadan.exe` 并登录券商 → 在终端启动网关：`uv run python main.py`
+2. 保持 VNC 会话在位（或直接关掉查看器——会话反正常驻 console）：查询、下单、横幅截获照常工作
+3. RDP 替代方案：RDP 连入，用完**直接关闭 RDP 客户端**——~10-30s 后网关自动恢复，无需执行任何命令（实测验证：全程 VNC 服务端关闭）；自愈完成前下单走截获→回补兜底（~19s，编号仍经对账）
 
 **规则**：
 
@@ -125,11 +125,11 @@ uv run python main.py --dev       # 开发模式（热加载）
   - **`/health` 消歧**：`session.desktop_wedged`（15 分钟内连续 ≥2 次指纹失败即 `true`；`desktop_wedge_streak` 为原始计数）——`ui_available: true` 且 `desktop_wedged: true` = 假绿灯
   - **升级自愈**：标记僵死且会话挂接时（`session_monitor.wedge_heal_enabled: true`；独立冷却 `wedge_cooldown_seconds` 默认 600s）执行 `tsdiscon <id>` 强制走一次 RDP 断开-重连周期（实测有效的复位手段）。有客户端时 mstsc 秒级自动重连；无人值守时由既有 tscon 链路按防抖+TCP 判别器接管 console（正是上文竞态毒源的两层防护）。任一任务成功即清除标记——成功本身就是最便宜的探针
 - **不要锁屏**（`Win+L` 或带锁定的屏保会切到安全桌面，自动化失效；锁定但挂接 console 的会话状态为 Active，自愈不处理）
-- **注册为 Windows 服务 / 计划任务「不管用户是否登录都要运行」不可行**：它们落在 Session 0，看不到也无法操作交互会话的窗口（窗口枚举为空）。因此开机自启同样要求先有人登录——RDP 或 VNC 连入后手动启动 `xiadan.exe` 与网关
+- **注册为 Windows 服务 / 计划任务「不管用户是否登录都要运行」不可行**：它们落在 Session 0，看不到也无法操作交互会话的窗口（窗口枚举为空）。因此开机自启同样要求先有人登录——VNC（或 RDP）连入后手动启动 `xiadan.exe` 与网关
 - **例外——`scripts/run_in_session.py`**：从一个*已在运行*的 Session 0 管理上下文（如 SSH 会话）把进程启动**进**交互会话，无人值守可用。原理：复制交易进程的 token，持 `SeDebugPrivilege` 模拟同会话 winlogon（SYSTEM）以满足 `CreateProcessAsUser` 对**调用方**的 `SeAssignPrimaryTokenPrivilege` 校验（管理员默认不持有；注意复制出的 token 特权是「持有但未启用」，须在模拟 token 上先启用），再在该会话的 `WinSta0\Default` 上创建子进程——无需密码、不建计划任务、零持久化。无人值守重启网关：先杀旧进程（单实例互斥），再 `.venv/Scripts/python.exe scripts/run_in_session.py --cwd <仓库> --stdout <日志> -- .venv/Scripts/python.exe main.py`。坑：`CreateProcessWithTokenW` 在此是死路——子进程落在**调用方**会话
-- 服务器重启后：RDP（或 VNC）连入 → 登录 → 启动 `xiadan.exe` + 券商登录 → 启动网关
+- 服务器重启后：VNC（或 RDP）连入 → 登录 → 启动 `xiadan.exe` + 券商登录 → 启动网关
 
-**VNC（可选便利项）**：安装 [TightVNC Server](https://www.tightvnc.com/)（以 Windows 服务运行，镜像 console 会话），设置强 VNC 密码，并在防火墙限制 VNC 端口——**切勿暴露公网**（建议走 SSH 隧道访问）。自动化不依赖它（服务端关停实测无影响），其价值仅剩：重启后 console 原生登录（无自愈窗口）、零会话搬运的极致连续性、镜像式应急目检。装不装皆可。
+**VNC 部署（推荐接入方式）**：安装 [TightVNC Server](https://www.tightvnc.com/)（以 Windows 服务运行，镜像 console 会话），设置强 VNC 密码，并在防火墙限制 VNC 端口——**切勿暴露公网**（建议走 SSH 隧道访问）。严格说自动化不依赖 VNC（RDP + 自愈也能跑——服务端关停实测无影响），但 VNC 提供的常驻 console 会话是唯一能同时满足以下三点的形态：无断开锁定循环、无自愈等待窗、横幅截获一次命中——因此作为推荐接入方式（2026-10-10 重启 + 纯 VNC 实测：查询/带截获下单/撤单全绿）。镜像属性也让它成为最廉价的应急目检手段。
 
 ## 上线前必改（安全检查）
 
@@ -184,7 +184,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `alerts.timeout_seconds` | 5 | webhook POST 超时（秒）。后台 daemon 线程发送，不阻塞交易路径 |
 | `ocr.max_retry` | 3 | 验证码识别最大重试次数 |
 | `order.reject_outside_trading_hours` | false | 下单入口交易时段预检（工作日 + 法定节假日 + 9:15-11:30 / 13:00-15:00 粗判，节假日历三级降级：chinesecalendar → 深交所官方月度日历（当年 12 个月一次性拉取并缓存到 `data/trading_calendar/`，缓存齐全后离线读取）→ 仅周末/工作日粗判，节假日由券商报错兜底）。开启后非交易时段秒级返回 `OUTSIDE_TRADING_HOURS`，免走完整 UI 流程 ~11s；默认关闭以保留收盘后挂单行为 |
-| `order.capture_entrust_no` | false | 下单成功后从右下角成功横幅截获合同编号（后台抓屏 + 模板 OCR，句号锚定——券商编号长度不一）。截获失败返回 `null`；下单成败与之无关（见响应说明）。成功路径加 ~1s，失败路径最多 5s 截获超时。配合 `order.verify_entrust_no` 对账使用 |
+| `order.capture_entrust_no` | false | 下单成功后从右下角成功横幅截获合同编号（后台抓屏 + 模板 OCR，句号锚定——券商编号长度不一）。截获失败返回 `null`；下单成败与之无关（见响应说明）。成功路径加 ~1s，失败路径最多 5s 截获超时。配合 `order.verify_entrust_no` 对账使用。会话形态差异：console 挂接（VNC）与 RDP 挂接态直接命中（2026-10-10 实测）；RDP 断开态无法可靠读取——高度门控拒绝读取，下单自动落回 `order.recover_entrust_no` |
 | `order.entrust_no_timeout_seconds` | 5.0 | 横幅截获等待超时（秒）；成功即返回，仅拖慢失败路径 |
 | `order.recover_entrust_no` | true | 横幅截获失败时按**提交点击时刻×参数四元组**（操作+代码+价格+数量；对全精度点击时刻施加秒桶窗口 [-1,+2] 构成秒桶闭包，完整覆盖秒粒度「委托时间」）反查当日委托回补编号。仅唯一命中才采纳（0 或 ≥2 候选保持 `null`，绝不猜测）。以独立排队查询链式追加——仅截获失败路径多 ~6-8s，成功路径不受影响。采纳时置 `entrust_no_recovered: true` |
 | `order.verify_entrust_no` | false | 下单成功拿到委托号后自动追加一笔当日委托查询对账（响应附加 `entrust_no_verified`）。未命中时先 F5 刷新当日委托页重拷一次才报 `false`——券商委托列表对新委托有秒级可见性延迟（2026-09-29 压测实测）。开启后接口耗时增加一次查询，调用方 timeout 需相应放大。需配合 `order.capture_entrust_no` 使用 |
