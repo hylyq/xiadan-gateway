@@ -966,14 +966,20 @@ class WindowService(Singleton):
                 f"AttachThreadInput 激活未成功（交由标题栏单击兜底）: {e}")
 
     def _title_bar_click_point(self, hwnd: int) -> Optional[tuple]:
-        """计算标题栏中部点击坐标（click_input 相对坐标）；不可达返回 None
+        """计算标题栏中部点击点的**绝对屏幕坐标**；不可达返回 None
 
-        坐标基准（2026-10-10 源码核实 base_wrapper.click_input）：coords
-        经 client_to_screen 换算，原点是**客户区左上角**——不是窗口外框
-        左上角！客户区原点在标题栏下方，因此标题栏点的客户区相对 y 是
-        负值（若按「外框顶部内缩 8px」直写 coords，会点到标题栏下方
-        客户区顶部的菜单栏/工具栏区域）。本方法返回的相对坐标已按
-        ClientToScreen 基准换算。
+        坐标基准（2026-10-10 源码+实弹双核实）：pywinauto click_input 的
+        coords 默认经 client_to_screen 换算，而该方法（base_wrapper.py:375）
+        只是简单加上**窗口外框矩形的 left/top**——名字叫 client，行为是
+        外框基准（实弹验证：相对 (566,-25) 实际落在 rect.left+x, rect.top+y）。
+        因此本方法返回绝对屏幕坐标，调用方必须以 absolute=True 点击，
+        彻底绕开换算歧义。
+
+        目标点定义：标题栏**左起 3/10 宽度**、顶部内缩 8px。不取正中——
+        该客户端标题栏中偏右存在自绘按钮/挂件，左段只有标题文本（单义
+        「激活」，文本上单击无任何效果）；3/10 处必已越过左侧应用图标
+        （图标系统菜单仅占最左 ~40px），且远离右端最小化/最大化/关闭
+        按钮簇。DWM 左右隐形边框对称，比例计算不受影响。
 
         可达判定：绝对落点必须落在窗口所在显示器的**工作区**内——工作区
         之外是任务栏/屏幕外，点击会命中任务栏图标（可切走其他应用）或
@@ -989,14 +995,10 @@ class WindowService(Singleton):
             work = win32api.GetMonitorInfo(monitor)["Work"]
             for _ in range(2):
                 left, top, right, _bottom = win32gui.GetWindowRect(hwnd)
-                # 目标屏幕点：窗口外框水平中心（DWM 左右隐形边框对称，
-                # 中心与客户区中心一致）、顶部内缩 8px（必在标题栏内）
-                sx = left + (right - left) // 2
+                sx = left + (right - left) * 3 // 10
                 sy = top + 8
                 if work[0] <= sx <= work[2] and work[1] <= sy <= work[3]:
-                    # 屏幕点 → 客户区相对坐标（click_input 的换算基准）
-                    ccx, ccy = win32gui.ClientToScreen(hwnd, (0, 0))
-                    return (sx - ccx, sy - ccy)
+                    return (sx, sy)
                 # 标题栏仍在工作区外（典型：窗口上缘拖出屏幕顶部）：
                 # 强制把窗口移回工作区中心（保持大小），再验一次
                 self.logger.warning(
@@ -1077,19 +1079,22 @@ class WindowService(Singleton):
                 self._force_foreground_via_attach(hwnd)
                 if win32gui.GetForegroundWindow() == hwnd:
                     break
-                # 层3: 标题栏中部单击（唯一鼠标兜底；坐标取窗口顶部内缩 8px，
-                # 任何分辨率/DPI 下都在标题栏内且远离图标与控制按钮）。
+                # 层3: 标题栏左 3/10 处单击（唯一鼠标兜底；坐标取窗口顶部
+                # 内缩 8px、水平左起 3/10 宽度——左段只有标题文本，避开中偏右
+                # 自绘按钮与右端控制按钮簇，也必已越过左侧应用图标）。
                 # 落点必须落在工作区内（出屏自愈 + 显式校验 + 必要时强制移回）；
                 # 标题栏不可达时绝不盲点未知区域——抛错走激活失败路径，
                 # 禁止发送按键
-                click_rel = self._title_bar_click_point(hwnd)
-                if click_rel is None:
+                click_pt = self._title_bar_click_point(hwnd)
+                if click_pt is None:
                     raise ApiError(
                         ErrorCode.WINDOW_NOT_FOUND,
                         f"标题栏不可达（窗口出屏且自动移回失败），"
                         f"无法安全激活交易窗口，禁止发送按键 '{keys}'。"
                     )
-                window.click_input(coords=click_rel)
+                # absolute=True：直接按屏幕坐标点击，绕开 click_input 默认
+                # 的「外框矩形左上角」换算（见 _title_bar_click_point 说明）
+                window.click_input(coords=click_pt, absolute=True)
                 time.sleep(0.3)
             except Exception as e:
                 last_exc = e
