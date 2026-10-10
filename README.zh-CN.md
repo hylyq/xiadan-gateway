@@ -124,6 +124,12 @@ uv run python main.py --dev       # 开发模式（热加载）
   - **错误码细分**：命中僵死指纹（前台 `0x0` 或 "no active desktop" 文本）的激活失败返回 `SESSION_DESKTOP_UNAVAILABLE`，不再误报 `WINDOW_NOT_FOUND`「当前前台窗口不是交易窗口」（窗口句柄找得到，死的是桌面）
   - **`/health` 消歧**：`session.desktop_wedged`（15 分钟内连续 ≥2 次指纹失败即 `true`；`desktop_wedge_streak` 为原始计数）——`ui_available: true` 且 `desktop_wedged: true` = 假绿灯
   - **升级自愈**：标记僵死且会话挂接时（`session_monitor.wedge_heal_enabled: true`；独立冷却 `wedge_cooldown_seconds` 默认 600s）执行 `tsdiscon <id>` 强制走一次 RDP 断开-重连周期（实测有效的复位手段）。有客户端时 mstsc 秒级自动重连；无人值守时由既有 tscon 链路按防抖+TCP 判别器接管 console（正是上文竞态毒源的两层防护）。任一任务成功即清除标记——成功本身就是最便宜的探针
+- **券商连接态检测（`/health` 的 `broker` 字段）**——与上述两者正交的第三种故障态：会话完全健康，交易客户端却已失去与券商主站的链路（2026-10-10 本地物理断网实测，两个完整周期）。可靠信号是**状态栏状态格文本「断开」**（连接态该格空文本，夹在时钟格与 `mncgXXX` 主站名格之间——主站编号每次重连都变，检测绝不绑定它；弹窗不是信号：本地两轮周期零弹窗）。读取纯按需（架构铁律：单 UI 资源禁后台轮询）——状态栏 Pane 用 win32 几何判据定位（底部 60px 条带内最靠右的 Pane），子格文本经每次现建的 UIA wrapper 读取（~6-25ms）。`broker.connected` 语义：
+  - `true` = 未观测到断开。注意真实断网后有 **~25-30s 盲区**（心跳周期级延迟，实测 27.1s/24.4s）——`true` ≠ 网络正常
+  - `false` = 客户端报告连接断开。**网络恢复后不自动清零**：空闲客户端持续挂「断开」（实测 45s+），直至任意 UI 操作触发重连后才秒级清除（实测 0.9s）。网关的任何业务操作本身就是重连触发器——链路在下次调用时自愈
+  - **断开态下查询仍返回 HTTP 200 + 客户端缓存数据**（实测断网期间 3/3 持仓查询静默成功——网关日志零痕迹）——判断数据新鲜度必须看 `broker.connected` 字段
+  - `null` = 读取失败（窗口不在/Pane 结构对不上/UIA 异常）——未知，非确定已连接
+  - 服务器事故中出现的 `[主站]数据发送错误 auth plugin ServiceId[...]` 弹窗归类为 `SERVER_UNAVAILABLE`（弹窗规则 + 输入阶段拦截关键词）——该弹窗只有「确定」键，落入通用警告点「是(Y)」兜底会无键可点
 - **不要锁屏**（`Win+L` 或带锁定的屏保会切到安全桌面，自动化失效；锁定但挂接 console 的会话状态为 Active，自愈不处理）
 - **注册为 Windows 服务 / 计划任务「不管用户是否登录都要运行」不可行**：它们落在 Session 0，看不到也无法操作交互会话的窗口（窗口枚举为空）。因此开机自启同样要求先有人登录——VNC（或 RDP）连入后手动启动 `xiadan.exe` 与网关
 - **例外——`scripts/run_in_session.py`**：从一个*已在运行*的 Session 0 管理上下文（如 SSH 会话）把进程启动**进**交互会话，无人值守可用。原理：复制交易进程的 token，持 `SeDebugPrivilege` 模拟同会话 winlogon（SYSTEM）以满足 `CreateProcessAsUser` 对**调用方**的 `SeAssignPrimaryTokenPrivilege` 校验（管理员默认不持有；注意复制出的 token 特权是「持有但未启用」，须在模拟 token 上先启用），再在该会话的 `WinSta0\Default` 上创建子进程——无需密码、不建计划任务、零持久化。无人值守重启网关：先杀旧进程（单实例互斥），再 `.venv/Scripts/python.exe scripts/run_in_session.py --cwd <仓库> --stdout <日志> -- .venv/Scripts/python.exe main.py`。坑：`CreateProcessWithTokenW` 在此是死路——子进程落在**调用方**会话
@@ -263,7 +269,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 
 | 方法 | 路径 | 说明 | 入队 | timeout |
 |------|------|------|:---:|--------|
-| GET | `/health` | 健康检查 + 登录态（`logged_in`）+ 会话状态（`session.ui_available`，RDP 断开期间为 `false`——监控轮询恢复信号用；`session.desktop_wedged`，`true` = 挂接但僵死，见桌面僵死章节）+ 推荐客户端 timeout + 运行统计（成功率/错误码聚合/连续失败/下单弹窗统计） | | 5s |
+| GET | `/health` | 健康检查 + 登录态（`logged_in`）+ 会话状态（`session.ui_available`，RDP 断开期间为 `false`——监控轮询恢复信号用；`session.desktop_wedged`，`true` = 挂接但僵死，见桌面僵死章节）+ 券商连接态（`broker.connected`：`true` = 未观测到断开，真实断网后有 ~25-30s 盲区；`false` = 客户端报告券商链路断开——网络恢复后不自动清零，操作触发重连后 ~1s 清除；断开态下查询**静默返回缓存数据 HTTP 200**，判断新鲜度必看此字段；`null` = 读取失败）+ 推荐客户端 timeout + 运行统计（成功率/错误码聚合/连续失败/下单弹窗统计） | | 5s |
 | GET | `/queue/status` | 任务队列状态 | | 5s |
 | POST | `/admin/reload-config` | 热重载配置 | | 5s |
 | GET | `/account/balance` | 资金余额 | ✓ | 40s |

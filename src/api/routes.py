@@ -20,6 +20,7 @@ from src.api.task_queue import TaskQueue
 from src.models.config import AppConfig
 from src.utils.logger import Logger
 from src.utils.session_state import session_health
+from src.services.broker_link import read_broker_link
 
 
 def create_app() -> Flask:
@@ -144,6 +145,12 @@ def _register_system_routes(app: Flask) -> None:
             # 健康门快速拒绝（SESSION_UNAVAILABLE）。ui_available=null
             # 表示查询失败（未知），非 false（确定不可用）
             "session": session_health(),
+            # 券商连接态（状态栏「断开」字样定向读，~6-25ms，按需不轮询）。
+            # 实测语义（2026-10-10 断网双周期）: true=未观测到断开（有
+            # ~30s 盲区，≠网络正常）；false=客户端报告断连（恢复网络后
+            # 空闲态不自动清，操作触发重连才清）；断开态下查询会静默返回
+            # 客户端缓存数据，调用方判断新鲜度必须看本字段。null=无法读取
+            "broker": read_broker_link(),
             # 注意: 不返回 trading_app_paths（本机路径不对未认证访客暴露）
             "queue_status": task_queue.get_status(),
             "stats": task_queue.get_stats(),

@@ -119,7 +119,7 @@ SUBMIT_ERROR_RULES: Tuple[ErrorRule, ...] = (
         "限价模式请检查 price 参数是否已传。",
     ),
     ErrorRule(
-        _or("事务处理机", "转发数据失败"),
+        _or("事务处理机", "转发数据失败", "数据发送错误"),
         ErrorCode.SERVER_UNAVAILABLE,
         "券商服务器不可用: {text}",
         "请确认券商服务器正常运行后重试。若为交易时段外，请等待交易时段再操作。",
@@ -227,6 +227,19 @@ POPUP_RULES: Tuple[PopupRule, ...] = (
         "市价模式下该券商仍要求价格（市价类型未选择或不受支持），"
         "建议改用限价模式 (price_type=limit + price)；"
         "限价模式请检查 price 参数是否已传。",
+        clean_dismiss=True,
+    ),
+    # 券商连接中断（服务器实测 2026-10-10 断网现场）：弹窗正文形如
+    # "[主站]数据发送错误 auth plugin ServiceId[0x00030000]"，只有「确定」
+    # 键无 Y/N——若落进通用警告点「是(Y)」兜底会找不到按钮。必须在
+    # 价格超限规则（关键词"价格"）之前
+    PopupRule(
+        _or("数据发送错误"),
+        "raise_error",
+        ErrorCode.SERVER_UNAVAILABLE,
+        "券商连接中断: {text}",
+        "交易客户端与券商主站连接异常（可能本机断网或券商故障）。"
+        "连接会在下次操作时自动尝试重连，请稍后重试。",
         clean_dismiss=True,
     ),
     # 价格超限警告 → 点「否(N)」取消，干净退出（窗口状态可信，下次同向可跳过）
