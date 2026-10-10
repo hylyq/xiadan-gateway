@@ -232,8 +232,10 @@ def ensure_connected_or_discard(action: str) -> dict:
         raise ApiError(
             ErrorCode.BROKER_DISCONNECTED,
             f"{action}已完成，但客户端报告券商连接断开——返回的将是缓存旧值，已作废",
-            suggestion=("直接重试即可：每次调用都会触发客户端重连尝试，"
-                        "网络恢复后的首个成功请求即返回新鲜数据"
+            suggestion=("直接重试即可，新鲜度由后置门控保证，不会交付缓存旧值；"
+                        "前置 F5 重连戳全局防抖 30s——立即重试不会再发 F5，"
+                        "稍候重试才触发新一轮重连尝试，网络恢复后的首个成功"
+                        "请求即返回新鲜数据"
                         "（注意断网初期有 ~25-45s 盲期，客户端自身未察觉）"),
             details={"broker_link": link})
     return link
