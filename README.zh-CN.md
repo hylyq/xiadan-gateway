@@ -246,6 +246,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `SERVER_CLEARING` | 券商系统清算中 |
 | `OUTSIDE_TRADING_HOURS` | 非交易时段 |
 | `T1_RESTRICTION` | T+1 制度限制（当日买入次日可卖） |
+| `STOCK_NOT_FOUND` | 证券代码无效（券商不认可该代码，如「不存在该证券」；若所有代码均报此错，可能是券商计数器异常） |
 | `INSUFFICIENT_SHARES` | 可卖数量不足 |
 | `INSUFFICIENT_BALANCE` | 可用资金/余额不足（点「确定」关闭，干净退出，下次同向可跳过） |
 | `SHORT_SELLING_FORBIDDEN` | 不允许卖空——无持仓或超出可卖数量（点「确定」关闭，干净退出） |
@@ -576,6 +577,7 @@ XIADAN_MCP_TRADING=1 uv run python .agents/skills/xiadan-gateway/scripts/xiadan.
 |-----------|-----------|------|
 | 清算 | `SERVER_CLEARING` | 等待清算结束后重试 |
 | 当前时间不允许委托 | `OUTSIDE_TRADING_HOURS` | 交易时段内操作 |
+| 不存在该证券 | `STOCK_NOT_FOUND` | 检查证券代码与市场交易权限；若所有代码均报此错，可能是券商计数器异常 |
 | T+1 / 当日买入 / 未交收 | `T1_RESTRICTION` | 当日买入的股票需到下一个交易日方可卖出 |
 | 提交失败 + 余额/资金 + 还差 | `INSUFFICIENT_BALANCE` | 检查账户可用资金后调整数量或价格 |
 | 不允许卖空 / 提交失败 + 无证券 + 持仓信息 | `SHORT_SELLING_FORBIDDEN` | A 股不允许卖空，检查持仓可卖数量 |

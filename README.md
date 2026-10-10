@@ -246,6 +246,7 @@ All responses return HTTP 200; success/failure is distinguished by the JSON `sta
 | `SERVER_CLEARING` | Broker system is clearing |
 | `OUTSIDE_TRADING_HOURS` | Outside trading hours |
 | `T1_RESTRICTION` | T+1 restriction (bought today, sellable tomorrow) |
+| `STOCK_NOT_FOUND` | Invalid/unknown stock code (broker rejects the security, e.g. "does not exist"; if every code fails, the broker counter may be abnormal) |
 | `INSUFFICIENT_SHARES` | Insufficient sellable shares |
 | `INSUFFICIENT_BALANCE` | Insufficient available balance (clicked OK to close, clean exit, next same-direction task can skip) |
 | `SHORT_SELLING_FORBIDDEN` | Short selling not allowed — no position or exceeds sellable shares (clicked OK to close, clean exit) |
@@ -579,6 +580,7 @@ If the broker returns a 「提示」 popup (OK-only) after clicking buy, `_extra
 |----------------|-----------|------------|
 | 清算 (clearing) | `SERVER_CLEARING` | Retry after clearing finishes |
 | 当前时间不允许委托 (not allowed at this time) | `OUTSIDE_TRADING_HOURS` | Operate within trading hours |
+| 不存在该证券 (security does not exist) | `STOCK_NOT_FOUND` | Check the stock code and market access; if every code fails, the broker counter may be abnormal |
 | T+1 / 当日买入 / 未交收 (bought today / unsettled) | `T1_RESTRICTION` | Shares bought today can only be sold the next trading day |
 | 提交失败 + 余额/资金 + 还差 (submission failed + balance + shortfall) | `INSUFFICIENT_BALANCE` | Check available funds, adjust quantity or price |
 | 不允许卖空 / 提交失败 + 无证券 + 持仓信息 (no short selling / no securities) | `SHORT_SELLING_FORBIDDEN` | A-shares don't allow short selling; check sellable shares |
