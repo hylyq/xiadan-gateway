@@ -83,3 +83,51 @@ class TestIdempotencyInteraction:
         # 抛的是 ORDER_STATE_UNKNOWN；查询无幂等记录可保留）
         assert not should_keep_record_on_error(
             ApiError(ErrorCode.BROKER_DISCONNECTED, "x"))
+
+
+class TestPokeIfDisconnected:
+    """查询前置自愈：断开在场 → F5 戳（防抖 30s）→ 轮询等重连"""
+
+    @pytest.fixture(autouse=True)
+    def _reset_poke_state(self, monkeypatch):
+        monkeypatch.setattr(bl, "_last_poke_mono", -1e9)
+
+    def test_no_poke_when_connected(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(bl, "read_broker_link",
+                            lambda: _link(True))
+        monkeypatch.setattr(bl, "_send_f5_poke",
+                            lambda: calls.append(1))
+        bl.poke_if_disconnected(max_wait_s=0.1)
+        assert calls == []
+
+    def test_poke_and_wait_until_healed(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(bl, "_send_f5_poke",
+                            lambda: calls.append(1))
+        # 首读=断开，F5 后轮询读到已重连
+        states = [_link(False), _link(True), _link(True), _link(True)]
+        monkeypatch.setattr(bl, "read_broker_link",
+                            lambda: states.pop(0) if states else _link(True))
+        link = bl.poke_if_disconnected(max_wait_s=2.0)
+        assert calls == [1]
+        assert link["connected"] is True
+
+    def test_poke_once_when_stays_disconnected(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(bl, "_send_f5_poke",
+                            lambda: calls.append(1))
+        monkeypatch.setattr(bl, "read_broker_link",
+                            lambda: _link(False))
+        bl.poke_if_disconnected(max_wait_s=0.3)
+        assert calls == [1]
+
+    def test_debounce_second_call_within_30s(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(bl, "_send_f5_poke",
+                            lambda: calls.append(1))
+        monkeypatch.setattr(bl, "read_broker_link",
+                            lambda: _link(False))
+        bl.poke_if_disconnected(max_wait_s=0.1)
+        bl.poke_if_disconnected(max_wait_s=0.1)
+        assert calls == [1]  # 防抖：第二发被拦

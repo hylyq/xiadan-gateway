@@ -34,8 +34,8 @@ class ErrorCode:
     SERVER_UNAVAILABLE = "SERVER_UNAVAILABLE"       # 券商服务器不可用（维护中）
     # 客户端与券商主站链路断开（UI 操作结束时状态栏「断开」在场）——查询
     # 结果为客户端缓存旧值，已作废。与 SERVER_UNAVAILABLE 区分：本错误
-    # 直接重试即可，每次重试都触发客户端重连尝试（2026-10-10 断网实测，
-    # 恢复后 0.9s 自愈；见 services/broker_link）
+    # 直接重试即可，重试时网关前置 F5 自动触发重连（2026-10-10 断网实测，
+    # F5 恢复立竿见影；见 services/broker_link poke_if_disconnected）
     BROKER_DISCONNECTED = "BROKER_DISCONNECTED"
     OCR_FAILED = "OCR_FAILED"                       # 验证码识别失败
     INPUT_VERIFY_FAILED = "INPUT_VERIFY_FAILED"     # 证券名称联动校验失败（代码未被客户端接受）

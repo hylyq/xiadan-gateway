@@ -42,6 +42,12 @@ _lock = threading.Lock()
 # 仅 win32 句柄（跨线程安全）；UIA COM 对象不跨线程缓存
 _cache = {"main_hwnd": None, "pane_hwnd": None}
 
+# F5 重连戳防抖（用户实测 2026-10-10：查询链路 F4+Ctrl+C 不发网络请求、
+# 无法触发重连；F5 是可靠的重连触发器，网络恢复后立竿见影）
+_POKE_DEBOUNCE_S = 30.0
+_poke_lock = threading.Lock()
+_last_poke_mono = -1e9
+
 
 def _find_main_hwnd():
     for proc in psutil.process_iter(["name", "pid"]):
@@ -145,15 +151,54 @@ def read_broker_link() -> dict:
 
 
 # ============================================================
+# 查询前置自愈：断开在场 → F5 戳重连（防抖）→ 轮询等重连
+# ============================================================
+
+def _send_f5_poke():
+    """F5 直发（独立函数便于测试打桩）。功能键走 keybd_event 前台发送，
+    send_key 默认先自动激活交易窗口——绝不把 F5 发进错误窗口"""
+    from src.services.window_service import WindowService
+    WindowService().send_key("F5")
+
+
+def poke_if_disconnected(max_wait_s: float = 3.0) -> dict:
+    """查询前置自愈：「断开」在场 → F5 戳重连 → 轮询等重连后返回
+
+    必须在任务工作线程调用（查询 UI 操作上下文）；禁止在 /health
+    读取路径调用——waitress 线程前台无保证，F5 会落进错误窗口。
+    防抖 30s：调用方高频重试时不刷屏；防抖命中时不再等待（上次戳
+    尚在生效中，后置复查兜底）。
+    """
+    global _last_poke_mono
+    link = read_broker_link()
+    if link["connected"] is not False:
+        return link
+    with _poke_lock:
+        now = time.monotonic()
+        do_poke = now - _last_poke_mono >= _POKE_DEBOUNCE_S
+        if do_poke:
+            _last_poke_mono = now
+    if not do_poke:
+        return link
+    Logger.get_instance().info(
+        f"查询前置检测到券商断连（{link.get('status_text')!r}），F5 戳重连")
+    _send_f5_poke()
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
+        time.sleep(0.25)
+        if read_broker_link()["connected"] is not False:
+            Logger.get_instance().info("F5 后券商已重连")
+            break
+    return read_broker_link()
+
+
+# ============================================================
 # 业务端点事后门控（fail-closed：断开在场 → 不交付本结果）
 #
-# 只做事后校验、不做操作前预检——操作本身就是客户端重连的触发器
-# （实测恢复网络后 0.9s 自愈），预检拒绝会造成
-# 「拒绝操作 → 客户端永不被戳 → 永不重连」死锁（2026-10-10 断网实测：
-# 空闲客户端「断开」永不自清）。
-#
-# fail-open：connected=None（读取失败/结构异常）一律放行，与
-# session 健康门同哲学；只有客户端明确报告「断开」才拦截。
+# 后置复查保留：前置自愈后重连可能仍未完成（客户端重试周期有波动），
+# 查询读到的仍是缓存网格——此时作废报错。fail-open：connected=None
+# （读取失败/结构异常）一律放行，与 session 健康门同哲学；只有客户端
+# 明确报告「断开」才拦截。
 # ============================================================
 
 def ensure_connected_or_discard(action: str) -> dict:

@@ -24,13 +24,20 @@ def _get_position_service():
 
 
 def _submit_query(func, task_name: str, timeout: int, params: dict = None):
-    """排队执行查询任务 + 事后券商链路校验（「断开」在场 → 结果作废报错）
+    """排队执行查询任务：前置自愈（断开→F5 戳重连）+ 事后断开复查
 
-    断开态下查询会静默返回客户端缓存数据（HTTP 200、日志无痕），
-    新鲜度判断在网关内收口，调用方无需再自行核对 /health。
+    查询链路（F4+Ctrl+C）不发网络请求、无法触发客户端重连（2026-10-10
+    三轮断网实测）——前置 poke_if_disconnected 在工作线程内读状态格，
+    断开在场则 F5（防抖 30s）并等重连（≤3s）再查询；查询结束后复查，
+    仍断开则结果作废抛 BROKER_DISCONNECTED（缓存旧值不交付）。
     """
+    def _task():
+        from src.services.broker_link import poke_if_disconnected
+        poke_if_disconnected()
+        return func()
+
     result = TaskQueue.get_instance().submit(
-        func=func, task_name=task_name, params=params or {},
+        func=_task, task_name=task_name, params=params or {},
         timeout=timeout)
     from src.services.broker_link import ensure_connected_or_discard
     ensure_connected_or_discard("查询")
