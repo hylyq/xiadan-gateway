@@ -684,8 +684,17 @@ class WindowService(Singleton):
             if element is None:
                 raise ApiError(ErrorCode.CONTROL_NOT_FOUND, f"未找到 control_id={control_id} 的输入框",
                               suggestion="控件树可能已变化，券商界面升级时请运行诊断排查")
-            element.set_focus()
-            time.sleep(0.08)
+            # 击键跟键盘焦点走：先真实点击字段把焦点放进去（单击输入框
+            # =仅放置光标，无副作用）。UIA element.set_focus() 在退化会话
+            # 静默失效（2026-10-10 服务器实测：代码框只收到尾段 028、
+            # 价格/数量击键凭空消失），而真实鼠标点击始终可靠——与复制
+            # 路径的 _focus_grid_for_copy 同一原理：定向点击替代盲聚焦
+            try:
+                element.click_input()
+                time.sleep(0.08)
+            except Exception:
+                element.set_focus()
+                time.sleep(0.08)
 
             # 方案一：先用 WM_SETTEXT 直接设置空文本（最快）
             cleared = False
