@@ -182,6 +182,9 @@ class PositionService:
         for attempt in range(2):
             data = self._copy_table()
             if self._is_table_matching(data, required_columns, require_all=require_all):
+                if page_name is not None:
+                    # 记录本次实际复制的查询页，供下一次同页连续查询判定
+                    PositionService._last_copied_page = page_name
                 return data
             actual_keys = set(data[0].keys()) if data else set()
             self.logger.warning(
@@ -779,6 +782,42 @@ class PositionService:
             time.sleep(0.2)  # F4 切换 <0.15s
 
     # ------------------------------------------------------------
+    # 连续同页查询的数据刷新（2026-10-10 用户要求：第二次起必须先 F5
+    # 强制客户端重新拉数据，不能直接 Ctrl+C——页面已停在本页时导航是
+    # 空操作，网格还是上次渲染的旧数据）
+    # ------------------------------------------------------------
+
+    # 类级追踪（实例按请求新建，跨请求状态必须挂类上）。None=上次查询
+    # 不在任何已知查询页（首次/中间隔了下单等其他流程）——此时页面切换
+    # 必是真实导航、客户端会重新拉数据，无需 F5
+    _last_copied_page = None
+
+    def _f5_refresh_if_same_page(self, page_name: Optional[str]) -> None:
+        """同页连续查询先 F5 刷新再复制；两种跳过：
+        - 券商断连：页面无服务器数据可拉，F5 无意义（后置门控会作废本次
+          结果），且保证断开场景整次查询只有前置重连戳那一次 F5
+        - 5s 内已发过 F5（前置重连戳已顺带刷新）
+        """
+        if not page_name or PositionService._last_copied_page != page_name:
+            return
+        from src.services.broker_link import (f5_sent_recently,
+                                              read_broker_link)
+        if read_broker_link()["connected"] is False:
+            self.logger.info(
+                f"同页连续查询[{page_name}]但券商断连，跳过刷新 F5"
+                "（前置重连戳已覆盖，结果由门控判定）")
+            return
+        if f5_sent_recently(5.0):
+            self.logger.info(
+                f"同页连续查询[{page_name}]，5s 内已发过 F5，跳过重复刷新")
+            return
+        self.logger.info(f"同页连续查询[{page_name}]，F5 刷新数据后再复制")
+        self.window_service.send_key("F5", background=True)
+        from src.services.broker_link import mark_f5_sent
+        mark_f5_sent()
+        time.sleep(0.8)  # 等券商服务器重新返回列表（同 F5 重查模式）
+
+    # ------------------------------------------------------------
     # 资金余额（control_id 批量读取，无需 OCR）
     # ------------------------------------------------------------
 
@@ -815,6 +854,9 @@ class PositionService:
             window = self._cached_window
             self._navigate_to_query_page(window, "资金股票")
 
+        # 同页连续查询：先 F5 刷新再读（资金概览控件文本同为旧渲染）
+        self._f5_refresh_if_same_page("资金股票")
+
         with timed("control_id 批量读取", self.logger):
             window = self.window_service.get_trading_window()
             if window is None:
@@ -841,6 +883,7 @@ class PositionService:
                     )
 
         self.logger.info(f"资金余额查询完成: {result}")
+        PositionService._last_copied_page = "资金股票"
         return result
 
     # ------------------------------------------------------------
@@ -866,6 +909,9 @@ class PositionService:
             window = self._cached_window
             self._navigate_to_query_page(window, "资金股票")
 
+        # 同页连续查询：先 F5 刷新再复制
+        self._f5_refresh_if_same_page("资金股票")
+
         # 特征列验证：页面切换失败时（非交易时段）复制到的是其他查询表，
         # 验证失败重试一次（含重新导航），仍失败显式报错，绝不静默返回假数据
         return self._copy_table_verified("持仓", self.POSITION_TABLE_COLUMNS,
@@ -886,6 +932,8 @@ class PositionService:
             self._refresh_window_ref()
             window = self._cached_window
             self._navigate_to_query_page(window, "当日成交")
+
+        self._f5_refresh_if_same_page("当日成交")
 
         return self._copy_table_verified("成交", self.TRADES_TABLE_COLUMNS,
                                          page_name="当日成交")
@@ -916,6 +964,8 @@ class PositionService:
             self._refresh_window_ref()
             window = self._cached_window
             self._navigate_to_query_page(window, "当日委托")
+
+        self._f5_refresh_if_same_page("当日委托")
 
         rows = self._copy_table_verified("委托", self.ORDERS_TABLE_COLUMNS,
                                          page_name="当日委托")

@@ -48,6 +48,23 @@ _POKE_DEBOUNCE_S = 30.0
 _poke_lock = threading.Lock()
 _last_poke_mono = -1e9
 
+# 任意来源 F5 的最近发送时刻（重连戳/同页刷新共用，用于「一次查询只发
+# 一次 F5」去重——前置戳发出后 5s 内同页刷新跳过）
+_f5_stamp_lock = threading.Lock()
+_last_f5_mono = -1e9
+
+
+def mark_f5_sent():
+    """记录一次 F5 发送（所有发送来源都要调用，供跨模块去重）"""
+    global _last_f5_mono
+    with _f5_stamp_lock:
+        _last_f5_mono = time.monotonic()
+
+
+def f5_sent_recently(within_s: float = 5.0) -> bool:
+    with _f5_stamp_lock:
+        return (time.monotonic() - _last_f5_mono) < within_s
+
 
 def _find_main_hwnd():
     for proc in psutil.process_iter(["name", "pid"]):
@@ -183,6 +200,7 @@ def poke_if_disconnected(max_wait_s: float = 3.0) -> dict:
     Logger.get_instance().info(
         f"查询前置检测到券商断连（{link.get('status_text')!r}），F5 戳重连")
     _send_f5_poke()
+    mark_f5_sent()
     deadline = time.monotonic() + max_wait_s
     while time.monotonic() < deadline:
         time.sleep(0.25)

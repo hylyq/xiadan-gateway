@@ -131,3 +131,84 @@ class TestPokeIfDisconnected:
         bl.poke_if_disconnected(max_wait_s=0.1)
         bl.poke_if_disconnected(max_wait_s=0.1)
         assert calls == [1]  # 防抖：第二发被拦
+
+
+class _StubWindowService:
+    def __init__(self):
+        self.keys = []
+
+    def send_key(self, keys, **kwargs):
+        self.keys.append(keys)
+
+
+class TestSamePageRefresh:
+    """同页连续查询：第二次起必须先 F5 刷新再复制（用户要求 2026-10-10）
+
+    - 不同页/首次 → 直接复制（真实页面切换会重新拉数据）
+    - 同页 + 连接态 → F5 + 等待后复制
+    - 同页 + 断连 → 跳过（断开场景整次查询只有前置重连戳一次 F5）
+    - 同页 + 5s 内已发过 F5 → 跳过（前置戳已顺带刷新）
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        import time as _time
+        from src.services.position_service import PositionService
+        monkeypatch.setattr(PositionService, "_last_copied_page", None)
+        monkeypatch.setattr(_time, "sleep", lambda s: None)  # 掉 0.8s 等待
+        self.ws = _StubWindowService()
+        self.svc = PositionService(self.ws)
+        self.marks = []
+        monkeypatch.setattr(bl, "mark_f5_sent",
+                            lambda: self.marks.append(1))
+
+    def test_different_page_no_f5(self, monkeypatch):
+        from src.services.position_service import PositionService
+        PositionService._last_copied_page = "当日委托"
+        monkeypatch.setattr(bl, "read_broker_link",
+                            lambda: _link(True))
+        self.svc._f5_refresh_if_same_page("资金股票")
+        assert self.ws.keys == []
+
+    def test_first_query_no_f5(self, monkeypatch):
+        monkeypatch.setattr(bl, "read_broker_link",
+                            lambda: _link(True))
+        self.svc._f5_refresh_if_same_page("资金股票")
+        assert self.ws.keys == []
+
+    def test_same_page_connected_sends_f5(self, monkeypatch):
+        from src.services.position_service import PositionService
+        PositionService._last_copied_page = "资金股票"
+        monkeypatch.setattr(bl, "read_broker_link",
+                            lambda: _link(True))
+        monkeypatch.setattr(bl, "f5_sent_recently", lambda w: False)
+        self.svc._f5_refresh_if_same_page("资金股票")
+        assert self.ws.keys == ["F5"]
+        assert self.marks == [1]
+
+    def test_same_page_disconnected_skips(self, monkeypatch):
+        """断开场景整次查询只有前置重连戳那一次 F5"""
+        from src.services.position_service import PositionService
+        PositionService._last_copied_page = "资金股票"
+        monkeypatch.setattr(bl, "read_broker_link",
+                            lambda: _link(False))
+        self.svc._f5_refresh_if_same_page("资金股票")
+        assert self.ws.keys == []
+
+    def test_same_page_recent_f5_skips(self, monkeypatch):
+        from src.services.position_service import PositionService
+        PositionService._last_copied_page = "资金股票"
+        monkeypatch.setattr(bl, "read_broker_link",
+                            lambda: _link(True))
+        monkeypatch.setattr(bl, "f5_sent_recently", lambda w: True)
+        self.svc._f5_refresh_if_same_page("资金股票")
+        assert self.ws.keys == []
+
+    def test_copy_verified_tracks_last_page(self, monkeypatch):
+        from src.services.position_service import PositionService
+        self.svc._copy_table = lambda: [{"代码": "600000"}]
+        self.svc._is_table_matching = lambda data, req, require_all=True: True
+        out = self.svc._copy_table_verified("持仓", set(),
+                                            page_name="资金股票")
+        assert out == [{"代码": "600000"}]
+        assert PositionService._last_copied_page == "资金股票"
