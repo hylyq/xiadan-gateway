@@ -1019,6 +1019,81 @@ class WindowService(Singleton):
             self.logger.warning(f"计算标题栏点击点失败: {e}")
             return None
 
+    def ensure_foreground(self, window, purpose: str = "激活交易窗口") -> None:
+        """确保交易窗口进入前台（分层：UIA set_focus → AttachThreadInput → 标题栏单击）
+
+        reset_window_state（每任务前置）与 _activate_window_before_keybd
+        （发送前台按键前）共用的唯一激活入口。层3 是唯一鼠标兜底，落点
+        复用 _title_bar_click_point（标题栏左 3/10、顶部内缩 8px）——绝不
+        在窗口客户区盲点：无坐标 click_input 点的是窗口正中心，当前几何
+        正落「买入/卖出数量」框（2026-10-10 服务器每个任务把数量置 100，
+        用户 VNC 目击），历史上还有落在弹窗按钮上的记录。
+
+        全部层次失败时按指纹分类抛错：前台恒 0 或捕获异常含
+        "no active desktop" → SESSION_DESKTOP_UNAVAILABLE（桌面僵死，
+        供统计/升级自愈识别）；确有其他窗口在前台 → WINDOW_NOT_FOUND。
+        """
+        hwnd = window.handle
+
+        # 如果窗口被最小化，先恢复（click_input 对最小化窗口可能点击到无效坐标）
+        if win32gui.IsIconic(hwnd):
+            self.logger.info(f"检测到交易窗口已最小化，恢复后再{purpose}")
+            try:
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                time.sleep(0.2)
+            except Exception as e:
+                self.logger.warning(f"恢复最小化窗口失败: {e}")
+                # 继续尝试激活，这可能通过点击任务栏按钮恢复
+
+        # 分层激活 + 句柄级校验（层3 点击前先确保窗口完整在屏：
+        # click_input 按屏幕坐标工作，部分出屏会落空）
+        self.ensure_window_onscreen(hwnd)
+        last_exc: Optional[Exception] = None
+        for attempt in range(2):
+            try:
+                # 层1: UIA set_focus（纯 API，无鼠标）——健康会话到此为止，
+                # 全程零鼠标动作
+                window.set_focus()
+                if win32gui.GetForegroundWindow() == hwnd:
+                    return
+                # 层2: AttachThreadInput 绕前台锁（仍无鼠标、无客户端副作用）
+                self._force_foreground_via_attach(hwnd)
+                if win32gui.GetForegroundWindow() == hwnd:
+                    return
+                # 层3: 标题栏左 3/10 处单击（唯一鼠标兜底）。落点必须落在
+                # 工作区内（出屏自愈 + 显式校验 + 必要时强制移回）；标题栏
+                # 不可达时绝不盲点未知区域——抛错走激活失败路径
+                click_pt = self._title_bar_click_point(hwnd)
+                if click_pt is None:
+                    raise ApiError(
+                        ErrorCode.WINDOW_NOT_FOUND,
+                        f"标题栏不可达（窗口出屏且自动移回失败），"
+                        f"无法安全激活交易窗口。"
+                    )
+                # absolute=True：直接按屏幕坐标点击，绕开 click_input 默认
+                # 的「外框矩形左上角」换算（见 _title_bar_click_point 说明）
+                window.click_input(coords=click_pt, absolute=True)
+                time.sleep(0.3)
+            except Exception as e:
+                last_exc = e
+                self.logger.warning(f"{purpose}失败 (attempt {attempt + 1}): {e}")
+                continue
+
+            if win32gui.GetForegroundWindow() == hwnd:
+                return
+
+            self.logger.warning(
+                f"{purpose}后前台句柄 {win32gui.GetForegroundWindow():#x} ≠ "
+                f"目标 {hwnd:#x} (attempt {attempt + 1})"
+            )
+
+        # 最终校验：确保前台确实是目标窗口
+        fg = win32gui.GetForegroundWindow()
+        self.logger.error(
+            f"无法将交易窗口带到前台，前台={fg:#x} 目标={hwnd:#x}（{purpose}）"
+        )
+        self._raise_activation_failure(purpose, fg, last_exc)
+
     def _activate_window_before_keybd(self, keys: str) -> None:
         """发送前台按键前确保交易窗口在前台（避免泄漏到桌面/其他窗口）
 
@@ -1053,75 +1128,11 @@ class WindowService(Singleton):
                 f"请确认券商程序（网上股票交易系统5.0）已启动且窗口可见。"
             )
 
-        hwnd = window.handle
-
-        # 如果窗口被最小化，先恢复（click_input 对最小化窗口可能点击到无效坐标）
-        if win32gui.IsIconic(hwnd):
-            self.logger.info(f"检测到交易窗口已最小化，恢复后再发送按键 '{keys}'")
-            try:
-                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-                time.sleep(0.2)
-            except Exception as e:
-                self.logger.warning(f"恢复最小化窗口失败: {e}")
-                # 继续尝试 click_input，这可能通过点击任务栏按钮恢复
-
-        # 分层激活 + 句柄级校验（层3 点击前先确保窗口完整在屏：
-        # click_input 按屏幕坐标工作，部分出屏会落空）
-        self.ensure_window_onscreen(hwnd)
-        last_exc: Optional[Exception] = None
-        for attempt in range(2):
-            try:
-                # 层1: UIA set_focus（纯 API，无鼠标）
-                window.set_focus()
-                if win32gui.GetForegroundWindow() == hwnd:
-                    break
-                # 层2: AttachThreadInput 绕前台锁（仍无鼠标、无客户端副作用）
-                self._force_foreground_via_attach(hwnd)
-                if win32gui.GetForegroundWindow() == hwnd:
-                    break
-                # 层3: 标题栏左 3/10 处单击（唯一鼠标兜底；坐标取窗口顶部
-                # 内缩 8px、水平左起 3/10 宽度——左段只有标题文本，避开中偏右
-                # 自绘按钮与右端控制按钮簇，也必已越过左侧应用图标）。
-                # 落点必须落在工作区内（出屏自愈 + 显式校验 + 必要时强制移回）；
-                # 标题栏不可达时绝不盲点未知区域——抛错走激活失败路径，
-                # 禁止发送按键
-                click_pt = self._title_bar_click_point(hwnd)
-                if click_pt is None:
-                    raise ApiError(
-                        ErrorCode.WINDOW_NOT_FOUND,
-                        f"标题栏不可达（窗口出屏且自动移回失败），"
-                        f"无法安全激活交易窗口，禁止发送按键 '{keys}'。"
-                    )
-                # absolute=True：直接按屏幕坐标点击，绕开 click_input 默认
-                # 的「外框矩形左上角」换算（见 _title_bar_click_point 说明）
-                window.click_input(coords=click_pt, absolute=True)
-                time.sleep(0.3)
-            except Exception as e:
-                last_exc = e
-                self.logger.warning(f"激活动作失败 (attempt {attempt + 1}): {e}")
-                continue
-
-            if win32gui.GetForegroundWindow() == hwnd:
-                break
-
-            self.logger.warning(
-                f"激活后前台句柄 {win32gui.GetForegroundWindow():#x} ≠ "
-                f"目标 {hwnd:#x} (attempt {attempt + 1})"
-            )
-
-        # 最终校验：确保前台确实是目标窗口
-        if win32gui.GetForegroundWindow() != hwnd:
-            fg = win32gui.GetForegroundWindow()
-            self.logger.error(
-                f"无法将交易窗口带到前台，前台={fg:#x} "
-                f"目标={hwnd:#x}，禁止发送按键 '{keys}'"
-            )
-            self._raise_activation_failure(keys, fg, last_exc)
-
+        self.ensure_foreground(window, purpose=f"发送按键 '{keys}' 前激活")
         self._send_key_foreground(keys)
 
     @staticmethod
-    def _raise_activation_failure(keys: str, fg: int,
+    def _raise_activation_failure(purpose: str, fg: int,
                                   last_exc: Optional[Exception]) -> None:
         """激活失败的分类上报（2026-10-09 事故细分）
 
@@ -1140,12 +1151,12 @@ class WindowService(Singleton):
         if not dead:
             raise ApiError(
                 ErrorCode.WINDOW_NOT_FOUND,
-                f"无法激活交易窗口到前台，无法发送按键 '{keys}'。当前前台窗口不是交易窗口。"
+                f"无法激活交易窗口到前台（{purpose}）。当前前台窗口不是交易窗口。"
             )
         raise ApiError(
             ErrorCode.SESSION_DESKTOP_UNAVAILABLE,
             f"桌面不可操作（会话已挂接但无活动输入桌面/输入注入被拒），"
-            f"无法发送按键 '{keys}'。原始错误: {last_exc}",
+            f"{purpose}失败。原始错误: {last_exc}",
             suggestion=(
                 "通常 RDP 断开后重连一次即复位；无人值守时网关会话监控将自动"
                 "执行 tsdiscon 升级自愈（冷却默认 600s），可稍后重试"
@@ -1207,9 +1218,9 @@ class WindowService(Singleton):
     def reset_window_state(self) -> None:
         """重置交易窗口到基准态（F1 买入界面）
 
-        click_input 激活窗口 + ESC×5 确保从任意状态回退到 F1 买入界面。
-        后续操作（下单/撤单/查询）依赖此函数确保窗口在前台且处于基准态，
-        无需再关心窗口激活状态。
+        分层激活窗口（健康会话零鼠标，兜底只点标题栏）+ ESC×5 确保从
+        任意状态回退到 F1 买入界面。后续操作（下单/撤单/查询）依赖此函数
+        确保窗口在前台且处于基准态，无需再关心窗口激活状态。
 
         每个 TaskQueue 任务开始前自动调用一次，查询方法内部也会调用。
         """
@@ -1226,13 +1237,15 @@ class WindowService(Singleton):
         except Exception:
             pass
 
-        # 桌面僵死指纹细分：裸 click_input 异常原样冒泡会被统计归为
-        # INTERNAL_ERROR，客户端看到的是含糊的「未知异常」——指纹命中时
-        # 转分类 ApiError（消息保留原始文本，保住 "no active desktop"
-        # 的 grep 诊断指纹）
+        # 分层激活（层1 UIA set_focus → 层2 AttachThreadInput → 层3 标题栏
+        # 单击）——绝不用无坐标 click_input 点窗口中心：那一点落在窗口
+        # 正中，当前几何正落「买入/卖出数量」框，每个任务一发、数量被置
+        # 100（2026-10-10 用户 VNC 目击）；健康会话层1 直达、全程零鼠标。
+        # 桌面僵死指纹由 ensure_foreground 统一细分上报
+        # （SESSION_DESKTOP_UNAVAILABLE，保住 "no active desktop" 的 grep 指纹）
         try:
-            with timed("click_input 激活", self.logger):
-                window.click_input()
+            with timed("激活窗口（分层）", self.logger):
+                self.ensure_foreground(window, purpose="任务前置重置")
                 time.sleep(0.3)
         except ApiError:
             raise

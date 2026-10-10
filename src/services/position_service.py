@@ -91,19 +91,19 @@ class PositionService:
             except Exception as e:
                 self.logger.warning(f"恢复最小化窗口失败: {e}")
 
-        with timed("click_input 激活窗口", self.logger):
-            # 先用 SetForegroundWindow 强制置前，再 click_input 确保焦点
+        with timed("激活窗口（分层）", self.logger):
+            # 先用 SetForegroundWindow 廉价置前一次，其余交给分层激活
+            # （UIA set_focus → AttachThreadInput → 标题栏单击兜底）——
+            # 不用无坐标 click_input：那会点窗口正中心，当前几何正落
+            # 「买入/卖出数量」框（2026-10-10 数量被置 100 事故）
             try:
                 win32gui.SetForegroundWindow(target_handle)
                 time.sleep(0.15)
             except Exception:
                 pass
-            for _ in range(2):
-                window.click_input()
-                time.sleep(0.15)  # SetForegroundWindow <0.1s，0.3s 冗余
-                if win32gui.GetForegroundWindow() == target_handle:
-                    break
-                self.logger.warning(f"激活后前台句柄 {win32gui.GetForegroundWindow():#x} ≠ 目标 {target_handle:#x}，重试")
+            self.window_service.ensure_foreground(
+                window, purpose="查询前置激活（Ctrl+C 复制）")
+            time.sleep(0.15)
 
         if win32gui.GetForegroundWindow() != target_handle:
             # 激活失败常见原因: 上次异常退出残留的空标题 #32770 对话框
