@@ -37,6 +37,12 @@ class PositionService:
     POSITION_TABLE_COLUMNS = {"成本价", "股票余额"}
     TRADES_TABLE_COLUMNS = {"成交时间", "成交编号"}
     ORDERS_TABLE_COLUMNS = {"委托价格", "委托数量"}
+    # 当日委托可见性延迟的重查节奏：模拟盘实测新委托挂进券商列表可延迟
+    # 数十秒（2026-10-10 用户 VNC 目击），单次 F5 重查不够。指数退避共
+    # 3 轮，最坏额外 ~15s（含每轮复制 ~2-3s），仍在 40s 客户端推荐超时内；
+    # 每轮命中即止，全未命中交回调用方按未命中处理（契约：
+    # entrust_no_verified=false / 回补 null → 调用方回退 /orders/pending）
+    _ENTRUST_REFRESH_WAITS = (1.0, 2.0, 4.0)
 
     def __init__(self, window_service: WindowService, ocr_service=None):
         self.window_service = window_service
@@ -950,10 +956,11 @@ class PositionService:
 
         Args:
             refresh_until_match: 可选谓词 (rows) -> bool。首次复制后若谓词
-                不满足（如对账委托号未命中、回补条件无匹配——券商当日委托
-                列表对新委托有秒级可见性延迟，2026-09-29 压测实测），按
-                F5 刷新当前查询页后重新复制确认一次；仍不满足则原样返回，
-                由调用方按未命中处理（宁可放弃、绝不循环重试）。
+                不满足（对账委托号未命中、回补条件无匹配——券商当日委托
+                列表对新委托的可见性延迟实测可达数十秒：2026-09-29 压测为
+                秒级，2026-10-10 模拟盘用户 VNC 目击远超单次重查窗口），
+                按指数退避 F5 刷新当前查询页多轮重查；仍不满足则原样返回，
+                由调用方按未命中处理（有界让步，绝不在任务外轮询）。
         """
         self.logger.info("开始获取当日委托")
 
@@ -970,14 +977,17 @@ class PositionService:
         rows = self._copy_table_verified("委托", self.ORDERS_TABLE_COLUMNS,
                                          page_name="当日委托")
         if refresh_until_match is not None and not refresh_until_match(rows):
-            self.logger.info("当日委托首查未满足匹配条件，F5 刷新后重新复制确认")
+            self.logger.info("当日委托首查未满足匹配条件，F5 刷新多轮重查（可见性延迟）")
             with timed("F5 刷新重查当日委托", self.logger):
-                self._refresh_window_ref()
-                window = self._cached_window
-                self.window_service.send_key("F5", background=True)
-                time.sleep(0.8)  # 等券商服务器重新返回列表
-                rows = self._copy_table_verified(
-                    "委托", self.ORDERS_TABLE_COLUMNS, page_name="当日委托")
+                for wait in self._ENTRUST_REFRESH_WAITS:
+                    self._refresh_window_ref()
+                    window = self._cached_window
+                    self.window_service.send_key("F5", background=True)
+                    time.sleep(wait)  # 等券商服务器把新委托挂进列表
+                    rows = self._copy_table_verified(
+                        "委托", self.ORDERS_TABLE_COLUMNS, page_name="当日委托")
+                    if refresh_until_match(rows):
+                        break
         return rows
 
     # ------------------------------------------------------------
