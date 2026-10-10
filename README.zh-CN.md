@@ -193,7 +193,7 @@ uv run python main.py --dev       # 开发模式（热加载）
 | `order.capture_entrust_no` | false | 下单成功后从右下角成功横幅截获合同编号（后台抓屏 + 模板 OCR，句号锚定——券商编号长度不一）。截获失败返回 `null`；下单成败与之无关（见响应说明）。成功路径加 ~1s，失败路径最多 5s 截获超时。配合 `order.verify_entrust_no` 对账使用。会话形态差异：console 挂接（VNC）与 RDP 挂接态直接命中（2026-10-10 实测）；RDP 断开态无法可靠读取——高度门控拒绝读取，下单自动落回 `order.recover_entrust_no` |
 | `order.entrust_no_timeout_seconds` | 5.0 | 横幅截获等待超时（秒）；成功即返回，仅拖慢失败路径 |
 | `order.recover_entrust_no` | true | 横幅截获失败时按**提交点击时刻×参数四元组**（操作+代码+价格+数量；对全精度点击时刻施加秒桶窗口 [-1,+2] 构成秒桶闭包，完整覆盖秒粒度「委托时间」）反查当日委托回补编号。仅唯一命中才采纳（0 或 ≥2 候选保持 `null`，绝不猜测）。以独立排队查询链式追加——仅截获失败路径多 ~6-8s，成功路径不受影响。采纳时置 `entrust_no_recovered: true` |
-| `order.verify_entrust_no` | false | 下单成功拿到委托号后自动追加一笔当日委托查询对账（响应附加 `entrust_no_verified`）。未命中时先 F5 刷新当日委托页重拷一次才报 `false`——券商委托列表对新委托有秒级可见性延迟（2026-09-29 压测实测）。开启后接口耗时增加一次查询，调用方 timeout 需相应放大。需配合 `order.capture_entrust_no` 使用 |
+| `order.verify_entrust_no` | false | 下单成功拿到委托号后自动追加一笔当日委托查询对账（响应附加 `entrust_no_verified`）。未命中时按 1/2/4s 指数退避 F5 刷新重拷至多 3 轮才报 `false`——模拟盘实测券商委托列表对新委托的可见性延迟可达数十秒（2026-10-10 用户 VNC 目击）。开启后接口耗时增加一次查询（未命中路径更长），调用方 timeout 需相应放大。需配合 `order.capture_entrust_no` 使用 |
 | `order.verify_code_input` | true | 输入代码后校验证券名称联动（非空=代码被接受），未联动重输一次仍失败则拒绝提交（`INPUT_VERIFY_FAILED`）。失败路径增加约 3-6s |
 | `ocr.ddddocr_enabled` | false | ddddocr 调试开关（开启后可启用双引擎质检+模板提取，需 `uv sync --extra ocr`） |
 | `window_monitor.enabled` | true | 窗口最小化监控开关 |

@@ -256,6 +256,13 @@ def _register_trading_tools() -> None:
            取得明确同意后才允许调用本工具
         3. 调用成功后用 get_today_orders() 核对委托号与状态并向用户汇报
 
+        响应语义（2026-10-10 起）: confirmed=true = 提交后出现黄色成功
+        横幅（客户端提交成功的唯一主动视觉确认）；confirmed=false = 横幅
+        未出现，大概率未提交（客户端对非法表单内联拒绝、不弹窗）——先
+        查 get_today_orders()/资金冻结核实，勿盲目重试。entrust_no=null
+        不代表失败：confirmed=true+null=横幅可见但读数失败（已提交、编
+        号未知，网关已自动回补），勿重试。
+
         Args:
             code: 6 位证券代码，如 "601991"
             side: buy=买入，sell=卖出

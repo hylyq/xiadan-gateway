@@ -95,6 +95,7 @@ uv run --no-project python <skill目录>/scripts/xiadan.py <命令>
 | `PRICE_OUT_OF_RANGE` | 价格超涨跌停——向用户复核价格 |
 | `INSUFFICIENT_BALANCE` / `INSUFFICIENT_SHARES` | 资金/份额不足——报告用户 |
 | `T1_RESTRICTION` | 当日买入次日才可卖——报告用户 |
+| `STOCK_NOT_FOUND` | 证券代码在券商侧不存在（高特异性弹窗，区别于 T1 文案）——报告用户核实代码，勿按 T1 处理 |
 | `ORDER_PRICE_REQUIRED` | 券商要求显式价格——改限价单 |
 | `OUTSIDE_TRADING_HOURS` / `SERVER_CLEARING` | 非交易时段/券商清算——稍后再试或报告用户 |
 

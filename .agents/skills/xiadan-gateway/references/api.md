@@ -61,10 +61,10 @@ CLI 子命令与 HTTP 端点一一对应；本文供需要理解响应字段全�
 | 字段 | 说明 |
 |------|------|
 | `action`/`mode`/`code`/`amount`/`price` | 回显下单参数 |
-| `confirmed` | `true`=已提交（快速交易模式下无错误弹窗即判定成功） |
-| `entrust_no` | 合同编号。仅启用截获时返回；截获失败或未启用为 `null`。**`null` 不代表下单失败**——成败判定基于弹窗检测，与横幅截获解耦；此时**不要重试**（会重复下单），需要编号时用 `orders` 按代码+价格+数量+时间反查 |
-| `entrust_no_recovered` | 截获失败后按点击时刻窗口×参数匹配反查当日委托，唯一命中才为 `true` |
-| `entrust_no_verified` | 委托号对账结果（开启时返回）：`true`=当日委托落表命中 / `false`=刷新重拷后仍未命中（以查询为准）/ `null`=对账查询失败（不影响下单结果语义） |
+| `confirmed` | `true`=已提交——判定依据：提交后右下角出现**黄色成功横幅**（客户端对提交成功的唯一主动视觉确认；不要求读出委托号——横幅可见但读数失败时 `entrust_no` 为 null 并自动回补）。横幅未出现（含客户端内联校验静默拒绝——不弹窗、按钮不置灰）→ `false`，大概率未提交，查当日委托/资金冻结核实后再决定重试。仅截获关闭时退化为旧语义（无错误弹窗即视为成功） |
+| `entrust_no` | 合同编号。仅启用截获时返回；截获失败或未启用为 `null`。**`null` 不代表下单失败**——看 `confirmed`：`true`+`null`=横幅已出现但读数失败（已提交、编号未知），**不要重试**（会重复下单），需要编号时用 `orders` 按代码+价格+数量+时间反查；`false`+`null`=横幅未出现，大概率未提交 |
+| `entrust_no_recovered` | 截获失败后按点击时刻窗口×参数匹配反查当日委托（含多轮 F5 重查），唯一命中才为 `true`；`confirmed: false` 时不回补 |
+| `entrust_no_verified` | 委托号对账结果（开启时返回）：`true`=当日委托落表命中 / `false`=按 1/2/4s 指数退避 F5 多轮重拷后仍未命中（以查询为准）/ `null`=对账查询失败（不影响下单结果语义） |
 
 `GET /orders/{entrust_no}/status` 响应 `data`：
 
@@ -114,6 +114,8 @@ CLI 子命令与 HTTP 端点一一对应；本文供需要理解响应字段全�
 `CONTROL_NOT_FOUND` 控件未找到；`MODE_SWITCH_FAILED` 限价/市价切换失败；
 `ORDER_SUBMIT_FAILED` 提交失败（通用，含弹窗原文）；`SERVER_CLEARING` 券商清算中；
 `OUTSIDE_TRADING_HOURS` 非交易时段；`T1_RESTRICTION` T+1 限制；
+`STOCK_NOT_FOUND` 证券代码不存在（弹窗高特异性短语，区别于 T1 的「可卖数量」
+文案）——报告用户核实代码，勿按 T1 处理；
 `INSUFFICIENT_SHARES`/`INSUFFICIENT_BALANCE` 份额/资金不足；
 `SHORT_SELLING_FORBIDDEN` 不允许卖空；`PRICE_OUT_OF_RANGE` 价格超涨跌停；
 `ORDER_PRICE_REQUIRED` 券商要求显式价格（改限价）；`SERVER_UNAVAILABLE` 券商
