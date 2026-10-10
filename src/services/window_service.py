@@ -19,6 +19,18 @@ from src.exceptions import ApiError, ErrorCode
 from src.utils.logger import Logger
 from src.utils.poll import timed
 from src.utils.singleton import Singleton
+
+
+def _keyboard_send(keys: str) -> None:
+    """向当前键盘焦点控件发送按键（绝不触碰焦点）
+
+    必须用 pywinauto 模块级 SendKeys 而非 HwndWrapper.type_keys——后者
+    内部先调 UIA set_focus，退化会话下静默失败会把点击刚放好的字段
+    焦点丢掉，击键落空（2026-10-10 服务器实测）。调用方负责先聚焦
+    （click_input 真实点击）。
+    """
+    from pywinauto import keyboard
+    keyboard.SendKeys(keys)
 from src.utils.uia import safe_control_type, safe_text
 
 
@@ -705,10 +717,13 @@ class WindowService(Singleton):
             except Exception:
                 pass
 
-            # 方案二：用 type_keys 做兜底清空
+            # 方案二：用 keyboard.SendKeys 做兜底清空
             # {HOME}+{END}{BACKSPACE} = Home→Shift+End 全选→删除
             # 比 ^a{BACKSPACE}（Ctrl+A）更可靠，某些控件不支持 Ctrl+A
-            element.type_keys("{HOME}+{END}{BACKSPACE}")
+            # 注意用模块级 SendKeys 而非 element.type_keys——后者内部会
+            # 再调一次 UIA set_focus，退化会话下静默失败会丢掉点击刚
+            # 放好的字段焦点（2026-10-10 服务器实测复发）
+            _keyboard_send("{HOME}+{END}{BACKSPACE}")
             time.sleep(0.15)
 
             # 验证清空结果：检测券商自动填充是否在清空后重新写入
@@ -719,12 +734,12 @@ class WindowService(Singleton):
                     self.logger.info(
                         f"清空后仍有内容 '{remaining[:20]}'（券商自动填充），二次清除"
                     )
-                    element.type_keys("{HOME}+{END}{BACKSPACE}")
+                    _keyboard_send("{HOME}+{END}{BACKSPACE}")
                     time.sleep(0.1)
             except Exception:
                 pass
 
-            element.type_keys(text)
+            _keyboard_send(text)
             self.logger.info(
                 f"输入文本 control_id={control_id}: {text}"
                 f"{' (WM_SETTEXT)' if cleared else ''}"
