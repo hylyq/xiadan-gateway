@@ -58,6 +58,35 @@ class PositionService:
         self._captcha_path_cache = None
         self._captcha_path_root_handle = None
 
+    def _focus_grid_for_copy(self) -> None:
+        """复制前置：把键盘焦点交给当前查询表格（keyboard 路径专用）
+
+        Ctrl+C 只对持有键盘焦点的控件生效——窗口前台≠表格聚焦。历史上
+        任务前置的窗口中心盲点恰好点击表格才让复制「顺便能用」（盲点
+        移除后 keyboard 路径立即失效：剪贴板恒空 → OCR_FAILED，2026-10-10
+        用户人工点一下表格立即恢复，实锤焦点依赖）。此处按已缓存的表格
+        句柄定向单击其中心——不依赖任何几何巧合，单击行=仅选中，无副作用。
+        """
+        import win32api
+        import win32con
+        import win32gui
+
+        hwnd = self._get_grid_hwnd()
+        if not hwnd or not win32gui.IsWindowVisible(hwnd):
+            self.logger.warning("未找到可见查询表格，跳过聚焦（按原样发送 Ctrl+C）")
+            return
+        try:
+            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+            x, y = (left + right) // 2, (top + bottom) // 2
+            win32api.SetCursorPos((x, y))
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            time.sleep(0.1)
+            self.logger.info(f"已单击查询表格聚焦: {hwnd:#x} @ ({x},{y})")
+        except Exception as e:
+            self.logger.warning(f"聚焦查询表格失败（继续发送 Ctrl+C）: {e}")
+
     def _send_ctrl_c(self):
         """激活窗口 → keybd_event 发送两次 Ctrl+C（绕过中文输入法）
 
@@ -130,6 +159,10 @@ class PositionService:
                     ErrorCode.WINDOW_NOT_FOUND, "无法将交易窗口带到前台，放弃发送 Ctrl+C 避免按键泄漏",
                     suggestion="请检查是否有窗口遮挡券商程序，或人工点击一次交易窗口"
                 )
+
+        # Ctrl+C 前先把键盘焦点交给表格控件（单击中心=仅选中行），
+        # 否则复制静默无效——详见 _focus_grid_for_copy
+        self._focus_grid_for_copy()
 
         with timed("keybd_event Ctrl+C ×2", self.logger):
             VK_CONTROL = win32con.VK_CONTROL  # 0x11
