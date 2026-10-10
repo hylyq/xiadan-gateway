@@ -2,8 +2,10 @@
 
 实测基线（2026-10-10 本地物理断网双周期，trace 在 logs/netcycle*）：
 - 可靠信号 = 状态栏连接 Pane 内状态格文本「断开」（连接态该格空文本，
-  Pane 含 时间格 + 状态格 + mncgXXX 格；全树扫描命中唯一）
-- mncg 主站编号每次重连会变（实测 112/113/114/18），不可绑定
+  Pane 含 时间格 + 状态格 + 主站名格（mncgXXX/专有云NNN…，命名不固定，
+  不设关键字白名单）；全树扫描命中唯一）
+- 主站名每次重连会变（实测 mncg 112/113/114/18；专有云部署另有命名），
+  不可绑定——「断开」二字才是唯一可靠信号
 - 断网 →「断开」出现延迟 24~27s（心跳周期量级）：connected=True 只代表
   「未观测到断开」（~30s 盲区），不等于网络正常
 - 恢复后「断开」不必然自动消失：空闲客户端持续挂「断开」（45s+ 直至
@@ -36,7 +38,6 @@ from src.utils.uia import safe_text
 
 _TIME_PATTERN = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
 _LINK_KEYWORD = "断开"
-_NAME_KEYWORDS = ("mncg", "断开")
 
 _lock = threading.Lock()
 # 仅 win32 句柄（跨线程安全）；UIA COM 对象不跨线程缓存
@@ -118,9 +119,12 @@ def read_broker_link() -> dict:
     """读状态栏连接字样
 
     Returns:
-        dict: connected — True=状态格空且有主站名（未观测到断开，含 ~30s
-              盲区语义）；False=「断开」在场；None=无法判定（窗口不在/
-              定位失败/结构异常）
+        dict: connected — True=状态格无「断开」且 Pane 含时间格 + 任意非空
+              主站格文本（未观测到断开，含 ~30s 盲区语义；主站命名不设
+              关键字白名单，mncgXXX/专有云NNN/… 任意非空文本均认可）；
+              False=「断开」在场（唯一可靠负信号，优先判定）；
+              None=无法判定（窗口不在/定位失败/结构异常——无时间格或
+              无非空主站格文本）
               status_text — Pane 全部子格文本拼接（诊断用）
               latency_ms — 本次读取耗时
     """
@@ -151,16 +155,17 @@ def read_broker_link() -> dict:
 
             texts = _read_pane_texts(pane_hwnd)
             joined = " ".join(t for t in texts if t)
-            has_link_kw = any(k in t for t in texts
-                              for k in _NAME_KEYWORDS)
             has_time = any(_TIME_PATTERN.match(t) for t in texts)
-            if not has_link_kw and not has_time:
+            others = [t for t in texts if t and not _TIME_PATTERN.match(t)]
+            if not has_time or not others:
                 # 结构对不上（窗口重排/选中错 Pane）——弃缓存下次重定位
                 _cache.update(main_hwnd=main_hwnd, pane_hwnd=None)
                 return _result(None, joined, reason="pane_pattern_mismatch")
             _cache.update(main_hwnd=main_hwnd, pane_hwnd=pane_hwnd)
-            connected = False if _LINK_KEYWORD in joined \
-                else (True if has_link_kw else None)
+            # 放宽判定（用户 2026-10-10）：主站命名不设关键字白名单
+            # （mncg112/专有云010/… 见过多种），「断开」是唯一可靠负信号——
+            # 状态格无「断开」+ 时间格在场 + 任意非空主站格文本 = 已连接
+            connected = not any(_LINK_KEYWORD in t for t in others)
             return _result(connected, joined)
         except Exception as e:
             _cache["pane_hwnd"] = None
