@@ -595,6 +595,13 @@ class Trader:
                       .get("entrust_no_timeout_seconds", 3.0)) + 0.5)
             # 全精度点击时刻随结果带出：截获失败时路由层据此做秒桶窗口回补
             result["submit_click_epoch"] = submit_click_epoch
+        # 事后券商链路校验：提交序列完成但「断开」在场 → 是否送达券商未知
+        # （快速交易模式在断开态下的静默行为未实测，按状态未知处理最稳妥）
+        from src.services.broker_link import check_after_order
+        check_after_order("下单提交", extra_details={
+            "entrust_no": result.get("entrust_no"),
+            "submit_click_epoch": result.get("submit_click_epoch"),
+        })
         self.logger.info(f"下单完成: {result}")
         return result
 

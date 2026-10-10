@@ -164,6 +164,13 @@ class TradingService:
         # 记录弹窗标志：有弹窗 = 下次同向不可跳过
         self._had_dialog = confirm_dialog_shown
 
+        # 事后券商链路校验：「断开」在场 → 撤单是否送达券商未知
+        from src.services.broker_link import check_after_order
+        check_after_order(
+            "撤单",
+            suggestion="请先核实撤单是否生效（GET /orders/pending 看「备注」/"
+                       "「撤消数量」），确认未生效 → 网络恢复后重新撤单")
+
         return {
             "cancel_type": operation_name,
             "success": True,

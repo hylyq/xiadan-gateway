@@ -32,6 +32,11 @@ class ErrorCode:
     PRICE_OUT_OF_RANGE = "PRICE_OUT_OF_RANGE"     # 价格超出涨跌停限制（干净退出）
     ORDER_PRICE_REQUIRED = "ORDER_PRICE_REQUIRED" # 券商要求填写委托价格（市价类型未选择/不受支持，或限价未传价格）
     SERVER_UNAVAILABLE = "SERVER_UNAVAILABLE"       # 券商服务器不可用（维护中）
+    # 客户端与券商主站链路断开（UI 操作结束时状态栏「断开」在场）——查询
+    # 结果为客户端缓存旧值，已作废。与 SERVER_UNAVAILABLE 区分：本错误
+    # 直接重试即可，每次重试都触发客户端重连尝试（2026-10-10 断网实测，
+    # 恢复后 0.9s 自愈；见 services/broker_link）
+    BROKER_DISCONNECTED = "BROKER_DISCONNECTED"
     OCR_FAILED = "OCR_FAILED"                       # 验证码识别失败
     INPUT_VERIFY_FAILED = "INPUT_VERIFY_FAILED"     # 证券名称联动校验失败（代码未被客户端接受）
     INTERNAL_ERROR = "INTERNAL_ERROR"               # 未知异常
@@ -73,6 +78,7 @@ HTTP_STATUS = {
     ErrorCode.SHORT_SELLING_FORBIDDEN: 400,
     ErrorCode.ORDER_PRICE_REQUIRED: 400,
     ErrorCode.SERVER_UNAVAILABLE: 503,
+    ErrorCode.BROKER_DISCONNECTED: 503,
     ErrorCode.OCR_FAILED: 500,
     ErrorCode.INPUT_VERIFY_FAILED: 500,
     ErrorCode.INTERNAL_ERROR: 500,

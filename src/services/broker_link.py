@@ -30,6 +30,7 @@ import win32process
 from pywinauto import Desktop
 
 from src.constants import TRADING_WINDOW_TITLE
+from src.exceptions import ApiError, ErrorCode
 from src.utils.uia import safe_text
 
 _TIME_PATTERN = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
@@ -140,3 +141,54 @@ def read_broker_link() -> dict:
         except Exception as e:
             _cache["pane_hwnd"] = None
             return _result(None, reason=f"{type(e).__name__}: {e}"[:120])
+
+
+# ============================================================
+# 业务端点事后门控（fail-closed：断开在场 → 不交付本结果）
+#
+# 只做事后校验、不做操作前预检——操作本身就是客户端重连的触发器
+# （实测恢复网络后 0.9s 自愈），预检拒绝会造成
+# 「拒绝操作 → 客户端永不被戳 → 永不重连」死锁（2026-10-10 断网实测：
+# 空闲客户端「断开」永不自清）。
+#
+# fail-open：connected=None（读取失败/结构异常）一律放行，与
+# session 健康门同哲学；只有客户端明确报告「断开」才拦截。
+# ============================================================
+
+def ensure_connected_or_discard(action: str) -> dict:
+    """查询类 UI 操作完成后校验：「断开」在场 → 结果作废抛 BROKER_DISCONNECTED
+
+    断开态下查询静默返回客户端缓存数据（HTTP 200、日志无痕，2026-10-10
+    实测 3/3），本门控把新鲜度判断从调用方收回归网关。
+    """
+    link = read_broker_link()
+    if link["connected"] is False:
+        raise ApiError(
+            ErrorCode.BROKER_DISCONNECTED,
+            f"{action}已完成，但客户端报告券商连接断开——返回的将是缓存旧值，已作废",
+            suggestion=("直接重试即可：每次调用都会触发客户端重连尝试，"
+                        "网络恢复后的首个请求即返回新鲜数据"
+                        "（注意断网初期有 ~25-30s 盲期，客户端自身未察觉）"),
+            details={"broker_link": link})
+    return link
+
+
+def check_after_order(action: str, suggestion: str = None,
+                      extra_details: dict = None) -> None:
+    """下单/撤单提交序列完成后校验：「断开」在场 → ORDER_STATE_UNKNOWN
+
+    结果状态未知（可能已送达券商也可能没有），与提交后非业务异常同级：
+    幂等记录保留（should_keep_record_on_error），恢复后先查单核实。
+    """
+    link = read_broker_link()
+    if link["connected"] is False:
+        raise ApiError(
+            ErrorCode.ORDER_STATE_UNKNOWN,
+            f"{action}序列已完成，但客户端报告券商连接断开——"
+            f"本次操作是否送达券商状态未知",
+            suggestion=suggestion or (
+                "请先查单核实（下单同 key 重试会被幂等拦截）："
+                "1) GET /orders/pending 按代码+价格+数量匹配当日委托；"
+                "2) GET /trades/today 查成交；"
+                "3) 确认未生效 → 网络恢复后重新操作"),
+            details={"broker_link": link, **(extra_details or {})})

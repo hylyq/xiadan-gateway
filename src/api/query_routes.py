@@ -23,6 +23,20 @@ def _get_position_service():
     return PositionService(WindowService(), OcrService.get_instance())
 
 
+def _submit_query(func, task_name: str, timeout: int, params: dict = None):
+    """排队执行查询任务 + 事后券商链路校验（「断开」在场 → 结果作废报错）
+
+    断开态下查询会静默返回客户端缓存数据（HTTP 200、日志无痕），
+    新鲜度判断在网关内收口，调用方无需再自行核对 /health。
+    """
+    result = TaskQueue.get_instance().submit(
+        func=func, task_name=task_name, params=params or {},
+        timeout=timeout)
+    from src.services.broker_link import ensure_connected_or_discard
+    ensure_connected_or_discard("查询")
+    return result
+
+
 @query_bp.route("/account/balance", methods=["GET"])
 def get_balance():
     """获取资金余额
@@ -32,15 +46,11 @@ def get_balance():
     request_id = generate_request_id()
     _start = time.time()
     config = AppConfig()
-    task_queue = TaskQueue.get_instance()
     try:
         query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
-        result = task_queue.submit(
-            func=lambda: _get_position_service().get_balance(),
-            task_name="get_balance",
-            params={},
-            timeout=query_timeout
-        )
+        result = _submit_query(
+            lambda: _get_position_service().get_balance(),
+            task_name="get_balance", timeout=query_timeout)
         return success_response(result, request_id, duration_ms=(time.time() - _start) * 1000)
     except Exception as e:
         return error_response_from_exception(e, request_id)
@@ -55,15 +65,11 @@ def get_position():
     request_id = generate_request_id()
     _start = time.time()
     config = AppConfig()
-    task_queue = TaskQueue.get_instance()
     try:
         query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
-        result = task_queue.submit(
-            func=lambda: _get_position_service().get_position(),
-            task_name="get_position",
-            params={},
-            timeout=query_timeout
-        )
+        result = _submit_query(
+            lambda: _get_position_service().get_position(),
+            task_name="get_position", timeout=query_timeout)
         return success_response(result, request_id, duration_ms=(time.time() - _start) * 1000)
     except Exception as e:
         return error_response_from_exception(e, request_id)
@@ -78,15 +84,11 @@ def get_today_trades():
     request_id = generate_request_id()
     _start = time.time()
     config = AppConfig()
-    task_queue = TaskQueue.get_instance()
     try:
         query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
-        result = task_queue.submit(
-            func=lambda: _get_position_service().get_today_trades(),
-            task_name="get_today_trades",
-            params={},
-            timeout=query_timeout
-        )
+        result = _submit_query(
+            lambda: _get_position_service().get_today_trades(),
+            task_name="get_today_trades", timeout=query_timeout)
         return success_response(result, request_id, duration_ms=(time.time() - _start) * 1000)
     except Exception as e:
         return error_response_from_exception(e, request_id)
@@ -104,7 +106,6 @@ def get_order_status(entrust_no: str):
     request_id = generate_request_id()
     _start = time.time()
     config = AppConfig()
-    task_queue = TaskQueue.get_instance()
     try:
         if not (entrust_no.isdigit() and 6 <= len(entrust_no) <= 24):
             from src.exceptions import ApiError, ErrorCode
@@ -113,12 +114,11 @@ def get_order_status(entrust_no: str):
                 f"entrust_no 格式错误: {entrust_no}",
                 suggestion="合同编号为 6-24 位纯数字（不同券商/交易所长度不同）")
         query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
-        result = task_queue.submit(
-            func=lambda: _get_position_service().get_order_status(entrust_no),
+        result = _submit_query(
+            lambda: _get_position_service().get_order_status(entrust_no),
             task_name="get_order_status",
-            params={"entrust_no": entrust_no},
-            timeout=query_timeout * 2  # 复合查询：最多两次表格复制
-        )
+            timeout=query_timeout * 2,  # 复合查询：最多两次表格复制
+            params={"entrust_no": entrust_no})
         return success_response(result, request_id, duration_ms=(time.time() - _start) * 1000)
     except Exception as e:
         return error_response_from_exception(e, request_id)
@@ -135,15 +135,11 @@ def get_today_orders():
     request_id = generate_request_id()
     _start = time.time()
     config = AppConfig()
-    task_queue = TaskQueue.get_instance()
     try:
         query_timeout = config.get_task_queue_config().get("query_timeout_seconds", 30)
-        result = task_queue.submit(
-            func=lambda: _get_position_service().get_today_orders(),
-            task_name="get_today_orders",
-            params={},
-            timeout=query_timeout
-        )
+        result = _submit_query(
+            lambda: _get_position_service().get_today_orders(),
+            task_name="get_today_orders", timeout=query_timeout)
         return success_response(result, request_id, duration_ms=(time.time() - _start) * 1000)
     except Exception as e:
         return error_response_from_exception(e, request_id)
