@@ -328,14 +328,17 @@ curl -X POST http://localhost:5000/orders \
 | 字段 | 说明 |
 |------|------|
 | `action` / `mode` / `code` / `amount` / `price` | 回显下单参数 |
-| `confirmed` | `true`=已提交（快速交易模式下无错误弹窗即判定成功） |
-| `entrust_no` | 合同编号（委托号）。仅启用 `order.capture_entrust_no` 后返回，截获失败或未启用时为 `null`。开启 `order.recover_entrust_no`（默认开）时，截获失败会按点击时刻窗口×参数匹配反查当日委托一次——唯一命中才采纳并置 `entrust_no_recovered: true` |
-| `entrust_no_verified` | 委托号对账结果。仅 `order.verify_entrust_no` 开启且拿到委托号时返回：`true`=当日委托落表命中 / `false`=F5 刷新重拷一次后仍未命中（横幅号可能不准，以查询为准）/ `null`=对账查询失败（不影响下单结果语义） |
+| `confirmed` | `true`=已提交。判定依据：提交后右下角出现**黄色成功横幅**（客户端对提交成功的唯一主动视觉确认；不要求从中读出委托号——横幅可见但读数失败时 `entrust_no` 为 null 并自动走当日委托回补）。横幅未出现（含客户端内联校验静默拒绝——不弹窗、按钮不置灰）→ `confirmed: false`，大概率未提交，请查当日委托/资金冻结核实后再决定是否重试。仅 `order.capture_entrust_no` 关闭时退化为旧语义（无错误弹窗即视为成功） |
+| `entrust_no` | 合同编号（委托号）。仅启用 `order.capture_entrust_no` 后返回，截获失败或未启用时为 `null`。开启 `order.recover_entrust_no`（默认开）时，截获失败会按点击时刻窗口×参数匹配反查当日委托（含多轮 F5 重查）——唯一命中才采纳并置 `entrust_no_recovered: true`；`confirmed: false`（横幅未出现）时不回补 |
+| `entrust_no_verified` | 委托号对账结果。仅 `order.verify_entrust_no` 开启且拿到委托号时返回：`true`=当日委托落表命中 / `false`=F5 刷新多轮重拷（1/2/4s 指数退避）后仍未命中（横幅号可能不准或券商列表可见性延迟，以查询为准）/ `null`=对账查询失败（不影响下单结果语义） |
 
-> **`entrust_no: null` 不代表下单失败**——成败判定基于弹窗检测，与横幅截获解耦。
-> `null` 的语义是"已提交（推断），编号未知"（横幅未出现/被遮挡/窗口最小化）。
-> 此时**不要重试**（会重复下单），需要编号时用 `GET /orders/pending`
-> 按 代码+价格+数量+时间 反查。另注意：券商服务器维护窗口等极端情况下
+> **`entrust_no: null` 不代表下单失败**——`confirmed` 已与黄色横幅绑定：
+> `confirmed: true` + `entrust_no: null` = 横幅已出现但读数失败（已提交、
+> 编号未知），此时**不要重试**（会重复下单），需要编号时用
+> `GET /orders/pending` 按 代码+价格+数量+时间 反查（开启
+> `order.recover_entrust_no` 时网关已自动回补）。
+> `confirmed: false` = 横幅未出现，大概率未提交，同样先查当日委托/资金
+> 冻结核实。另注意：券商服务器维护窗口等极端情况下
 > 横幅号与最终落表号可能不一致，按单操作前应以当日委托查询复核；
 > 开启 `order.verify_entrust_no` 可在下单响应中直接获得对账结果
 > （`entrust_no_verified`）。

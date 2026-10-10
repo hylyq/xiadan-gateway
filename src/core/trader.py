@@ -131,14 +131,18 @@ class Trader:
                 "code": "601991",
                 "amount": "100",
                 "price": "10.50" or None,
-                "confirmed": True/False,
+                "confirmed": True/False,  # capture 启用时=黄色横幅可见（见下）
                 "entrust_no": "6246860043" or None  # capture_entrust_no 启用时回传
             }
 
-        entrust_no=None 的语义是"订单成功（推断），编号未知"——成败判定基于
-        弹窗检测，与横幅截获解耦：截获失败（横幅未出现/被遮挡/窗口最小化）
-        不影响 confirmed，策略端不应据此重试（会重复下单），需要编号时用
-        当日委托查询按 代码+价格+数量+时间 反查。
+        confirmed 的语义（2026-10-10 起）：capture_entrust_no 启用时与
+        「黄色横幅可见」硬绑定——横幅是客户端对提交成功的唯一主动视觉
+        确认，不要求从中读出单号（横幅可见但 OCR 读数失败 → confirmed=
+        True + entrust_no=None，路由层自动走当日委托回补）。横幅未出现
+        （含客户端内联校验静默拒绝——不弹窗、按钮不置灰）→ confirmed=
+        False，路由层不做回补；大概率未提交，策略端查当日委托/资金冻结
+        核实后再决定重试。capture 关闭时退回旧的弹窗推断语义（无弹窗即
+        视为已提交，仅供无横幅能力的部署兜底）。
         """
         self.logger.info(
             f"开始下单: code={code}, status={status}, amount={amount}, "
@@ -309,29 +313,9 @@ class Trader:
                 time.sleep(0.05)
 
         # 8. 点击下单按钮并处理弹窗
-        # 提交按钮灰显前置检查（2026-10-09 假阳性成功事故）：
-        # 代码输入有名称联动校验兜底，但价格/数量（1033/1034）是回读恒空
-        # 的自绘壳控件、无任何校验——无头退化态下其击键可能丢失，表单
-        # 空缺时客户端灰显下单按钮，对灰按钮的 click_input 是静默无效
-        # 操作，快速交易模式下「无弹窗」被误判为已提交（实测：confirmed=true
-        # 但交易所无此单、资金无冻结、撤单按钮灰显）。灰显 = 确定未提交，
-        # 在点击前拦截，杜绝假阳性（撤单按钮早有同款检查，此处补齐）。
-        submit_el = self.window_service.find_element_in_window(
-            window, CONTROL_ID_SUBMIT, descendants=_descendants)
-        if submit_el is not None:
-            try:
-                if not submit_el.is_enabled():
-                    raise ApiError(
-                        ErrorCode.INPUT_VERIFY_FAILED,
-                        "下单按钮灰显：表单未就绪（价格/数量输入可能未生效），"
-                        "本次确定未提交",
-                        suggestion="直接重试通常可恢复；若反复出现，请人工检查"
-                                   "客户端输入框状态（可能处于击键丢失的退化态，"
-                                   "重连 RDP 或重启客户端可复位）")
-            except ApiError:
-                raise
-            except Exception:
-                pass  # is_enabled() 不可用时放行点击（维持原行为，弹窗检测兜底）
+        # （提交按钮灰显前置检查已移除，2026-10-10：实测该客户端下单按钮
+        # 在空表单/乱值下恒为红色不置灰，检查从未拦截过任何东西；「无弹窗
+        # =已提交」的假阳性改由 confirmed 与黄色横幅硬绑定根治，见结果判定）
 
         # 横幅截获线程在点击前启动：横幅出现于提交后 ~0.3-0.5s、存活 1-2s，
         # 必须与弹窗检测并行，否则 place_order 返回时横幅已消失
@@ -595,6 +579,16 @@ class Trader:
                       .get("entrust_no_timeout_seconds", 3.0)) + 0.5)
             # 全精度点击时刻随结果带出：截获失败时路由层据此做秒桶窗口回补
             result["submit_click_epoch"] = submit_click_epoch
+            # confirmed 与黄色横幅可见硬绑定（2026-10-10）：上面的弹窗推断
+            # 只作 capture 关闭时的兜底——实测客户端对非法表单走内联校验
+            # 不弹对话框、按钮也不置灰，「无弹窗=已提交」会产生假阳性
+            # （交易所无此单、资金无冻结）。黄色横幅是客户端对提交成功的
+            # 唯一主动视觉确认：不要求读出单号，横幅可见即 confirmed=True
+            result["confirmed"] = bool(capture.banner_seen)
+            if not result["confirmed"]:
+                self.logger.warning(
+                    "黄色横幅未出现，confirmed=False（订单大概率未提交；"
+                    "如需确认请查当日委托/资金冻结）")
         # 事后券商链路校验：提交序列完成但「断开」在场 → 是否送达券商未知
         # （快速交易模式在断开态下的静默行为未实测，按状态未知处理最稳妥）
         from src.services.broker_link import check_after_order

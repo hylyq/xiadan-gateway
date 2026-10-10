@@ -328,15 +328,18 @@ curl -X POST http://localhost:5000/orders \
 | Field | Description |
 |-------|-------------|
 | `action` / `mode` / `code` / `amount` / `price` | Echo of order parameters |
-| `confirmed` | `true`=submitted (in fast-trade mode, no error popup means success) |
-| `entrust_no` | Contract number. Returned only when `order.capture_entrust_no` is enabled; `null` on capture failure or when disabled. With `order.recover_entrust_no` (default on), a failed capture is retried once against today's bookings via click-time window × parameter match — adopted only on a unique hit, with `entrust_no_recovered: true` |
-| `entrust_no_verified` | Reconciliation result. Returned only when `order.verify_entrust_no` is enabled and a banner number was captured: `true`=matched in today's booked orders / `false`=still not matched after one page refresh (F5) and re-copy — the banner number may be wrong, trust the query / `null`=reconciliation query failed (order-result semantics unchanged) |
+| `confirmed` | `true`=submitted. Judged by the **yellow success banner** appearing at the bottom-right after submit (the client's only active visual confirmation of success; the entrust number need not be readable — if the banner is visible but the digits fail OCR, `entrust_no` is null and the gateway auto-recovers it from today's bookings). Banner absent (including the client's silent inline validation — no popup, button never grays) → `confirmed: false`: most likely not submitted; check today's orders / frozen funds before retrying. Falls back to the old semantics (no error popup = success) only when `order.capture_entrust_no` is disabled |
+| `entrust_no` | Contract number. Returned only when `order.capture_entrust_no` is enabled; `null` on capture failure or when disabled. With `order.recover_entrust_no` (default on), a failed capture is retried against today's bookings via click-time window × parameter match (with multi-round F5 refreshes) — adopted only on a unique hit, with `entrust_no_recovered: true`; no recovery when `confirmed: false` (banner never appeared) |
+| `entrust_no_verified` | Reconciliation result. Returned only when `order.verify_entrust_no` is enabled and a banner number was captured: `true`=matched in today's booked orders / `false`=still not matched after multi-round F5 refreshes (1/2/4s backoff) and re-copies — the banner number may be wrong or the broker list lags; trust the query / `null`=reconciliation query failed (order-result semantics unchanged) |
 
-> **`entrust_no: null` does NOT mean the order failed** — success is judged by
-> popup detection and is decoupled from banner capture. `null` means "submitted
-> (inferred), number unknown" (banner absent / occluded / window minimized).
+> **`entrust_no: null` does NOT mean the order failed** — `confirmed` is bound
+> to the yellow banner: `confirmed: true` + `entrust_no: null` = the banner
+> appeared but its digits were unreadable (submitted, number unknown).
 > **Do not retry** in that case (it would duplicate the order); if you need the
-> number, look it up via `GET /orders/pending` by code+price+amount+time.
+> number, look it up via `GET /orders/pending` by code+price+amount+time
+> (with `order.recover_entrust_no` the gateway already recovers it
+> automatically). `confirmed: false` = the banner never appeared, most likely
+> not submitted — likewise check today's orders / frozen funds first.
 > Note: under extreme conditions (broker server maintenance windows) the banner
 > number may differ from the final booked number — re-verify via the day's
 > order query before per-order operations, or enable `order.verify_entrust_no`

@@ -57,10 +57,16 @@ class EntrustNoCapture:
         self._thread = None
         self._result = None
         self._band_dumped = False
+        self._banner_seen = False
 
     @property
     def enabled(self) -> bool:
         return bool(self.config.get_order_config().get("capture_entrust_no", False))
+
+    @property
+    def banner_seen(self) -> bool:
+        """黄色横幅是否出现过（与是否读出单号解耦，join 后取值才可信）"""
+        return self._banner_seen
 
     def start(self, window) -> None:
         """提交前调用：启动后台截获线程"""
@@ -68,6 +74,7 @@ class EntrustNoCapture:
             return
         self._result = None
         self._band_dumped = False
+        self._banner_seen = False
         self._thread = threading.Thread(
             target=self._run, args=(window.handle,), daemon=True)
         self._thread.start()
@@ -132,7 +139,11 @@ class EntrustNoCapture:
         mask = ((arr[:, :, 0] > _YELLOW_R)
                 & (arr[:, :, 1] > _YELLOW_G)
                 & (arr[:, :, 2] < _YELLOW_B))
-        if int(mask.sum()) < 300:
+        if int(mask.sum()) >= 300:
+            # 黄色横幅可见 = 客户端已主动确认提交（与是否读出单号解耦，
+            # trader 据此设定 confirmed）
+            self._banner_seen = True
+        else:
             return None
         rows = np.where(mask.sum(axis=1) > 30)[0]
         cols = np.where(mask.sum(axis=0) > 5)[0]
