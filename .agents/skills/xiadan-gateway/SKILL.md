@@ -17,6 +17,9 @@ description: 操作本机同花顺 xiadan.exe 交易网关（xiadan-gateway）�
 会话内首次操作前先跑 `health`，确认 `logged_in: true`：
 
 - `false` → 告知用户登录同花顺下单程序，**不要重试交易类命令**（登录前下单必然失败）
+- `broker.connected`（券商链路态）：`true`=未观测到断开（真实断网初期有
+  ~25-45s 盲区，`true` ≠ 网络正常）/ `false`=客户端报告断开 / `null`=无法判定。
+  数据新鲜度由网关把关（断开时查询结果作废报错），无需自行判断
 - 返回中的 `config.recommended_client_timeout_seconds` 是官方推荐超时，缺省 60s 够用
 
 ## 调用方式
@@ -84,8 +87,10 @@ uv run --no-project python <skill目录>/scripts/xiadan.py <命令>
 | 错误码 | 应对 |
 |--------|------|
 | `TASK_TIMEOUT` / `TASK_TIMEOUT_RECOVERY_FAILED` | 结果未知——查单核实，禁止直接重试 |
-| `ORDER_STATE_UNKNOWN` | 下单点击后异常，订单**可能已提交**——同 TASK_TIMEOUT：查单核实；确认未提交后用**新**幂等键重试 |
+| `ORDER_STATE_UNKNOWN` | 下单点击后异常（或提交后券商断开），订单**可能已提交**——同 TASK_TIMEOUT：查单核实；确认未提交后用**新**幂等键重试 |
 | `SESSION_UNAVAILABLE` | 网关 RDP 会话断开，任务**未执行**——轮询 health `session.ui_available=true` 后同幂等键直接重试（通常 ~40s，冷却期场景最长 ~340s），无需查单 |
+| `SESSION_DESKTOP_UNAVAILABLE` | 会话挂接但桌面僵死，任务**未执行**——网关自动升级自愈（tsdiscon，独立冷却 600s），稍后重试即可，无需查单 |
+| `BROKER_DISCONNECTED` | 查询时客户端报告券商断开，取到的会是缓存旧值、已作废——**直接重试即可**：断开在场时查询前置自动 F5 戳重连（30s 防抖，重连实测 ~0.9s），网络恢复后首个成功请求即新鲜数据（断网初期有 ~25-45s 盲期，无需查单） |
 | `DUPLICATE_ORDER` | 同键重复提交被拦截——查单确认是否已提交 |
 | `PRICE_OUT_OF_RANGE` | 价格超涨跌停——向用户复核价格 |
 | `INSUFFICIENT_BALANCE` / `INSUFFICIENT_SHARES` | 资金/份额不足——报告用户 |

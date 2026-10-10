@@ -67,10 +67,15 @@ INSTRUCTIONS = """同花顺 xiadan.exe 交易网关（本服务是 HTTP API 的 
 4. 错误以 [ERROR_CODE] message 形式返回，常见码:
    DUPLICATE_ORDER=60 秒内相同参数被幂等拦截（先查委托确认是否已提交）;
    TASK_TIMEOUT=结果未知（必须查 get_today_orders 核实，不可直接重试下单）;
-   ORDER_STATE_UNKNOWN=下单点击后异常，订单可能已提交（同 TASK_TIMEOUT：先查单
-   核实；确认未提交后用新幂等键重试）;
+   ORDER_STATE_UNKNOWN=下单点击后异常或提交后券商断开，订单可能已提交（同
+   TASK_TIMEOUT：先查单核实；确认未提交后用新幂等键重试）;
+   BROKER_DISCONNECTED=查询时客户端报告券商断开，缓存旧值已作废——直接重试
+   即可：断开在场时查询前置自动 F5 戳重连（30s 防抖），网络恢复后首个成功
+   请求即新鲜数据（断网初期有 ~25-45s 盲期，无需查单）;
    SESSION_UNAVAILABLE=网关 RDP 会话断开，任务未执行（等 session 恢复后重试
    安全，通常 ~40s，无需查单）;
+   SESSION_DESKTOP_UNAVAILABLE=会话挂接但桌面僵死，任务未执行（网关自动升级
+   自愈，稍后重试即可）;
    PRICE_OUT_OF_RANGE=价格超涨跌停; INSUFFICIENT_BALANCE/SHARES=资金或份额不足;
    T1_RESTRICTION=当日买入次日才可卖; ORDER_PRICE_REQUIRED=券商要求显式价格。
 5. 网关单 worker 串行执行，任何工具耗时 2~10 秒属正常，勿因慢而并发重试。"""
@@ -174,7 +179,9 @@ client = GatewayClient()
 
 @mcp.tool()
 def gateway_health() -> str:
-    """网关健康检查：xiadan.exe 进程/登录态、队列状态、近 1 小时各错误码
+    """网关健康检查：xiadan.exe 进程/登录态、RDP 会话与桌面状态、券商链路
+    连接态（broker.connected：true=未观测到断开，但断网初期有 ~25-45s 盲区 /
+    false=客户端报告断开 / null=无法判定）、队列状态、近 1 小时各错误码
     成功率、推荐客户端超时。会话内首次操作前先调用，确认 logged_in=true。"""
     return client.call("GET", "/health")
 

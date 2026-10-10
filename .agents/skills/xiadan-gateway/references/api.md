@@ -21,6 +21,12 @@ CLI 子命令与 HTTP 端点一一对应；本文供需要理解响应字段全�
 
 > 网关另有 `/actions/*`（裸 UI 操作）、`/admin/*`（管理）、`/diagnostic/*`（诊断）、
 > `/ocr/quality`——skill 刻意不暴露，需要时由用户手动操作。
+>
+> 查询类端点自带数据新鲜度保障（2026-10-10 断网实测落地）：执行前客户端报告
+> 「断开」则先 F5 戳重连再查询——F5 全局防抖 30s（防抖窗内的调用不重复戳、
+> 也不等待），戳后轮询等「断开」清除最多 3s（实测重连 ~0.9s），超时照常查询、
+> 由后置门控兜底；结束后复查仍断开则结果作废抛 `BROKER_DISCONNECTED`。
+> 同页连续查询自第二次起先 F5 刷新再复制（复合查询如 `order-status` 耗时 +~1s）。
 
 ## health 响应字段
 
@@ -35,6 +41,12 @@ CLI 子命令与 HTTP 端点一一对应；本文供需要理解响应字段全�
   失败计数）= **挂接但僵死**：`ui_available` 假绿（会话在，桌面输入/图形
   路径死），任务会以 `SESSION_DESKTOP_UNAVAILABLE` 失败——网关自动
   tsdiscon 升级自愈（独立冷却 600s），稍后重试即可
+- `broker`：券商主站链路连接态。`connected` 三态：`true`=未观测到断开（真实
+  断网后有 **~25-45s 盲区**——`true` ≠ 网络正常）；`false`=客户端状态栏报告
+  「断开」（网络恢复后不自动清零，查询端点会前置 F5 自动戳重连）；`null`=
+  读取失败（fail-open 不拦截业务）。另有 `status_text`（状态栏诊断文本）与
+  `latency_ms`。业务端点对该信号 fail-closed：断开时查询结果作废抛
+  `BROKER_DISCONNECTED`，下单/撤单转 `ORDER_STATE_UNKNOWN`
 - `queue_status`：队列忙闲
 - `stats`：近 1 小时各错误码成功率、连续失败计数、下单弹窗统计
 - `config.recommended_client_timeout_seconds`：官方推荐客户端超时
@@ -105,7 +117,9 @@ CLI 子命令与 HTTP 端点一一对应；本文供需要理解响应字段全�
 `INSUFFICIENT_SHARES`/`INSUFFICIENT_BALANCE` 份额/资金不足；
 `SHORT_SELLING_FORBIDDEN` 不允许卖空；`PRICE_OUT_OF_RANGE` 价格超涨跌停；
 `ORDER_PRICE_REQUIRED` 券商要求显式价格（改限价）；`SERVER_UNAVAILABLE` 券商
-服务器不可用；`OCR_FAILED` 验证码识别失败；`INPUT_VERIFY_FAILED` 证券名称联动
+服务器不可用；`BROKER_DISCONNECTED` 客户端与券商主站链路断开——查询结果为
+缓存旧值已**作废**，直接重试即可（每次调用前置 F5 自动触发重连，实测网络恢复
+后 ~0.9s 自愈；真实断网后有 ~25-45s 心跳盲区）；`OCR_FAILED` 验证码识别失败；`INPUT_VERIFY_FAILED` 证券名称联动
 校验失败；`INTERNAL_ERROR` 未知异常；`QUEUE_TIMEOUT` 排队超时（任务稍后仍可能
 被执行——同幂等键重试安全）；`QUEUE_FULL` 队列已满；`SESSION_UNAVAILABLE`
 RDP 会话断开，任务**确定未执行**即被毫秒级拒绝（与 `TASK_TIMEOUT` 相反：
@@ -115,5 +129,6 @@ RDP 会话断开，任务**确定未执行**即被毫秒级拒绝（与 `TASK_TI
 一次即复位，无人值守时网关 tsdiscon 升级自愈自动处理）；`TASK_TIMEOUT` 任务超时
 恢复成功（结果未知，查单核实）；`TASK_TIMEOUT_RECOVERY_FAILED` 超时且恢复失败
 （结果未知，查单核实）；`ORDER_STATE_UNKNOWN` 下单点击提交后发生非业务异常
-（如 RDP 断开瞬间），订单**可能已提交**（结果未知，查单核实；幂等记录保留，
-同 key 重试被拦截，确认未提交后用新 key）。
+（如 RDP 断开瞬间），或下单/撤单序列完成后券商链路门控触发——订单**可能已
+提交**（结果未知，查单核实；幂等记录保留，同 key 重试被拦截，确认未提交后
+用新 key）。
