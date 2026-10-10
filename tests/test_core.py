@@ -3182,7 +3182,8 @@ class TestWindowMonitorSelfHeal:
             win32ts.WTS_CURRENT_SESSION, win32ts.WTSConnectState)
         run.assert_called_once_with(
             ["tscon", "2", "/dest:console"],
-            capture_output=True, text=True, timeout=15)
+            capture_output=True, text=True,
+            encoding="gbk", errors="replace", timeout=15)
 
     def test_session_recovery_handles_tuple_state(self, mocker):
         """状态返回为元组时取首元素（pywin32 版本差异防御）"""

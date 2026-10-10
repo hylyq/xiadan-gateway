@@ -331,9 +331,12 @@ class WindowMonitor:
             self.logger.warning(
                 f"会话持续断开已满 {debounce:.0f}s（state={state}），自愈执行: "
                 f"tscon {sid} /dest:console")
+            # tscon 报错文本随系统区域编码（部署服务器为中文版 Windows=GBK）；
+            # 显式钉死，不随 Python 3.15 UTF-8 默认化（PEP 686）漂移
             result = subprocess.run(
                 ["tscon", str(sid), "/dest:console"],
-                capture_output=True, text=True, timeout=15)
+                capture_output=True, text=True,
+                encoding="gbk", errors="replace", timeout=15)
             self._last_session_recovery = time.time()
             self._disconnected_since = None  # 本次断开事件已处理，下次断开重新防抖
             if result.returncode == 0:
@@ -395,9 +398,11 @@ class WindowMonitor:
                 f"检测到桌面僵死（会话挂接正常 state={state_name(state)}，"
                 f"连续 {wedge['streak']} 次桌面级激活失败），自愈升级: "
                 f"tsdiscon {sid}（RDP 断开-重连周期复位输入栈）")
+            # 同 tscon：报错文本随系统区域编码，显式钉死 GBK（PEP 686 前向兼容）
             result = subprocess.run(
                 ["tsdiscon", str(sid)],
-                capture_output=True, text=True, timeout=15)
+                capture_output=True, text=True,
+                encoding="gbk", errors="replace", timeout=15)
             if result.returncode == 0:
                 self.logger.info(
                     "tsdiscon 执行成功——有客户端时等待其自动重连（秒级），"

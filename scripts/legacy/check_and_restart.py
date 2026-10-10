@@ -40,7 +40,7 @@ if not xiadan:
     print("  xiadan.exe 未运行")
     config_path = r"c:\Users\Marvin\xiadan-gateway\config\app_config.json"
     import json
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         cfg = json.load(f)
     exe_path = cfg.get("trading", {}).get("app_path", "")
     if exe_path and os.path.exists(exe_path):
