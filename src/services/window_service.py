@@ -938,6 +938,85 @@ class WindowService(Singleton):
             win32gui.PostMessage(hwnd, win32con.WM_KEYUP, vk, 0)
             time.sleep(delay)
 
+    def _force_foreground_via_attach(self, hwnd: int) -> None:
+        """AttachThreadInput 绕 Windows 前台锁（无鼠标、无按键、无可见副作用）
+
+        前台锁：未收到最近输入的进程调 SetForegroundWindow 会被系统静默
+        拒绝。本方法把自身线程临时挂接到当前前台线程的输入队列（共享输入
+        状态），使这次 SetForegroundWindow 视同前台进程自身调用。用完立即
+        解除挂接；挂接失败仅记日志（上层还有标题栏单击兜底，见
+        _activate_window_before_keybd 分层说明）。
+        """
+        try:
+            fg = win32gui.GetForegroundWindow()
+            tid_self = win32api.GetCurrentThreadId()
+            tid_fg = win32process.GetWindowThreadProcessId(fg)[0] if fg else 0
+            attached = False
+            if tid_fg and tid_fg != tid_self:
+                attached = bool(
+                    win32process.AttachThreadInput(tid_self, tid_fg, True))
+            try:
+                win32gui.SetForegroundWindow(hwnd)
+            finally:
+                if attached:
+                    win32process.AttachThreadInput(tid_self, tid_fg, False)
+            time.sleep(0.1)
+        except Exception as e:
+            self.logger.warning(
+                f"AttachThreadInput 激活未成功（交由标题栏单击兜底）: {e}")
+
+    def _title_bar_click_point(self, hwnd: int) -> Optional[tuple]:
+        """计算标题栏中部点击坐标（click_input 相对坐标）；不可达返回 None
+
+        坐标基准（2026-10-10 源码核实 base_wrapper.click_input）：coords
+        经 client_to_screen 换算，原点是**客户区左上角**——不是窗口外框
+        左上角！客户区原点在标题栏下方，因此标题栏点的客户区相对 y 是
+        负值（若按「外框顶部内缩 8px」直写 coords，会点到标题栏下方
+        客户区顶部的菜单栏/工具栏区域）。本方法返回的相对坐标已按
+        ClientToScreen 基准换算。
+
+        可达判定：绝对落点必须落在窗口所在显示器的**工作区**内——工作区
+        之外是任务栏/屏幕外，点击会命中任务栏图标（可切走其他应用）或
+        落空。注意 ensure_window_onscreen 按「可见比例」判定，标题栏单独
+        出屏（如窗口上缘拖出顶部）时比例仍达标、不会移窗，必须在此显式
+        校验；不可达时先强制移回工作区中心再算一次，仍失败返回 None
+        （调用方绝不在未知区域盲点，按激活失败处理）。
+        """
+        try:
+            self.ensure_window_onscreen(hwnd)
+            monitor = win32api.MonitorFromWindow(
+                hwnd, win32con.MONITOR_DEFAULTTONEAREST)
+            work = win32api.GetMonitorInfo(monitor)["Work"]
+            for _ in range(2):
+                left, top, right, _bottom = win32gui.GetWindowRect(hwnd)
+                # 目标屏幕点：窗口外框水平中心（DWM 左右隐形边框对称，
+                # 中心与客户区中心一致）、顶部内缩 8px（必在标题栏内）
+                sx = left + (right - left) // 2
+                sy = top + 8
+                if work[0] <= sx <= work[2] and work[1] <= sy <= work[3]:
+                    # 屏幕点 → 客户区相对坐标（click_input 的换算基准）
+                    ccx, ccy = win32gui.ClientToScreen(hwnd, (0, 0))
+                    return (sx - ccx, sy - ccy)
+                # 标题栏仍在工作区外（典型：窗口上缘拖出屏幕顶部）：
+                # 强制把窗口移回工作区中心（保持大小），再验一次
+                self.logger.warning(
+                    f"标题栏落点 ({sx},{sy}) 在工作区 {work} 之外，"
+                    f"强制移回工作区中心后重试"
+                )
+                rect = win32gui.GetWindowRect(hwnd)
+                win_w, win_h = rect[2] - rect[0], rect[3] - rect[1]
+                new_x = work[0] + (work[2] - work[0] - win_w) // 2
+                new_y = work[1] + (work[3] - work[1] - win_h) // 2
+                win32gui.SetWindowPos(
+                    hwnd, 0, new_x, new_y, 0, 0,
+                    win32con.SWP_NOSIZE | win32con.SWP_NOZORDER
+                    | win32con.SWP_NOACTIVATE)
+                time.sleep(0.1)
+            return None
+        except Exception as e:
+            self.logger.warning(f"计算标题栏点击点失败: {e}")
+            return None
+
     def _activate_window_before_keybd(self, keys: str) -> None:
         """发送前台按键前确保交易窗口在前台（避免泄漏到桌面/其他窗口）
 
@@ -945,10 +1024,15 @@ class WindowService(Singleton):
         将按键发送到当前前台窗口。如果交易窗口不在前台，F1 会触发
         Windows 帮助（打开 Edge），造成用户描述的问题。
 
-        防御逻辑：
+        防御逻辑（分层激活，2026-10-10 改造——能不动鼠标就不动鼠标）：
         1. 获取交易窗口
         2. 如果窗口被最小化，先 ShowWindow(SW_RESTORE) 恢复
-        3. click_input() 强制带到前台
+        3. 层1 UIA set_focus()（纯 API）→ 层2 AttachThreadInput 绕前台锁
+           （仍无鼠标）→ 层3 标题栏中部单击（唯一鼠标兜底，单击语义只有
+           「激活」：click_input 原地按下-释放无位移故无拖动、单击故无最大
+           化，标准 win32 边框下该区域不可能有客户端控件，居中弹窗也够不到。
+           旧「窗口中心盲点」已废弃——800×600 下落在「买入数量」上键致
+           数量 0→100，历史上还有落在弹窗按钮上的记录）
         4. GetForegroundWindow() 句柄级校验（最多 2 次重试）
         5. 校验通过后才用 keybd_event 发送按键
         6. 窗口未找到或激活失败，**禁止发送按键**
@@ -979,15 +1063,37 @@ class WindowService(Singleton):
                 self.logger.warning(f"恢复最小化窗口失败: {e}")
                 # 继续尝试 click_input，这可能通过点击任务栏按钮恢复
 
-        # click_input 带到前台 + 句柄级校验
+        # 分层激活 + 句柄级校验（层3 点击前先确保窗口完整在屏：
+        # click_input 按屏幕坐标工作，部分出屏会落空）
+        self.ensure_window_onscreen(hwnd)
         last_exc: Optional[Exception] = None
         for attempt in range(2):
             try:
-                window.click_input()
+                # 层1: UIA set_focus（纯 API，无鼠标）
+                window.set_focus()
+                if win32gui.GetForegroundWindow() == hwnd:
+                    break
+                # 层2: AttachThreadInput 绕前台锁（仍无鼠标、无客户端副作用）
+                self._force_foreground_via_attach(hwnd)
+                if win32gui.GetForegroundWindow() == hwnd:
+                    break
+                # 层3: 标题栏中部单击（唯一鼠标兜底；坐标取窗口顶部内缩 8px，
+                # 任何分辨率/DPI 下都在标题栏内且远离图标与控制按钮）。
+                # 落点必须落在工作区内（出屏自愈 + 显式校验 + 必要时强制移回）；
+                # 标题栏不可达时绝不盲点未知区域——抛错走激活失败路径，
+                # 禁止发送按键
+                click_rel = self._title_bar_click_point(hwnd)
+                if click_rel is None:
+                    raise ApiError(
+                        ErrorCode.WINDOW_NOT_FOUND,
+                        f"标题栏不可达（窗口出屏且自动移回失败），"
+                        f"无法安全激活交易窗口，禁止发送按键 '{keys}'。"
+                    )
+                window.click_input(coords=click_rel)
                 time.sleep(0.3)
             except Exception as e:
                 last_exc = e
-                self.logger.warning(f"click_input 失败 (attempt {attempt + 1}): {e}")
+                self.logger.warning(f"激活动作失败 (attempt {attempt + 1}): {e}")
                 continue
 
             if win32gui.GetForegroundWindow() == hwnd:
