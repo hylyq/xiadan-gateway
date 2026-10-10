@@ -31,6 +31,7 @@ from pywinauto import Desktop
 
 from src.constants import TRADING_WINDOW_TITLE
 from src.exceptions import ApiError, ErrorCode
+from src.utils.logger import Logger
 from src.utils.uia import safe_text
 
 _TIME_PATTERN = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
@@ -163,12 +164,14 @@ def ensure_connected_or_discard(action: str) -> dict:
     """
     link = read_broker_link()
     if link["connected"] is False:
+        Logger.get_instance().warning(
+            f"券商链路断开，{action}结果已作废: {link.get('status_text')!r}")
         raise ApiError(
             ErrorCode.BROKER_DISCONNECTED,
             f"{action}已完成，但客户端报告券商连接断开——返回的将是缓存旧值，已作废",
             suggestion=("直接重试即可：每次调用都会触发客户端重连尝试，"
-                        "网络恢复后的首个请求即返回新鲜数据"
-                        "（注意断网初期有 ~25-30s 盲期，客户端自身未察觉）"),
+                        "网络恢复后的首个成功请求即返回新鲜数据"
+                        "（注意断网初期有 ~25-45s 盲期，客户端自身未察觉）"),
             details={"broker_link": link})
     return link
 
@@ -182,6 +185,8 @@ def check_after_order(action: str, suggestion: str = None,
     """
     link = read_broker_link()
     if link["connected"] is False:
+        Logger.get_instance().warning(
+            f"{action}后客户端报告券商断连，转状态未知: {link.get('status_text')!r}")
         raise ApiError(
             ErrorCode.ORDER_STATE_UNKNOWN,
             f"{action}序列已完成，但客户端报告券商连接断开——"
